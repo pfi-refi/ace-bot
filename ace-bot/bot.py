@@ -3,23 +3,29 @@ Ace — Brady McGraw's Telegram business advisor bot.
 Sends a morning briefing every weekday at 9:30 AM ET with live
 Google Calendar events and Gmail unread summary, then calls Claude
 to produce a prioritised daily brief.
+
+v4: Active memory via Google Drive — learns how Brady operates over time.
+Note: memory requires drive.file scope in Google OAuth token (see re-auth instructions).
 """
 
+import io
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     level=logging.INFO,
@@ -29,6 +35,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 EASTERN = pytz.timezone("America/New_York")
 AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID — security filter
+MEMORY_FILE_NAME = "ace_memory.json"
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -47,6 +54,107 @@ def get_google_creds() -> Credentials:
         creds.refresh(Request())
         logger.info("Google credentials refreshed.")
     return creds
+
+
+# ── Memory (Google Drive) ─────────────────────────────────────────────────────
+
+def read_memory() -> list:
+    """Read Ace's memory list from Google Drive. Returns [] if unavailable."""
+    try:
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+
+        results = service.files().list(
+            q=f"name='{MEMORY_FILE_NAME}' and trashed=false",
+            spaces="drive",
+            fields="files(id, name)",
+        ).execute()
+
+        files = results.get("files", [])
+        if not files:
+            return []
+
+        file_id = files[0]["id"]
+        raw = service.files().get_media(fileId=file_id).execute()
+        data = json.loads(raw)
+        return data.get("memories", [])
+
+    except Exception as e:
+        err = str(e)
+        if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
+            logger.warning("Drive scope not yet active — memory inactive until re-auth.")
+        else:
+            logger.error("Memory read error: %s", e)
+        return []
+
+
+def write_memory(memories: list) -> bool:
+    """Write memory list to Google Drive (create or update ace_memory.json)."""
+    try:
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+
+        payload = json.dumps({"memories": memories}, indent=2).encode()
+        media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json")
+
+        results = service.files().list(
+            q=f"name='{MEMORY_FILE_NAME}' and trashed=false",
+            spaces="drive",
+            fields="files(id)",
+        ).execute()
+        files = results.get("files", [])
+
+        if files:
+            service.files().update(fileId=files[0]["id"], media_body=media).execute()
+        else:
+            service.files().create(
+                body={"name": MEMORY_FILE_NAME},
+                media_body=media,
+                fields="id",
+            ).execute()
+
+        logger.info("Memory written (%d items).", len(memories))
+        return True
+
+    except Exception as e:
+        err = str(e)
+        if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
+            logger.warning("Drive scope not yet active — cannot write memory.")
+        else:
+            logger.error("Memory write error: %s", e)
+        return False
+
+
+def _merge_memories(new_items: list, existing: list) -> list:
+    """Ask Claude to merge new facts into existing memory, deduplicating cleanly."""
+    if not new_items:
+        return existing
+
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    existing_str = "\n".join(f"- {m}" for m in existing) or "(none yet)"
+    new_str = "\n".join(f"- {m}" for m in new_items)
+
+    prompt = (
+        "You maintain Ace's operational memory about Brady McGraw (PFI Marketing Director).\n\n"
+        f"EXISTING MEMORY:\n{existing_str}\n\n"
+        f"NEW ITEMS TO ADD:\n{new_str}\n\n"
+        "Merge the new items into the existing memory. Rules:\n"
+        "1. Remove exact or near-duplicate facts\n"
+        "2. If new info contradicts old, keep the newer version\n"
+        "3. Keep entries concise (one fact per line, ~15 words max)\n"
+        "4. Max 60 total entries — drop least relevant if over\n"
+        "5. Return ONLY the final merged list, one item per line, no bullets or numbering"
+    )
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
+    return merged
 
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
@@ -111,7 +219,7 @@ def get_calendar_events() -> str:
         return "⚠️ Could not load calendar."
 
 
-# ── Gmail ─────────────────────────────────────────────────────────────────────
+# ── Gmail ──────────────────────────────────────────────────────────────────────
 
 def get_gmail_summary() -> str:
     """Pull recent unread priority emails from Gmail (excludes promos/social)."""
@@ -159,9 +267,20 @@ def get_gmail_summary() -> str:
         return "⚠️ Could not load emails."
 
 
-# ── Claude ────────────────────────────────────────────────────────────────────
+# ── Claude ─────────────────────────────────────────────────────────────────────
 
-def _call_claude(messages: list, max_tokens: int = 700) -> str:
+SYSTEM_PROMPT = (
+    "You are Ace, Brady McGraw's sharp, concise business advisor. "
+    "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
+    "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
+    "He leads ~18 licensed insurance and financial services agents. "
+    "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
+    "CRM: GoHighLevel. "
+    "Keep briefings tight, direct, and actionable — wealth-advisor tone."
+)
+
+
+def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> str:
     """Call the Claude API and return the text response."""
     import anthropic  # imported here to avoid top-level startup cost
 
@@ -169,24 +288,16 @@ def _call_claude(messages: list, max_tokens: int = 700) -> str:
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=max_tokens,
-        system=(
-            "You are Ace, Brady McGraw's sharp, concise business advisor. "
-            "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
-            "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
-            "He leads ~18 licensed insurance and financial services agents. "
-            "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
-            "CRM: GoHighLevel. "
-            "Keep briefings tight, direct, and actionable — wealth-advisor tone."
-        ),
+        system=system or SYSTEM_PROMPT,
         messages=messages,
     )
     return response.content[0].text
 
 
-# ── Morning brief ─────────────────────────────────────────────────────────────
+# ── Morning brief ──────────────────────────────────────────────────────────────
 
 def build_morning_brief() -> str:
-    """Generate today's morning brief using live Calendar and Gmail data."""
+    """Generate today's morning brief using live Calendar, Gmail, and memory data."""
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
     weekday = now_et.weekday()  # 0=Mon … 4=Fri
@@ -194,6 +305,7 @@ def build_morning_brief() -> str:
     # Pull live data
     calendar_data = get_calendar_events()
     email_data = get_gmail_summary()
+    memories = read_memory()
 
     # Day-specific reminders
     day_reminders = {
@@ -205,18 +317,25 @@ def build_morning_brief() -> str:
     }
     day_note = day_reminders.get(weekday, "")
 
+    # Include memory context if available
+    memory_section = ""
+    if memories:
+        memory_str = "\n".join(f"• {m}" for m in memories)
+        memory_section = f"\n📋 What I know about how Brady operates:\n{memory_str}\n"
+
     prompt = (
         f"Generate a morning briefing for Brady for {day_str}.\n\n"
         "LIVE DATA PULLED FROM HIS ACCOUNTS:\n"
         f"📅 Today's calendar:\n{calendar_data}\n\n"
         f"📧 Unread priority emails:\n{email_data}\n\n"
-        f"📋 Day context: {day_note}\n\n"
+        f"📌 Day context: {day_note}\n"
+        f"{memory_section}\n"
         "Based on the real data above, give Brady:\n"
         "1. A brief warm opener (1 sentence)\n"
         "2. 🎯 Top 3 Focuses — the 3 most important things to act on today, based on his calendar and emails\n"
         "3. 📅 Calendar — clean list of his meetings/events today\n"
         "4. 📧 Attention — emails that need a reply or action (if any)\n"
-        "5. 📋 Reminders — any standing day-of-week reminders relevant to PFI operations\n"
+        "5. 📌 Reminders — any standing day-of-week reminders relevant to PFI operations\n"
         "6. A one-line motivational close\n\n"
         "Format with clear emoji section headers. Keep it tight — under 400 words total. "
         "Lead with what matters most. No fluff."
@@ -225,23 +344,26 @@ def build_morning_brief() -> str:
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=700)
 
 
-# ── Security check ────────────────────────────────────────────────────────────
+# ── Security check ─────────────────────────────────────────────────────────────
 
 def _is_authorized(update: Update) -> bool:
     return update.effective_chat.id == AUTHORIZED_USER_ID
 
 
-# ── Command handlers ──────────────────────────────────────────────────────────
+# ── Command handlers ───────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
     await update.message.reply_text(
-        "👋 Ace is online.\n\n"
+        "🤖 Ace is online.\n\n"
         "Commands:\n"
         "  /brief — morning briefing right now\n"
+        "  /remember <fact> — teach me something to keep in mind\n"
+        "  /memory — see what I know about how you operate\n"
         "  /status — check that I'm running\n"
         "  /help — show this message\n\n"
+        "You can also just text me anything — I'll respond and remember what matters.\n\n"
         "Automated brief fires at 9:30 AM ET, Mon–Fri."
     )
 
@@ -252,8 +374,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Ace commands:\n"
         "  /brief — on-demand morning brief (live calendar + email)\n"
+        "  /remember <fact> — store a fact in my memory\n"
+        "  /memory — view my current memory\n"
         "  /status — confirm the bot is alive\n"
-        "  /help — this message"
+        "  /help — this message\n\n"
+        "Or just text me — I'll respond and remember anything useful."
     )
 
 
@@ -269,18 +394,118 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"⚠️ Error generating brief: {e}")
 
 
+async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explicitly store a fact in Ace's memory."""
+    if not _is_authorized(update):
+        return
+
+    text = update.message.text.replace("/remember", "").strip()
+    if not text:
+        await update.message.reply_text(
+            "Tell me what to remember — e.g.\n/remember Team call moves to 10am on Mondays"
+        )
+        return
+
+    await update.message.reply_text("📝 Got it — storing that…")
+    existing = read_memory()
+    merged = _merge_memories([text], existing)
+
+    if write_memory(merged):
+        await update.message.reply_text(f"✅ Remembered. I now have {len(merged)} things in memory.")
+    else:
+        await update.message.reply_text(
+            "⚠️ Memory not yet active — Drive scope needed.\n"
+            "Run the auth script on your Mac with the updated scopes to activate."
+        )
+
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current memory contents."""
+    if not _is_authorized(update):
+        return
+
+    memories = read_memory()
+    if not memories:
+        await update.message.reply_text(
+            "🧠 Memory is empty or not yet activated.\n\n"
+            "To activate: re-run ace_auth.py on your Mac with drive.file scope added, "
+            "then update GOOGLE_TOKEN_JSON in Railway.\n\n"
+            "Once active, teach me things with /remember or just text me."
+        )
+        return
+
+    lines = "\n".join(f"{i+1}. {m}" for i, m in enumerate(memories))
+    await update.message.reply_text(
+        f"🧠 What I know about how you operate ({len(memories)} items):\n\n{lines}"
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
     now_et = datetime.now(EASTERN)
+    memories = read_memory()
+    memory_status = f"{len(memories)} items stored" if memories else "not yet activated"
     await update.message.reply_text(
         f"✅ Ace is running.\n"
         f"Current time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
-        f"Auto-brief: 9:30 AM ET, Mon–Fri"
+        f"Auto-brief: 9:30 AM ET, Mon–Fri\n"
+        f"Memory: {memory_status}"
     )
 
 
-# ── Scheduler job ─────────────────────────────────────────────────────────────
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle free-form text — Brady can chat with Ace, and Ace learns from it."""
+    if not _is_authorized(update):
+        return
+
+    user_text = update.message.text.strip()
+    if not user_text:
+        return
+
+    # Build system prompt with current memory context
+    memories = read_memory()
+    memory_context = ""
+    if memories:
+        memory_str = "\n".join(f"• {m}" for m in memories)
+        memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
+
+    system_with_memory = (
+        SYSTEM_PROMPT
+        + memory_context
+        + "\n\nRespond to Brady's message directly and helpfully. "
+        "If this message reveals something worth remembering for future briefings "
+        "(a schedule change, business priority, preference, team update, etc.), "
+        "append it at the very end of your reply using exactly this format:\n"
+        "[MEMORY: brief fact to remember]\n"
+        "Include 0–3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
+    )
+
+    try:
+        response = _call_claude(
+            [{"role": "user", "content": user_text}],
+            max_tokens=500,
+            system=system_with_memory,
+        )
+
+        # Parse and strip memory tags from visible response
+        memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', response)
+        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response).strip()
+
+        await update.message.reply_text(clean_response)
+
+        # Store new memories if any were tagged
+        if memory_tags:
+            merged = _merge_memories(memory_tags, memories)
+            if write_memory(merged):
+                logger.info("Stored %d new memory item(s) from conversation.", len(memory_tags))
+
+    except Exception as e:
+        logger.error("Message handler error: %s", e)
+        await update.message.reply_text(f"⚠️ Error: {e}")
+
+
+# ── Scheduler job ──────────────────────────────────────────────────────────────
 
 async def send_morning_brief(app: Application) -> None:
     """Scheduled job — build the brief and push to Brady's chat."""
@@ -300,7 +525,7 @@ async def send_morning_brief(app: Application) -> None:
             pass
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -310,7 +535,12 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("remember", cmd_remember))
+    app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("status", cmd_status))
+
+    # Free-text conversation handler (learns from every message)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Scheduler — 9:30 AM ET, Mon–Fri
     scheduler = AsyncIOScheduler(timezone=EASTERN)
