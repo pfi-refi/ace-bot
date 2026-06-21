@@ -1,263 +1,318 @@
 """
 Ace — Brady McGraw's Telegram business advisor bot.
-Sends a morning briefing every weekday at 9:30 AM ET and responds to messages all day.
+Sends a morning briefing every weekday at 9:30 AM ET with live
+Google Calendar events and Gmail unread summary, then calls Claude
+to produce a prioritised daily brief.
 """
 
-import asyncio
+import json
 import logging
 import os
-import signal
-from collections import deque
 from datetime import datetime
 
-import anthropic
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ChatAction
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-from system_prompt import BRADY_SYSTEM_PROMPT
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
-# ── Load env ──────────────────────────────────────────────────────────────────
-load_dotenv()
-
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
-BRADY_CHAT_ID      = int(os.environ["BRADY_CHAT_ID"])
-
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ── Claude client ─────────────────────────────────────────────────────────────
-claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-MODEL       = "claude-sonnet-4-6"   # falls back to claude-sonnet-4-5 on NotFoundError
-MAX_HISTORY = 10                    # conversation pairs kept in memory
+# ── Constants ─────────────────────────────────────────────────────────────────
+EASTERN = pytz.timezone("America/New_York")
+AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID — security filter
 
-# ── Conversation history (in-memory, per session) ─────────────────────────────
-# List of {"role": "user"/"assistant", "content": "..."}
-# deque auto-drops oldest when exceeding MAX_HISTORY * 2 messages
-conversation_history: deque = deque(maxlen=MAX_HISTORY * 2)
+# ── Google auth ───────────────────────────────────────────────────────────────
 
-# ── Timezone ──────────────────────────────────────────────────────────────────
-EASTERN = pytz.timezone("US/Eastern")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def is_authorized(update: Update) -> bool:
-    """Only respond to Brady's chat ID."""
-    return update.effective_chat.id == BRADY_CHAT_ID
-
-
-def build_messages() -> list[dict]:
-    """Return conversation history as a list for the Claude API."""
-    return list(conversation_history)
+def get_google_creds() -> Credentials:
+    """Build Google OAuth credentials from Railway env vars, refreshing if expired."""
+    token_data = json.loads(os.environ.get("GOOGLE_TOKEN_JSON", "{}"))
+    creds = Credentials(
+        token=token_data.get("token"),
+        refresh_token=token_data.get("refresh_token"),
+        token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+        client_id=token_data.get("client_id"),
+        client_secret=token_data.get("client_secret"),
+        scopes=token_data.get("scopes"),
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        logger.info("Google credentials refreshed.")
+    return creds
 
 
-def _call_claude(messages: list[dict], max_tokens: int = 1024) -> str:
-    """Call Claude with automatic model fallback. Returns reply text."""
+# ── Calendar ──────────────────────────────────────────────────────────────────
+
+def get_calendar_events() -> str:
+    """Pull today's events from ALL Google Calendar calendars."""
     try:
-        response = claude.messages.create(
-            model=MODEL,
-            max_tokens=max_tokens,
-            system=BRADY_SYSTEM_PROMPT,
-            messages=messages,
-        )
-        return response.content[0].text
-    except anthropic.NotFoundError:
-        logger.warning("%s not found — falling back to claude-sonnet-4-5", MODEL)
-        response = claude.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            system=BRADY_SYSTEM_PROMPT,
-            messages=messages,
-        )
-        return response.content[0].text
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+
+        now_et = datetime.now(EASTERN)
+        start_of_day = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = now_et.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        calendars_result = service.calendarList().list().execute()
+        calendars = calendars_result.get("items", [])
+
+        all_events = []
+        seen_ids: set = set()
+
+        for calendar in calendars:
+            cal_id = calendar["id"]
+            cal_name = calendar.get("summary", cal_id)
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=start_of_day.isoformat(),
+                    timeMax=end_of_day.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                ).execute()
+                for event in events_result.get("items", []):
+                    event_id = event.get("id", "")
+                    if event_id in seen_ids:
+                        continue
+                    seen_ids.add(event_id)
+
+                    summary = event.get("summary", "No title")
+                    start = event.get("start", {})
+                    start_dt_str = start.get("dateTime", start.get("date", ""))
+
+                    if "T" in start_dt_str:
+                        dt = datetime.fromisoformat(start_dt_str)
+                        if dt.tzinfo:
+                            dt = dt.astimezone(EASTERN)
+                        time_str = dt.strftime("%-I:%M %p")
+                    else:
+                        time_str = "All day"
+
+                    all_events.append((start_dt_str, f"• {time_str} — {summary}"))
+            except Exception as e:
+                logger.warning("Error fetching calendar '%s': %s", cal_name, e)
+
+        all_events.sort(key=lambda x: x[0])
+
+        if all_events:
+            return "\n".join(ev[1] for ev in all_events)
+        return "Nothing scheduled today."
+
+    except Exception as e:
+        logger.error("Calendar fetch error: %s", e)
+        return "⚠️ Could not load calendar."
 
 
-def ask_claude(user_message: str) -> str:
-    """Send a message to Claude with full conversation history. Returns reply."""
-    conversation_history.append({"role": "user", "content": user_message})
+# ── Gmail ─────────────────────────────────────────────────────────────────────
 
+def get_gmail_summary() -> str:
+    """Pull recent unread priority emails from Gmail (excludes promos/social)."""
     try:
-        reply = _call_claude(build_messages())
-    except anthropic.APIError as e:
-        logger.error("Claude API error: %s", e)
-        reply = "⚠️ API error — check logs. Try again in a moment."
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
 
-    conversation_history.append({"role": "assistant", "content": reply})
-    return reply
+        results = service.users().messages().list(
+            userId="me",
+            q="is:unread newer_than:1d -category:promotions -category:social",
+            maxResults=10,
+        ).execute()
 
+        messages = results.get("messages", [])
+        if not messages:
+            return "Inbox clear — no unread priority emails."
+
+        email_lines = []
+        for msg in messages[:5]:
+            msg_data = service.users().messages().get(
+                userId="me",
+                id=msg["id"],
+                format="metadata",
+                metadataHeaders=["From", "Subject"],
+            ).execute()
+            headers = {
+                h["name"]: h["value"]
+                for h in msg_data.get("payload", {}).get("headers", [])
+            }
+            subject = headers.get("Subject", "No subject")[:60]
+            sender = headers.get("From", "Unknown")
+            if "<" in sender:
+                sender = sender.split("<")[0].strip().strip('"')
+            sender = sender[:30]
+            email_lines.append(f"• {sender}: {subject}")
+
+        count = len(messages)
+        if count > 5:
+            email_lines.append(f"  …and {count - 5} more unread")
+
+        return "\n".join(email_lines)
+
+    except Exception as e:
+        logger.error("Gmail fetch error: %s", e)
+        return "⚠️ Could not load emails."
+
+
+# ── Claude ────────────────────────────────────────────────────────────────────
+
+def _call_claude(messages: list, max_tokens: int = 700) -> str:
+    """Call the Claude API and return the text response."""
+    import anthropic  # imported here to avoid top-level startup cost
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=(
+            "You are Ace, Brady McGraw's sharp, concise business advisor. "
+            "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
+            "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
+            "He leads ~18 licensed insurance and financial services agents. "
+            "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
+            "CRM: GoHighLevel. Lead Division runs Tuesday–Friday. "
+            "Keep briefings tight, direct, and actionable — wealth-advisor tone."
+        ),
+        messages=messages,
+    )
+    return response.content[0].text
+
+
+# ── Morning brief ─────────────────────────────────────────────────────────────
 
 def build_morning_brief() -> str:
-    """Generate today's morning brief via Claude."""
-    now_et  = datetime.now(EASTERN)
-    day_str = now_et.strftime("%A, %B %-d")   # e.g. "Monday, June 23"
-    weekday = now_et.weekday()                 # 0=Mon … 4=Fri
+    """Generate today's morning brief using live Calendar and Gmail data."""
+    now_et = datetime.now(EASTERN)
+    day_str = now_et.strftime("%A, %B %-d")
+    weekday = now_et.weekday()  # 0=Mon … 4=Fri
 
-    # Day-specific standing reminders
-    reminders: list[str] = []
-    if weekday == 1:   # Tuesday
-        reminders.append("📲 Lead Division starts today — runs Tue–Fri")
-    elif weekday == 2:  # Wednesday
-        reminders.append("📲 Lead Division running")
-        reminders.append("📞 Team training call tonight at 8 PM ET — prep recognition + skill topic")
-    elif weekday == 3:  # Thursday
-        reminders.append("📲 Lead Division running")
-    elif weekday == 4:  # Friday
-        reminders.append("📲 Lead Division — last day of the week")
-        reminders.append("📊 Good day to review weekly numbers before the weekend")
+    # Pull live data
+    calendar_data = get_calendar_events()
+    email_data = get_gmail_summary()
 
-    reminder_block = "\n".join(reminders) if reminders else "No standing reminders for today."
+    # Day-specific reminders
+    day_reminders = {
+        0: "Monday — Lead Division dark today. Focus on team training, pipeline review, and admin.",
+        1: "Tuesday — Lead Division LIVE. Prioritise new lead follow-up and appointment setting.",
+        2: "Wednesday — Lead Division LIVE. Mid-week pulse check on team activity.",
+        3: "Thursday — Lead Division LIVE. Push for end-of-week appointment closes.",
+        4: "Friday — Lead Division LIVE. Wrap the week strong; prep Monday game plan.",
+    }
+    day_note = day_reminders.get(weekday, "")
 
     prompt = (
-        f"Generate a morning briefing for Brady for {day_str}. "
-        "Give him his top 3 most important focuses for TODAY — concrete and action-oriented, "
-        "based on his current priorities (1-on-1s with Caleb/Lincoln/Walter, Nina training, "
-        "Eli re-engagement, Indeed audit, recruit outreach, local event commitment, workshop planning). "
-        "Keep it short and scannable — this is a Telegram message, not a report. "
-        "Output EXACTLY this format, filling in the sections:\n\n"
-        f"☀️ Good morning Brady — here's your Ace brief for {day_str}\n\n"
-        "🎯 Top 3 focuses for today:\n"
-        "1. [focus]\n"
-        "2. [focus]\n"
-        "3. [focus]\n\n"
-        f"📋 Reminders:\n{reminder_block}\n\n"
-        "💬 Message me anything — deals, ideas, team questions, prioritization. I've got you."
+        f"Generate a morning briefing for Brady for {day_str}.\n\n"
+        "LIVE DATA PULLED FROM HIS ACCOUNTS:\n"
+        f"📅 Today's calendar:\n{calendar_data}\n\n"
+        f"📧 Unread priority emails:\n{email_data}\n\n"
+        f"📋 Day context: {day_note}\n\n"
+        "Based on the real data above, give Brady:\n"
+        "1. A brief warm opener (1 sentence)\n"
+        "2. 🎯 Top 3 Focuses — the 3 most important things to act on today, based on his calendar and emails\n"
+        "3. 📅 Calendar — clean list of his meetings/events today\n"
+        "4. 📧 Attention — emails that need a reply or action (if any)\n"
+        "5. 📋 Reminders — any standing day-of-week reminders relevant to PFI operations\n"
+        "6. A one-line motivational close\n\n"
+        "Format with clear emoji section headers. Keep it tight — under 400 words total. "
+        "Lead with what matters most. No fluff."
     )
 
-    try:
-        return _call_claude([{"role": "user", "content": prompt}], max_tokens=512)
-    except anthropic.APIError as e:
-        logger.error("Claude API error in morning brief: %s", e)
-        return (
-            f"☀️ Good morning Brady — here's your Ace brief for {day_str}\n\n"
-            "⚠️ Couldn't reach Claude for today's brief. Check API key / connectivity.\n\n"
-            f"📋 Reminders:\n{reminder_block}\n\n"
-            "💬 Message me anything — I've got you."
-        )
+    return _call_claude([{"role": "user", "content": prompt}], max_tokens=700)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULED JOB
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Security check ────────────────────────────────────────────────────────────
 
-async def send_morning_brief(application: Application) -> None:
-    """APScheduler job: send morning brief to Brady at 9:30 AM ET Mon–Fri."""
-    logger.info("Generating morning brief…")
-    brief = build_morning_brief()
-    try:
-        await application.bot.send_message(chat_id=BRADY_CHAT_ID, text=brief)
-        logger.info("Morning brief sent.")
-    except Exception as e:
-        logger.error("Failed to send morning brief: %s", e)
+def _is_authorized(update: Update) -> bool:
+    return update.effective_chat.id == AUTHORIZED_USER_ID
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COMMAND HANDLERS
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Command handlers ──────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start — welcome message."""
-    if not is_authorized(update):
+    if not _is_authorized(update):
         return
     await update.message.reply_text(
-        "👋 Hey Brady — Ace is online.\n\n"
-        "I'll send you a morning brief every weekday at 9:30 AM ET. "
-        "Message me anytime for prioritization, deal questions, team stuff, or strategy.\n\n"
+        "👋 Ace is online.\n\n"
         "Commands:\n"
-        "/brief — trigger a manual brief right now\n"
-        "/reset — clear conversation history\n\n"
-        "What do you need?"
+        "  /brief — morning briefing right now\n"
+        "  /status — check that I'm running\n"
+        "  /help — show this message\n\n"
+        "Automated brief fires at 9:30 AM ET, Mon–Fri."
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_authorized(update):
+        return
+    await update.message.reply_text(
+        "Ace commands:\n"
+        "  /brief — on-demand morning brief (live calendar + email)\n"
+        "  /status — confirm the bot is alive\n"
+        "  /help — this message"
     )
 
 
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/brief — manually trigger a morning brief."""
-    if not is_authorized(update):
+    if not _is_authorized(update):
         return
-    await update.message.reply_chat_action(ChatAction.TYPING)
-    brief = build_morning_brief()
-    await update.message.reply_text(brief)
+    await update.message.reply_text("⏳ Pulling your data and building the brief…")
+    try:
+        brief = build_morning_brief()
+        await update.message.reply_text(brief)
+    except Exception as e:
+        logger.error("Brief command error: %s", e)
+        await update.message.reply_text(f"⚠️ Error generating brief: {e}")
 
 
-async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/reset — clear conversation history."""
-    if not is_authorized(update):
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_authorized(update):
         return
-    conversation_history.clear()
-    await update.message.reply_text("🔄 Conversation history cleared. Fresh start.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MESSAGE HANDLER
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle any text message from Brady — send to Claude, return response."""
-    if not is_authorized(update):
-        logger.warning(
-            "Unauthorized message from chat_id=%s — ignored.",
-            update.effective_chat.id,
-        )
-        return
-
-    user_text = update.message.text.strip()
-    if not user_text:
-        return
-
-    logger.info("Message from Brady: %.80s…", user_text)
-    await update.message.reply_chat_action(ChatAction.TYPING)
-
-    reply = ask_claude(user_text)
-    await update.message.reply_text(reply)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ERROR HANDLER
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log errors from the dispatcher."""
-    logger.error(
-        "Update %s caused error: %s", update, context.error, exc_info=context.error
+    now_et = datetime.now(EASTERN)
+    await update.message.reply_text(
+        f"✅ Ace is running.\n"
+        f"Current time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
+        f"Auto-brief: 9:30 AM ET, Mon–Fri"
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN — async so AsyncIOScheduler starts on the live event loop
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Scheduler job ─────────────────────────────────────────────────────────────
 
-async def main() -> None:
-    logger.info("Starting Ace bot…")
+async def send_morning_brief(app: Application) -> None:
+    """Scheduled job — build the brief and push to Brady's chat."""
+    try:
+        logger.info("Sending scheduled morning brief…")
+        brief = build_morning_brief()
+        await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=brief)
+        logger.info("Morning brief sent.")
+    except Exception as e:
+        logger.error("Scheduled brief error: %s", e)
+        try:
+            await app.bot.send_message(
+                chat_id=AUTHORIZED_USER_ID,
+                text=f"⚠️ Morning brief failed: {e}",
+            )
+        except Exception:
+            pass
 
-    # Build the Telegram application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Register handlers
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("brief", cmd_brief))
-    application.add_handler(CommandHandler("reset", cmd_reset))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-    application.add_error_handler(error_handler)
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-    # ── Scheduler (started here so it binds to the running asyncio event loop) ─
+def main() -> None:
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    app = Application.builder().token(token).build()
+
+    # Register commands
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("status", cmd_status))
+
+    # Scheduler — 9:30 AM ET, Mon–Fri
     scheduler = AsyncIOScheduler(timezone=EASTERN)
     scheduler.add_job(
         send_morning_brief,
@@ -265,37 +320,14 @@ async def main() -> None:
         day_of_week="mon-fri",
         hour=9,
         minute=30,
-        kwargs={"application": application},
-        id="morning_brief",
-        replace_existing=True,
+        args=[app],
     )
     scheduler.start()
-    logger.info("Scheduler started — morning brief runs Mon–Fri 9:30 AM ET.")
+    logger.info("Scheduler started — brief fires at 9:30 AM ET, Mon–Fri.")
 
-    # ── Start polling ──────────────────────────────────────────────────────────
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,   # ignore messages sent while bot was offline
-    )
-    logger.info("Ace is running. Send /start in Telegram to begin.")
-
-    # ── Block until SIGINT or SIGTERM (Railway sends SIGTERM to stop) ──────────
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_event.set)
-
-    await stop_event.wait()
-
-    # ── Graceful shutdown ──────────────────────────────────────────────────────
-    logger.info("Shutting down Ace…")
-    scheduler.shutdown(wait=False)
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
+    logger.info("Ace is starting up…")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
