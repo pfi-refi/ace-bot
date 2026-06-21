@@ -19,7 +19,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-# ── Logging ─────────────────────────────────────────────────────────────────
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     level=logging.INFO,
@@ -175,7 +175,7 @@ def _call_claude(messages: list, max_tokens: int = 700) -> str:
             "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
             "He leads ~18 licensed insurance and financial services agents. "
             "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
-            "CRM: GoHighLevel. Lead Division runs Tuesday–Friday. "
+            "CRM: GoHighLevel. "
             "Keep briefings tight, direct, and actionable — wealth-advisor tone."
         ),
         messages=messages,
@@ -197,11 +197,11 @@ def build_morning_brief() -> str:
 
     # Day-specific reminders
     day_reminders = {
-        0: "Monday — Lead Division dark today. Focus on team training, pipeline review, and admin.",
-        1: "Tuesday — Lead Division LIVE. Prioritise new lead follow-up and appointment setting.",
-        2: "Wednesday — Lead Division LIVE. Mid-week pulse check on team activity.",
-        3: "Thursday — Lead Division LIVE. Push for end-of-week appointment closes.",
-        4: "Friday — Lead Division LIVE. Wrap the week strong; prep Monday game plan.",
+        0: "Monday — Focus on team training, pipeline review, and admin work.",
+        1: "Tuesday — Prioritise new lead follow-up and appointment setting.",
+        2: "Wednesday — Mid-week pulse check on team activity and pipeline.",
+        3: "Thursday — Push for end-of-week appointment closes.",
+        4: "Friday — Wrap the week strong; prep Monday game plan.",
     }
     day_note = day_reminders.get(weekday, "")
 
