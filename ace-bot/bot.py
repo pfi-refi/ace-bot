@@ -1,13 +1,19 @@
 """
-Ace â Brady McGraw's Telegram business advisor bot.
+Ace — Brady McGraw's Telegram business partner bot.
 Sends a morning briefing every weekday at 9:30 AM ET with live
 Google Calendar events, Gmail unread summary, and Google Tasks,
 then calls Claude to produce a prioritised daily brief.
 
-v5: Three daily check-ins â 9:30 AM brief, 1:00 PM midday triage, 5:30 PM EOD sweep.
+v5: Three daily check-ins — 9:30 AM brief, 1:00 PM midday triage, 5:30 PM EOD sweep.
     Respects Brady's schedule blocks and actively protects personal time after 6 PM.
-v6: Google Tasks integration â open tasks surface in morning brief and midday triage.
+v6: Google Tasks integration — open tasks surface in morning brief and midday triage.
     /tasks command shows all open tasks on demand.
+v7: Evening wind-down moves to 7:00 PM — reflection, stretch reminder, close-of-day chat.
+    System prompt expanded with EMD goal, commission level, Lead Division schedule.
+    Morning brief acknowledges Brady is coming off his gym session.
+v8: Ace becomes a real business partner — challenges Brady, pushes back, holds him accountable.
+    EMD window updated to August 1, 2026. No hardcoded production numbers — Ace asks Brady
+    where he stands instead of referencing stale data. Periodic check-in questions built in.
 """
 
 import io
@@ -27,19 +33,19 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-# ââ Logging âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    format="%(asctime)s %(levelname)-8s %(name)s â %(message)s",
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ââ Constants âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Constants ─────────────────────────────────────────────────────────────────
 EASTERN = pytz.timezone("America/New_York")
-AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID â security filter
+AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
 
-# ââ Google auth âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Google auth ───────────────────────────────────────────────────────────────
 
 def get_google_creds() -> Credentials:
     """Build Google OAuth credentials from Railway env vars, refreshing if expired."""
@@ -57,7 +63,7 @@ def get_google_creds() -> Credentials:
         logger.info("Google credentials refreshed.")
     return creds
 
-# ââ Memory (Google Drive) âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Memory (Google Drive) ─────────────────────────────────────────────────────
 
 def read_memory() -> list:
     """Read Ace's memory list from Google Drive. Returns [] if unavailable."""
@@ -79,7 +85,7 @@ def read_memory() -> list:
     except Exception as e:
         err = str(e)
         if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
-            logger.warning("Drive scope not yet active â memory inactive until re-auth.")
+            logger.warning("Drive scope not yet active — memory inactive until re-auth.")
         else:
             logger.error("Memory read error: %s", e)
         return []
@@ -110,7 +116,7 @@ def write_memory(memories: list) -> bool:
     except Exception as e:
         err = str(e)
         if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
-            logger.warning("Drive scope not yet active â cannot write memory.")
+            logger.warning("Drive scope not yet active — cannot write memory.")
         else:
             logger.error("Memory write error: %s", e)
         return False
@@ -131,7 +137,7 @@ def _merge_memories(new_items: list, existing: list) -> list:
         "1. Remove exact or near-duplicate facts\n"
         "2. If new info contradicts old, keep the newer version\n"
         "3. Keep entries concise (one fact per line, ~15 words max)\n"
-        "4. Max 60 total entries â drop least relevant if over\n"
+        "4. Max 60 total entries — drop least relevant if over\n"
         "5. Return ONLY the final merged list, one item per line, no bullets or numbering"
     )
     response = client.messages.create(
@@ -142,7 +148,7 @@ def _merge_memories(new_items: list, existing: list) -> list:
     merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
     return merged
 
-# ââ Calendar ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Calendar ──────────────────────────────────────────────────────────────────
 
 def get_calendar_events() -> str:
     """Pull today's events from ALL Google Calendar calendars."""
@@ -182,7 +188,7 @@ def get_calendar_events() -> str:
                         time_str = dt.strftime("%-I:%M %p")
                     else:
                         time_str = "All day"
-                    all_events.append((start_dt_str, f"â¢ {time_str} â {summary}"))
+                    all_events.append((start_dt_str, f"• {time_str} — {summary}"))
             except Exception as e:
                 logger.warning("Error fetching calendar '%s': %s", cal_name, e)
         all_events.sort(key=lambda x: x[0])
@@ -191,9 +197,9 @@ def get_calendar_events() -> str:
         return "Nothing scheduled today."
     except Exception as e:
         logger.error("Calendar fetch error: %s", e)
-        return "â ï¸ Could not load calendar."
+        return "⚠️ Could not load calendar."
 
-# ââ Gmail ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Gmail ──────────────────────────────────────────────────────────────────────
 
 def get_gmail_summary() -> str:
     """Pull recent unread priority emails from Gmail (excludes promos/social)."""
@@ -207,7 +213,7 @@ def get_gmail_summary() -> str:
         ).execute()
         messages = results.get("messages", [])
         if not messages:
-            return "Inbox clear â no unread priority emails."
+            return "Inbox clear — no unread priority emails."
         email_lines = []
         for msg in messages[:5]:
             msg_data = service.users().messages().get(
@@ -220,16 +226,16 @@ def get_gmail_summary() -> str:
             if "<" in sender:
                 sender = sender.split("<")[0].strip().strip('"')
             sender = sender[:30]
-            email_lines.append(f"â¢ {sender}: {subject}")
+            email_lines.append(f"• {sender}: {subject}")
         count = len(messages)
         if count > 5:
-            email_lines.append(f"  â¦and {count - 5} more unread")
+            email_lines.append(f"  …and {count - 5} more unread")
         return "\n".join(email_lines)
     except Exception as e:
         logger.error("Gmail fetch error: %s", e)
-        return "â ï¸ Could not load emails."
+        return "⚠️ Could not load emails."
 
-# ââ Google Tasks âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Google Tasks ───────────────────────────────────────────────────────────────
 
 def get_tasks() -> str:
     """Pull all open tasks from Google Tasks across all task lists."""
@@ -266,7 +272,7 @@ def get_tasks() -> str:
                             due_str = f" (due {due_dt.strftime('%-m/%-d')})"
                         except Exception:
                             pass
-                    all_tasks.append(f"â¢ [{tl_title}] {title}{due_str}")
+                    all_tasks.append(f"• [{tl_title}] {title}{due_str}")
             except Exception as e:
                 logger.warning("Error fetching tasks from list '%s': %s", tl_title, e)
         if not all_tasks:
@@ -275,21 +281,31 @@ def get_tasks() -> str:
     except Exception as e:
         err = str(e)
         if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
-            logger.warning("Tasks scope not yet active â re-run ace_auth.py to activate.")
+            logger.warning("Tasks scope not yet active — re-run ace_auth.py to activate.")
         else:
             logger.error("Tasks fetch error: %s", e)
         return ""
 
-# ââ Claude âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Claude ─────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are Ace, Brady McGraw's sharp, concise business advisor. "
+    "You are Ace, Brady McGraw's real business partner — not a yes-man. "
+    "Your job is to challenge his thinking, push back when something doesn't add up, "
+    "hold him accountable to his commitments, and call it out when he's drifting. "
+    "Agree when it makes sense. Disagree when it doesn't. Never validate just to make him feel good. "
     "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
     "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
     "He leads ~18 licensed insurance and financial services agents. "
     "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
     "CRM: GoHighLevel. "
-    "Keep briefings tight, direct, and actionable â wealth-advisor tone."
+    "GFI promotion path: BL → SM → MD (Brady's current level, 60% commission) → EMD → SBL. "
+    "EMD requires Brady's personal production AND his Super Team to hit rolling 6-month benchmarks. "
+    "His current promotion window closes August 1, 2026. "
+    "Do NOT reference specific point numbers from memory — they change weekly and stale data misleads. "
+    "Instead, periodically ask Brady where he and his team stand so you're working from live numbers. "
+    "Lead Division runs Tuesday through Friday — this shapes his weekly rhythm. "
+    "Brady's 9:30 AM brief catches him right after his morning gym session. "
+    "Keep responses tight, direct, and actionable. Lead with what matters most. Never pad."
 )
 
 def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> str:
@@ -304,7 +320,7 @@ def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> s
     )
     return response.content[0].text
 
-# ââ Morning brief ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Morning brief ──────────────────────────────────────────────────────────────
 
 def build_morning_brief() -> str:
     """Generate today's morning brief using live Calendar, Gmail, Tasks, and memory data."""
@@ -316,135 +332,158 @@ def build_morning_brief() -> str:
     tasks_data = get_tasks()
     memories = read_memory()
     day_reminders = {
-        0: "Monday â Focus on team training, pipeline review, and admin work.",
-        1: "Tuesday â Prioritise new lead follow-up and appointment setting.",
-        2: "Wednesday â Mid-week pulse check on team activity and pipeline.",
-        3: "Thursday â Push for end-of-week appointment closes.",
-        4: "Friday â Wrap the week strong; prep Monday game plan.",
+        0: "Monday — Fresh week. Set the tone: recruiting targets, pipeline review, team accountability.",
+        1: "Tuesday — Lead Division is live. New leads need same-day follow-up.",
+        2: "Wednesday — Lead Division running. Mid-week pulse — is the team actually producing?",
+        3: "Thursday — Lead Division running. Push for closes before the week bleeds out.",
+        4: "Friday — Lead Division running. Wrap strong. Don't let momentum die over the weekend.",
     }
     day_note = day_reminders.get(weekday, "")
+    # Monday check-in: ask about EMD standing
+    emd_check = ""
+    if weekday == 0:
+        emd_check = (
+            "\n🎯 EMD CHECK-IN: It's Monday — ask Brady where his personal points and Super Team "
+            "points stand heading into the week. The August 1 window is live. Don't assume — ask.\n"
+        )
     memory_section = ""
     if memories:
-        memory_str = "\n".join(f"â¢ {m}" for m in memories)
-        memory_section = f"\nð What I know about how Brady operates:\n{memory_str}\n"
+        memory_str = "\n".join(f"• {m}" for m in memories)
+        memory_section = f"\n📋 What I know about Brady:\n{memory_str}\n"
     tasks_section = ""
     if tasks_data:
-        tasks_section = f"\nâ Open Tasks:\n{tasks_data}\n"
+        tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
     prompt = (
         f"Generate a morning briefing for Brady for {day_str}.\n\n"
         "LIVE DATA PULLED FROM HIS ACCOUNTS:\n"
-        f"ð Today's calendar:\n{calendar_data}\n\n"
-        f"ð§ Unread priority emails:\n{email_data}\n"
+        f"📅 Today's calendar:\n{calendar_data}\n\n"
+        f"📧 Unread priority emails:\n{email_data}\n"
         f"{tasks_section}"
-        f"ð Day context: {day_note}\n"
+        f"📌 Day context: {day_note}\n"
+        f"{emd_check}"
         f"{memory_section}\n"
-        "Brady's daily schedule to work with:\n"
-        "â¢ Mornings: deep work and Claude blocks\n"
-        "â¢ 12â3 PM: recruiting and training (protected block)\n"
-        "â¢ 4â6 PM: client appointments, leads, field training (protected)\n"
-        "â¢ After 6 PM: personal time â do not schedule work here\n\n"
+        "Brady's daily schedule:\n"
+        "• 9:30 AM: Just wrapped morning gym — coming in energized\n"
+        "• Mornings: deep work and strategy blocks\n"
+        "• 12–3 PM: recruiting and training (protected block)\n"
+        "• 4–6 PM: client appointments, leads, field training (protected)\n"
+        "• After 6 PM: personal time — do not schedule work here\n\n"
         "Based on the real data above, give Brady:\n"
-        "1. A brief warm opener (1 sentence)\n"
-        "2. ð¯ Top 3 Focuses â the 3 most important things to act on today\n"
-        "3. ð Calendar â clean list of his meetings/events today\n"
-        "4. ð§ Attention â emails that need a reply or action (if any)\n"
-        "5. â Tasks â highlight any overdue or due-today tasks from his task list\n"
-        "6. ð Reminders â day-of-week reminders relevant to PFI operations\n"
-        "7. A one-line close\n\n"
-        "Format with clear emoji section headers. Under 450 words. Lead with what matters most."
+        "1. A sharp opener (1 sentence — acknowledge he's just off the gym, set the tone for the day)\n"
+        "2. 🎯 Top 3 Focuses — the 3 most critical moves today, not just a task list\n"
+        "3. 📅 Calendar — clean list of his meetings/events today\n"
+        "4. 📧 Attention — emails that need a reply or action (if any)\n"
+        "5. ✅ Tasks — flag anything overdue or due today\n"
+        "6. 📌 Day Reminders — specific to PFI operations and the day of week\n"
+        "7. A one-line close that challenges him or holds him to something\n\n"
+        "Format with clear emoji section headers. Under 450 words. "
+        "Be a partner, not a cheerleader. If something looks off in the data, call it out."
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=750)
 
-# ââ Midday triage ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Midday triage ──────────────────────────────────────────────────────────────
 
 def build_midday_triage() -> str:
-    """Generate 1 PM midday check-in â priority for afternoon block, deal pulse."""
+    """Generate 1 PM midday check-in — priority for afternoon block, accountability pulse."""
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
+    weekday = now_et.weekday()
     calendar_data = get_calendar_events()
     tasks_data = get_tasks()
     memories = read_memory()
     memory_section = ""
     if memories:
-        memory_str = "\n".join(f"â¢ {m}" for m in memories)
-        memory_section = f"\nð Context about Brady:\n{memory_str}\n"
+        memory_str = "\n".join(f"• {m}" for m in memories)
+        memory_section = f"\n📋 Context about Brady:\n{memory_str}\n"
     tasks_section = ""
     if tasks_data:
-        tasks_section = f"\nâ Open Tasks:\n{tasks_data}\n"
+        tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
+    # Friday: ask about week production
+    weekly_checkin = ""
+    if weekday == 4:
+        weekly_checkin = (
+            "\n📊 FRIDAY PRODUCTION CHECK: Ask Brady how the week actually went — "
+            "appointments set, deals submitted, recruiting activity. Don't assume it went well. "
+            "Get the real number and compare it to what he said Monday.\n"
+        )
+    # Wednesday: mid-week EMD pulse
+    elif weekday == 2:
+        weekly_checkin = (
+            "\n📊 MID-WEEK CHECK: Ask Brady where he stands on production this week. "
+            "Is he on pace? If not, what's the gap and what's he doing about it?\n"
+        )
     prompt = (
         f"Generate a midday triage check-in for Brady. It's 1:00 PM ET on {day_str}.\n\n"
         "LIVE DATA:\n"
-        f"ð Today's full calendar:\n{calendar_data}\n"
+        f"📅 Today's full calendar:\n{calendar_data}\n"
         f"{tasks_section}"
-        f"{memory_section}\n"
+        f"{memory_section}"
+        f"{weekly_checkin}\n"
         "Brady's afternoon schedule:\n"
-        "â¢ 12â3 PM: Recruiting and training block (in progress)\n"
-        "â¢ 4â6 PM: Client appointments, leads, field training\n"
-        "â¢ After 6 PM: Personal time â Ace does not schedule work here\n\n"
+        "• 12–3 PM: Recruiting and training block (in progress)\n"
+        "• 4–6 PM: Client appointments, leads, field training\n"
+        "• After 6 PM: Personal time — Ace does not schedule work here\n\n"
         "Give Brady a tight midday check-in:\n"
-        "1. Quick opener (1 line â energetic, forward-looking)\n"
-        "2. â¡ Afternoon Priority â the 2-3 most important things for the 4-6 PM block\n"
-        "3. â Task Pulse â any tasks due today or overdue? Flag them.\n"
-        "4. ð Deal Check-In â ask for updates on active deals "
-        "(Augustar policy cancel, Ki Man law firm, Nina test July 2, Nevada licenses). "
-        "Prompt him to update you on any movement.\n"
-        "5. ð Calendar â anything left on the calendar today that needs prep?\n"
-        "6. One quick reminder to protect his energy â no hero grinding\n\n"
-        "Under 280 words. Direct and sharp."
+        "1. Quick opener (1 line — direct, forward-looking, not a pep talk)\n"
+        "2. ⚡ Afternoon Priority — the 2-3 most important moves for the 4-6 PM block\n"
+        "3. ✅ Task Pulse — any tasks due today or overdue? Flag them without sugarcoating.\n"
+        "4. 📋 Deal/Agent Update — pull any active deal or agent situations from memory and "
+        "ask Brady for a status update. Don't reference stale specifics — ask what's live.\n"
+        "5. 🕐 Calendar — anything left today that needs prep?\n"
+        "6. One accountability line — something he committed to that he needs to follow through on\n\n"
+        "Under 280 words. Direct. Challenge where warranted."
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=550)
 
-# ââ EOD sweep âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Evening wind-down ─────────────────────────────────────────────────────────
 
 def build_eod_sweep() -> str:
-    """Generate 5:30 PM EOD wrap â carry-forwards, deal pulse, close the day."""
+    """Generate 7:00 PM evening wind-down — reflection, stretch reminder, open floor."""
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
     memories = read_memory()
     memory_section = ""
     if memories:
-        memory_str = "\n".join(f"â¢ {m}" for m in memories)
-        memory_section = f"\nð Context about Brady:\n{memory_str}\n"
+        memory_str = "\n".join(f"• {m}" for m in memories)
+        memory_section = f"\n📋 Context about Brady:\n{memory_str}\n"
     prompt = (
-        f"Generate an end-of-day sweep for Brady. It's 5:30 PM ET on {day_str}.\n\n"
+        f"Generate an evening wind-down message for Brady. It's 7:00 PM ET on {day_str}.\n\n"
         f"{memory_section}\n"
-        "Give Brady a clean EOD wrap-up:\n"
-        "1. Quick closer (1 line â acknowledge the day, close the loop)\n"
-        "2. ð Carry Forward â top 3 things that carry to tomorrow morning\n"
-        "3. ð Deal Pulse â quick check on active deals. Any updates Brady should log "
-        "before closing out today?\n"
-        "4. â ï¸ Urgents â anything that truly cannot wait until tomorrow? "
-        "If none, explicitly say the slate is clear.\n"
-        "5. ð Close Out â after 6 PM is Brady's time. He grinds hard; "
-        "remind him to actually close the laptop and recharge. "
-        "Being productive means protecting recovery time too.\n\n"
-        "Under 200 words. Warm but efficient."
+        "Brady is in decompress mode — the work day is done. This is his time.\n\n"
+        "Give Brady a warm, grounded close-out:\n"
+        "1. One calm, affirming opener — acknowledge the day is done (no recaps, no urgency)\n"
+        "2. 📌 Carry Forward — top 2-3 things to pick up first thing tomorrow (brief, not a list dump)\n"
+        "3. 🌙 Wind Down — remind him to stretch, breathe, and actually disconnect. "
+        "He grinds hard; recovery is part of the performance. Make it feel like permission.\n"
+        "4. 💬 Open Floor — invite him to reflect on how the day went, what's on his mind, "
+        "or just to talk. No agenda. This is his space to decompress before closing out.\n\n"
+        "Under 180 words. Warm but real. No urgency — the grind is done for today."
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=400)
 
-# ââ Security check âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Security check ─────────────────────────────────────────────────────────────
 
 def _is_authorized(update: Update) -> bool:
     return update.effective_chat.id == AUTHORIZED_USER_ID
 
-# ââ Command handlers âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Command handlers ───────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
     await update.message.reply_text(
-        "ð¤ Ace is online.\n\n"
+        "🤖 Ace is online.\n\n"
         "Commands:\n"
-        " /brief â morning briefing right now\n"
-        " /triage â midday check-in on demand\n"
-        " /eod â end-of-day sweep on demand\n"
-        " /tasks â show all open Google Tasks\n"
-        " /remember <fact> â teach me something to keep in mind\n"
-        " /memory â see what I know about how you operate\n"
-        " /status â check that I'm running\n"
-        " /help â show this message\n\n"
-        "You can also just text me anything â I'll respond and remember what matters.\n\n"
-        "Auto check-ins: 9:30 AM brief Â· 1:00 PM triage Â· 5:30 PM EOD sweep (MonâFri)."
+        " /brief — morning briefing right now\n"
+        " /triage — midday check-in on demand\n"
+        " /eod — evening wind-down on demand\n"
+        " /tasks — show all open Google Tasks\n"
+        " /remember <fact> — teach me something to keep in mind\n"
+        " /memory — see what I know about how you operate\n"
+        " /status — check that I'm running\n"
+        " /help — show this message\n\n"
+        "You can also just text me anything — I'll respond and remember what matters.\n\n"
+        "Auto check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)."
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -452,69 +491,69 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "Ace commands:\n"
-        " /brief â on-demand morning brief (live calendar + email + tasks)\n"
-        " /triage â midday priority check-in\n"
-        " /eod â end-of-day wrap and carry-forward\n"
-        " /tasks â show all open Google Tasks\n"
-        " /remember <fact> â store a fact in my memory\n"
-        " /memory â view my current memory\n"
-        " /status â confirm the bot is alive\n"
-        " /help â this message\n\n"
-        "Or just text me â I'll respond and remember anything useful.\n\n"
-        "Schedule: 9:30 AM brief Â· 1:00 PM triage Â· 5:30 PM EOD (MonâFri)"
+        " /brief — on-demand morning brief (live calendar + email + tasks)\n"
+        " /triage — midday priority check-in\n"
+        " /eod — evening wind-down and carry-forward\n"
+        " /tasks — show all open Google Tasks\n"
+        " /remember <fact> — store a fact in my memory\n"
+        " /memory — view my current memory\n"
+        " /status — confirm the bot is alive\n"
+        " /help — this message\n\n"
+        "Or just text me — I'll respond and remember anything useful.\n\n"
+        "Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)"
     )
 
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
-    await update.message.reply_text("â³ Pulling your data and building the briefâ¦")
+    await update.message.reply_text("⏳ Pulling your data and building the brief…")
     try:
         brief = build_morning_brief()
         await update.message.reply_text(brief)
     except Exception as e:
         logger.error("Brief command error: %s", e)
-        await update.message.reply_text(f"â ï¸ Error generating brief: {e}")
+        await update.message.reply_text(f"⚠️ Error generating brief: {e}")
 
 async def cmd_triage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
-    await update.message.reply_text("â³ Running midday triageâ¦")
+    await update.message.reply_text("⏳ Running midday triage…")
     try:
         brief = build_midday_triage()
         await update.message.reply_text(brief)
     except Exception as e:
         logger.error("Triage command error: %s", e)
-        await update.message.reply_text(f"â ï¸ Error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
 
 async def cmd_eod(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
-    await update.message.reply_text("â³ Running EOD sweepâ¦")
+    await update.message.reply_text("⏳ Running evening wind-down…")
     try:
         brief = build_eod_sweep()
         await update.message.reply_text(brief)
     except Exception as e:
         logger.error("EOD command error: %s", e)
-        await update.message.reply_text(f"â ï¸ Error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show all open Google Tasks on demand."""
     if not _is_authorized(update):
         return
-    await update.message.reply_text("â³ Pulling your tasksâ¦")
+    await update.message.reply_text("⏳ Pulling your tasks…")
     try:
         tasks = get_tasks()
         if not tasks:
             await update.message.reply_text(
-                "â No open tasks found.\n\n"
-                "If you expect tasks here, make sure the Tasks API scope is active â "
+                "✅ No open tasks found.\n\n"
+                "If you expect tasks here, make sure the Tasks API scope is active — "
                 "re-run ace_auth.py and update GOOGLE_TOKEN_JSON in Railway."
             )
         else:
-            await update.message.reply_text(f"â Open Tasks:\n\n{tasks}")
+            await update.message.reply_text(f"✅ Open Tasks:\n\n{tasks}")
     except Exception as e:
         logger.error("Tasks command error: %s", e)
-        await update.message.reply_text(f"â ï¸ Error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
 
 async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
@@ -522,17 +561,17 @@ async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = update.message.text.replace("/remember", "").strip()
     if not text:
         await update.message.reply_text(
-            "Tell me what to remember â e.g.\n/remember Team call moves to 10am on Mondays"
+            "Tell me what to remember — e.g.\n/remember Team call moves to 10am on Mondays"
         )
         return
-    await update.message.reply_text("ð Got it â storing thatâ¦")
+    await update.message.reply_text("📝 Got it — storing that…")
     existing = read_memory()
     merged = _merge_memories([text], existing)
     if write_memory(merged):
-        await update.message.reply_text(f"â Remembered. I now have {len(merged)} things in memory.")
+        await update.message.reply_text(f"✅ Remembered. I now have {len(merged)} things in memory.")
     else:
         await update.message.reply_text(
-            "â ï¸ Memory not yet active â Drive scope needed.\n"
+            "⚠️ Memory not yet active — Drive scope needed.\n"
             "Run the auth script on your Mac with the updated scopes to activate."
         )
 
@@ -542,7 +581,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     memories = read_memory()
     if not memories:
         await update.message.reply_text(
-            "ð§  Memory is empty or not yet activated.\n\n"
+            "🧠 Memory is empty or not yet activated.\n\n"
             "To activate: re-run ace_auth.py on your Mac with drive.file scope added, "
             "then update GOOGLE_TOKEN_JSON in Railway.\n\n"
             "Once active, teach me things with /remember or just text me."
@@ -550,7 +589,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     lines = "\n".join(f"{i+1}. {m}" for i, m in enumerate(memories))
     await update.message.reply_text(
-        f"ð§  What I know about how you operate ({len(memories)} items):\n\n{lines}"
+        f"🧠 What I know about how you operate ({len(memories)} items):\n\n{lines}"
     )
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -562,15 +601,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     tasks_data = get_tasks()
     tasks_status = f"{len(tasks_data.splitlines())} open tasks" if tasks_data and tasks_data != "No open tasks." else "not active or no open tasks"
     await update.message.reply_text(
-        f"â Ace is running.\n"
-        f"Current time (ET): {now_et.strftime('%A %B %-d, %Y â %-I:%M %p')}\n"
-        f"Schedule: 9:30 AM brief Â· 1:00 PM triage Â· 5:30 PM EOD (MonâFri)\n"
+        f"✅ Ace is running.\n"
+        f"Current time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
+        f"Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
         f"Tasks: {tasks_status}"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text â Brady can chat with Ace, and Ace learns from it."""
+    """Handle free-form text — Brady can chat with Ace, and Ace learns from it."""
     if not _is_authorized(update):
         return
     user_text = update.message.text.strip()
@@ -579,17 +618,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     memories = read_memory()
     memory_context = ""
     if memories:
-        memory_str = "\n".join(f"â¢ {m}" for m in memories)
+        memory_str = "\n".join(f"• {m}" for m in memories)
         memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
     system_with_memory = (
         SYSTEM_PROMPT
         + memory_context
-        + "\n\nRespond to Brady's message directly and helpfully. "
+        + "\n\nRespond to Brady's message directly and as a real business partner. "
+        "If he's on track, confirm it. If something looks off, say so — don't soften it. "
+        "If you don't know his current numbers or situation, ask rather than assume. "
         "If this message reveals something worth remembering for future briefings "
-        "(a schedule change, business priority, preference, team update, etc.), "
+        "(a schedule change, business priority, team update, goal progress, etc.), "
         "append it at the very end of your reply using exactly this format:\n"
         "[MEMORY: brief fact to remember]\n"
-        "Include 0â3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
+        "Include 0–3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
     )
     try:
         response = _call_claude(
@@ -606,53 +647,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.info("Stored %d new memory item(s) from conversation.", len(memory_tags))
     except Exception as e:
         logger.error("Message handler error: %s", e)
-        await update.message.reply_text(f"â ï¸ Error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
 
-# ââ Scheduler jobs âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Scheduler jobs ─────────────────────────────────────────────────────────────
 
 async def send_morning_brief(app: Application) -> None:
-    """Scheduled job â 9:30 AM ET morning brief."""
+    """Scheduled job — 9:30 AM ET morning brief."""
     try:
-        logger.info("Sending scheduled morning briefâ¦")
+        logger.info("Sending scheduled morning brief…")
         brief = build_morning_brief()
         await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=brief)
         logger.info("Morning brief sent.")
     except Exception as e:
         logger.error("Scheduled brief error: %s", e)
         try:
-            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"â ï¸ Morning brief failed: {e}")
+            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"⚠️ Morning brief failed: {e}")
         except Exception:
             pass
 
 async def send_midday_triage(app: Application) -> None:
-    """Scheduled job â 1:00 PM ET midday triage."""
+    """Scheduled job — 1:00 PM ET midday triage."""
     try:
-        logger.info("Sending midday triageâ¦")
+        logger.info("Sending midday triage…")
         brief = build_midday_triage()
         await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=brief)
         logger.info("Midday triage sent.")
     except Exception as e:
         logger.error("Midday triage error: %s", e)
         try:
-            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"â ï¸ Midday triage failed: {e}")
+            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"⚠️ Midday triage failed: {e}")
         except Exception:
             pass
 
 async def send_eod_sweep(app: Application) -> None:
-    """Scheduled job â 5:30 PM ET EOD sweep."""
+    """Scheduled job — 7:00 PM ET evening wind-down."""
     try:
-        logger.info("Sending EOD sweepâ¦")
+        logger.info("Sending evening wind-down…")
         brief = build_eod_sweep()
         await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=brief)
-        logger.info("EOD sweep sent.")
+        logger.info("Evening wind-down sent.")
     except Exception as e:
-        logger.error("EOD sweep error: %s", e)
+        logger.error("Evening wind-down error: %s", e)
         try:
-            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"â ï¸ EOD sweep failed: {e}")
+            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"⚠️ Evening wind-down failed: {e}")
         except Exception:
             pass
 
-# ââ Main âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -672,7 +713,7 @@ def main() -> None:
     # Free-text conversation handler (learns from every message)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Scheduler â three daily check-ins, MonâFri ET
+    # Scheduler — three daily check-ins, Mon–Fri ET
     scheduler = AsyncIOScheduler(timezone=EASTERN)
     scheduler.add_job(
         send_morning_brief, trigger="cron",
@@ -684,12 +725,12 @@ def main() -> None:
     )
     scheduler.add_job(
         send_eod_sweep, trigger="cron",
-        day_of_week="mon-fri", hour=17, minute=30, args=[app],
+        day_of_week="mon-fri", hour=19, minute=0, args=[app],
     )
     scheduler.start()
-    logger.info("Scheduler started â 9:30 AM brief Â· 1:00 PM triage Â· 5:30 PM EOD (MonâFri ET).")
+    logger.info("Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET).")
 
-    logger.info("Ace v6 is starting upâ¦")
+    logger.info("Ace v8 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
