@@ -9,16 +9,15 @@ v5: Three daily check-ins — 9:30 AM brief, 1:00 PM midday triage, 5:30 PM EOD 
 v6: Google Tasks integration — open tasks surface in morning brief and midday triage.
     /tasks command shows all open tasks on demand.
 v7: Evening wind-down moves to 7:00 PM — reflection, stretch reminder, close-of-day chat.
-    System prompt expanded with EMD goal, commission level, and weekly rhythm.
+    System prompt expanded with EMD goal, commission level, Lead Division schedule.
     Morning brief acknowledges Brady is coming off his gym session.
 v8: Ace becomes a real business partner — challenges Brady, pushes back, holds him accountable.
     EMD window updated to August 1, 2026. No hardcoded production numbers — Ace asks Brady
     where he stands instead of referencing stale data. Periodic check-in questions built in.
-v9: Persistent conversation history — saved to Google Drive as ace_conversation.json.
-    Ace now remembers prior exchanges across Railway restarts/redeploys.
-v10: Fix free-text task/calendar handling — handle_message() now pre-fetches live Google data
-     when Brady asks about tasks, priorities, or calendar via free text. Removes incorrect
-     instruction telling Claude LLM to "pull" Python functions it has no access to.
+v9: Full Google Tasks write access — Ace can add and complete tasks on Brady's behalf.
+    Tag parser intercepts [ADD_TASK: title] and [COMPLETE_TASK: fragment] in Claude's
+    responses and executes them automatically. SYSTEM_PROMPT updated to tell Claude
+    it has full read/write task access and must use the tags to trigger it.
 """
 
 import io
@@ -49,8 +48,6 @@ logger = logging.getLogger(__name__)
 EASTERN = pytz.timezone("America/New_York")
 AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
-CONVERSATION_FILE = "ace_conversation.json"
-MAX_HISTORY_MESSAGES = 80  # keep last 80 messages (40 exchanges)
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -154,62 +151,6 @@ def _merge_memories(new_items: list, existing: list) -> list:
     )
     merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
     return merged
-
-# ── Conversation history (Google Drive) ──────────────────────────────────────
-
-def save_conversation_to_drive(history: list) -> None:
-    """Saves conversation history to Google Drive as ace_conversation.json."""
-    try:
-        drive = build("drive", "v3", credentials=get_google_creds())
-        # Trim to last MAX_HISTORY_MESSAGES
-        trimmed = history[-MAX_HISTORY_MESSAGES:]
-        content = json.dumps(trimmed, ensure_ascii=False, indent=2)
-        results = drive.files().list(
-            q=f"name='{CONVERSATION_FILE}' and trashed=false",
-            fields="files(id, name)"
-        ).execute()
-        files = results.get("files", [])
-        media = MediaIoBaseUpload(
-            io.BytesIO(content.encode("utf-8")),
-            mimetype="application/json",
-            resumable=False
-        )
-        if files:
-            drive.files().update(
-                fileId=files[0]["id"],
-                media_body=media
-            ).execute()
-        else:
-            drive.files().create(
-                body={"name": CONVERSATION_FILE, "mimeType": "application/json"},
-                media_body=media
-            ).execute()
-        logger.info("Conversation history saved to Drive (%d messages)", len(trimmed))
-    except Exception as e:
-        logger.warning("Could not save conversation to Drive: %s", e)
-
-def load_conversation_from_drive() -> list:
-    """Loads conversation history from Google Drive. Returns empty list if not found."""
-    try:
-        drive = build("drive", "v3", credentials=get_google_creds())
-        results = drive.files().list(
-            q=f"name='{CONVERSATION_FILE}' and trashed=false",
-            fields="files(id, name)"
-        ).execute()
-        files = results.get("files", [])
-        if not files:
-            return []
-        file_id = files[0]["id"]
-        content = drive.files().get_media(fileId=file_id).execute()
-        history = json.loads(content.decode("utf-8"))
-        logger.info("Loaded %d messages from Drive conversation history", len(history))
-        return history
-    except Exception as e:
-        logger.warning("Could not load conversation from Drive: %s", e)
-        return []
-
-# ── Module-level conversation history — loaded once on cold start ─────────────
-conversation_history = load_conversation_from_drive()
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
@@ -349,6 +290,79 @@ def get_tasks() -> str:
             logger.error("Tasks fetch error: %s", e)
         return ""
 
+
+def add_task(title: str) -> bool:
+    """Add a new task to the first Google Tasks list (typically 'My Tasks').
+    Returns True on success, False on failure."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        if not task_lists:
+            logger.error("add_task: no task lists found.")
+            return False
+        # Prefer a list named "My Tasks" or "Today", otherwise use the first list
+        tl_id = task_lists[0]["id"]
+        for tl in task_lists:
+            if tl.get("title", "").lower() in ("my tasks", "today"):
+                tl_id = tl["id"]
+                break
+        service.tasks().insert(
+            tasklist=tl_id,
+            body={"title": title.strip(), "status": "needsAction"},
+        ).execute()
+        logger.info("Task added: %s", title)
+        return True
+    except Exception as e:
+        logger.error("add_task error: %s", e)
+        return False
+
+
+def complete_task_by_title(fragment: str) -> tuple[bool, str]:
+    """Fuzzy-find an open task whose title contains `fragment` (case-insensitive)
+    and mark it complete. Returns (success, matched_title)."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        frag_lower = fragment.strip().lower()
+        best_task = None
+        best_list_id = None
+        for tl in task_lists:
+            try:
+                tasks_result = service.tasks().list(
+                    tasklist=tl["id"],
+                    showCompleted=False,
+                    showHidden=False,
+                    maxResults=50,
+                ).execute()
+                for task in tasks_result.get("items", []):
+                    title = task.get("title", "")
+                    if frag_lower in title.lower():
+                        # Prefer shorter titles (more precise match)
+                        if best_task is None or len(title) < len(best_task.get("title", "")):
+                            best_task = task
+                            best_list_id = tl["id"]
+            except Exception as e:
+                logger.warning("complete_task_by_title: error in list '%s': %s", tl.get("title"), e)
+        if not best_task:
+            logger.warning("complete_task_by_title: no match for fragment '%s'", fragment)
+            return False, ""
+        best_task["status"] = "completed"
+        service.tasks().update(
+            tasklist=best_list_id,
+            task=best_task["id"],
+            body=best_task,
+        ).execute()
+        matched_title = best_task.get("title", fragment)
+        logger.info("Task completed: %s", matched_title)
+        return True, matched_title
+    except Exception as e:
+        logger.error("complete_task_by_title error: %s", e)
+        return False, ""
+
 # ── Claude ─────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
@@ -356,6 +370,26 @@ SYSTEM_PROMPT = (
     "Your job is to challenge his thinking, push back when something doesn't add up, "
     "hold him accountable to his commitments, and call it out when he's drifting. "
     "Agree when it makes sense. Disagree when it doesn't. Never validate just to make him feel good. "
+    "\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "TASK WRITE ACCESS — READ THIS FIRST\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "You have FULL read AND write access to Brady's Google Tasks. You are NOT read-only.\n"
+    "To add a task: include [ADD_TASK: task title here] anywhere in your response — "
+    "the system executes it automatically.\n"
+    "To complete a task: include [COMPLETE_TASK: partial title] — "
+    "the system fuzzy-matches and marks it done.\n"
+    "NEVER tell Brady you can't write to tasks — you can. Use the tags and it happens.\n"
+    "When Brady says 'add this', 'mark that done', 'complete X', 'put that on my list' — "
+    "use the tags immediately. Do NOT ask him to do it himself.\n"
+    "After executing: confirm with '✅ Added to your tasks' or '✅ Marked complete'.\n"
+    "Examples:\n"
+    "  Brady: 'Add follow up with Ricky to my list'\n"
+    "  Ace: 'Done. [ADD_TASK: Follow up with Ricky] ✅ Added to your tasks.'\n"
+    "  Brady: 'Mark Walter's deal done'\n"
+    "  Ace: 'Got it. [COMPLETE_TASK: Walter] ✅ Marked complete.'\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "\n"
     "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
     "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
     "He leads ~18 licensed insurance and financial services agents. "
@@ -366,48 +400,10 @@ SYSTEM_PROMPT = (
     "His current promotion window closes August 1, 2026. "
     "Do NOT reference specific point numbers from memory — they change weekly and stale data misleads. "
     "Instead, periodically ask Brady where he and his team stand so you're working from live numbers. "
-    "Brady's week centers on recruiting pipeline, agent production, deal flow, and team development. "
+    "Lead Division runs Tuesday through Friday — this shapes his weekly rhythm. "
     "Brady's 9:30 AM brief catches him right after his morning gym session. "
     "Keep responses tight, direct, and actionable. Lead with what matters most. Never pad."
-    "\n\n"
-    "--- HOW TO BEHAVE AS ACE ---\n"
-    "\n"
-    "TASK PRIORITIZATION — when Brady asks about tasks, what to work on, his list, or today's priorities:\n"
-    "- When live task and calendar data is included in the message below, use it to see the full picture.\n"
-    "- Do NOT just list tasks — analyze and rank them by urgency and business impact.\n"
-    "- Present: TOP PRIORITIES first (2-3 max), then secondary, then what can wait.\n"
-    "- Factor in: Are there deals closing today? Agent issues brewing? Admin can wait.\n"
-    "- Monday: strategy, admin, recruiting, team accountability day.\n"
-    "- Tuesday-Friday: production days — recruiting, deal flow, agent activity, and closes.\n"
-    "- Deals closing = highest urgency always.\n"
-    "- Agent production issues = always urgent.\n"
-    "- Admin/business items = Monday or end-of-day slots.\n"
-    "- The 🎯 Today list is Brady's daily execution list; Deals/Agents/Business are holding areas.\n"
-    "- After presenting priorities, ask: 'Want me to block time for any of these?' and offer calendar events.\n"
-    "- Always close task conversations with: 'What do you want to tackle first?' — keep Brady moving.\n"
-    "\n"
-    "DAILY TRIAGE — when Brady mentions tasks, items, or things to do mid-conversation:\n"
-    "- If it needs to happen today → offer to add it to 🎯 Today.\n"
-    "- If it's a deal → offer to add it to 🤝 Deals.\n"
-    "- If it's agent-related → offer to add it to 👥 Agents.\n"
-    "- If it's admin/business → offer to add it to 💼 Business.\n"
-    "- Always confirm which list before adding.\n"
-    "- Never let Brady leave a conversation with open items floating — capture everything."
 )
-
-# Keywords that indicate Brady wants live task/calendar data
-_LIVE_DATA_KEYWORDS = [
-    "task", "tasks", "to-do", "todo", "priorities", "priority",
-    "calendar", "schedule", "what to work on", "what's on my plate",
-    "what do i have", "what should i", "today", "brief", "triage",
-    "plate", "agenda", "what's up", "what do i need", "my list",
-    "open items", "what's left",
-]
-
-def _needs_live_data(text: str) -> bool:
-    """Return True if Brady's message is asking about tasks or calendar."""
-    lower = text.lower()
-    return any(kw in lower for kw in _LIVE_DATA_KEYWORDS)
 
 def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> str:
     """Call the Claude API and return the text response."""
@@ -434,10 +430,10 @@ def build_morning_brief() -> str:
     memories = read_memory()
     day_reminders = {
         0: "Monday — Fresh week. Set the tone: recruiting targets, pipeline review, team accountability.",
-        1: "Tuesday — First full production day. Push recruiting and deal flow hard.",
-        2: "Wednesday — Mid-week pulse — is the team actually producing? Close the gap if not.",
-        3: "Thursday — Push for closes before the week bleeds out.",
-        4: "Friday — Wrap strong. Don't let momentum die over the weekend.",
+        1: "Tuesday — Lead Division is live. New leads need same-day follow-up.",
+        2: "Wednesday — Lead Division running. Mid-week pulse — is the team actually producing?",
+        3: "Thursday — Lead Division running. Push for closes before the week bleeds out.",
+        4: "Friday — Lead Division running. Wrap strong. Don't let momentum die over the weekend.",
     }
     day_note = day_reminders.get(weekday, "")
     # Monday check-in: ask about EMD standing
@@ -706,82 +702,93 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Current time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
         f"Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
-        f"Tasks: {tasks_status}\n"
-        f"Conversation history: {len(conversation_history)} messages loaded"
+        f"Tasks: {tasks_status}"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle free-form text — Brady can chat with Ace, and Ace learns from it.
-
-    When Brady asks about tasks, priorities, or calendar, we pre-fetch the live
-    Google data here in Python and inject it into the prompt. Claude (the LLM)
-    has no direct access to Python functions — it only sees text we send it.
-    """
+    Ace can also add and complete Google Tasks by emitting [ADD_TASK:] / [COMPLETE_TASK:] tags."""
     if not _is_authorized(update):
         return
     user_text = update.message.text.strip()
     if not user_text:
         return
-
     memories = read_memory()
     memory_context = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
-
-    # If Brady is asking about tasks or calendar, pre-fetch live data and inject it
-    enriched_user_text = user_text
-    if _needs_live_data(user_text):
-        logger.info("Task/calendar intent detected — fetching live data for free-text response.")
-        tasks_data = get_tasks()
-        calendar_data = get_calendar_events()
-        live_data_parts = []
-        if calendar_data and "⚠️" not in calendar_data:
-            live_data_parts.append(f"📅 Today's Calendar:\n{calendar_data}")
-        if tasks_data:
-            live_data_parts.append(f"✅ Open Tasks:\n{tasks_data}")
-        if live_data_parts:
-            enriched_user_text = (
-                user_text
-                + "\n\n[LIVE DATA FETCHED FROM GOOGLE]\n"
-                + "\n\n".join(live_data_parts)
-            )
-
     system_with_memory = (
         SYSTEM_PROMPT
         + memory_context
         + "\n\nRespond to Brady's message directly and as a real business partner. "
         "If he's on track, confirm it. If something looks off, say so — don't soften it. "
         "If you don't know his current numbers or situation, ask rather than assume. "
-        "If this message reveals something worth remembering for future briefings "
+        "\n\nTASK ACTIONS: If Brady asks you to add, create, or put something on his task list, "
+        "emit [ADD_TASK: exact task title] in your response — the system will create it immediately. "
+        "If Brady asks you to complete, mark done, or check off a task, "
+        "emit [COMPLETE_TASK: partial title] — the system will fuzzy-match and complete it. "
+        "Always use these tags when Brady requests a task action. Never tell him you can't do it. "
+        "After the tag, confirm: '✅ Added to your tasks' or '✅ Marked complete'.\n"
+        "\n\nMEMORY: If this message reveals something worth remembering for future briefings "
         "(a schedule change, business priority, team update, goal progress, etc.), "
         "append it at the very end of your reply using exactly this format:\n"
         "[MEMORY: brief fact to remember]\n"
         "Include 0–3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
     )
     try:
-        # Append enriched message to persistent history and call Claude with full context
-        conversation_history.append({"role": "user", "content": enriched_user_text})
         response = _call_claude(
-            conversation_history,
+            [{"role": "user", "content": user_text}],
             max_tokens=500,
             system=system_with_memory,
         )
+
+        # ── Extract all action tags from the raw response ─────────────────────
         memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', response)
-        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response).strip()
+        add_task_tags = re.findall(r'\[ADD_TASK:\s*(.+?)\]', response)
+        complete_task_tags = re.findall(r'\[COMPLETE_TASK:\s*(.+?)\]', response)
+
+        # ── Strip all tags from the visible response ──────────────────────────
+        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response)
+        clean_response = re.sub(r'\n?\[ADD_TASK:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\n?\[COMPLETE_TASK:[^\]]+\]', '', clean_response)
+        clean_response = clean_response.strip()
+
+        # ── Execute task writes and collect confirmations ─────────────────────
+        task_confirmations = []
+        for title in add_task_tags:
+            title = title.strip()
+            if add_task(title):
+                task_confirmations.append(f"✅ Added to your tasks: {title}")
+                logger.info("handle_message: added task '%s'", title)
+            else:
+                task_confirmations.append(f"⚠️ Couldn't add task: {title}")
+                logger.warning("handle_message: failed to add task '%s'", title)
+
+        for fragment in complete_task_tags:
+            fragment = fragment.strip()
+            success, matched = complete_task_by_title(fragment)
+            if success:
+                task_confirmations.append(f"✅ Marked complete: {matched}")
+                logger.info("handle_message: completed task matching '%s' → '%s'", fragment, matched)
+            else:
+                task_confirmations.append(f"⚠️ No open task found matching: {fragment}")
+                logger.warning("handle_message: no task match for '%s'", fragment)
+
+        # ── Append task confirmations to the message ──────────────────────────
+        if task_confirmations:
+            clean_response = clean_response + "\n\n" + "\n".join(task_confirmations)
+
         await update.message.reply_text(clean_response)
-        # Append assistant response and persist to Drive
-        conversation_history.append({"role": "assistant", "content": clean_response})
-        save_conversation_to_drive(conversation_history)
+
+        # ── Persist memory updates ────────────────────────────────────────────
         if memory_tags:
             merged = _merge_memories(memory_tags, memories)
             if write_memory(merged):
                 logger.info("Stored %d new memory item(s) from conversation.", len(memory_tags))
+
     except Exception as e:
         logger.error("Message handler error: %s", e)
-        # Roll back the user message we appended if the exchange failed
-        if conversation_history and conversation_history[-1]["role"] == "user":
-            conversation_history.pop()
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 # ── Scheduler jobs ─────────────────────────────────────────────────────────────
@@ -865,7 +872,7 @@ def main() -> None:
     scheduler.start()
     logger.info("Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET).")
 
-    logger.info("Ace v10 is starting up…")
+    logger.info("Ace v9 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
