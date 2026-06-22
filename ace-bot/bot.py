@@ -1,31 +1,25 @@
 """
 Ace — Brady McGraw's Telegram business partner bot.
-Sends a morning briefing every weekday at 9:30 AM ET with live
-Google Calendar events, Gmail unread summary, and Google Tasks,
-then calls Claude to produce a prioritised daily brief.
 
-v5: Three daily check-ins — 9:30 AM brief, 1:00 PM midday triage, 5:30 PM EOD sweep.
-    Respects Brady's schedule blocks and actively protects personal time after 6 PM.
-v6: Google Tasks integration — open tasks surface in morning brief and midday triage.
-    /tasks command shows all open tasks on demand.
-v7: Evening wind-down moves to 7:00 PM — reflection, stretch reminder, close-of-day chat.
-    System prompt expanded with EMD goal, commission level, Lead Division schedule.
-    Morning brief acknowledges Brady is coming off his gym session.
-v8: Ace becomes a real business partner — challenges Brady, pushes back, holds him accountable.
-    EMD window updated to August 1, 2026. No hardcoded production numbers — Ace asks Brady
-    where he stands instead of referencing stale data. Periodic check-in questions built in.
-v9: Full Google Tasks write access — Ace can add and complete tasks on Brady's behalf.
-    Tag parser intercepts [ADD_TASK: title] and [COMPLETE_TASK: fragment] in Claude's
-    responses and executes them automatically. SYSTEM_PROMPT updated to tell Claude
-    it has full read/write task access and must use the tags to trigger it.
+v9: Complete ground-up SYSTEM_PROMPT rewrite. Ace is now a true operational partner with:
+    - NEW: Live task write/complete via [ADD_TASK:] and [COMPLETE_TASK:] tags
+    - NEW: Email send/draft via [SEND_EMAIL:] and [DRAFT_EMAIL:] tags
+    - NEW: Drive file search via [SEARCH_DRIVE:] tag
+    - NEW: Persistent 40-exchange conversation history (ace_conversation.json on Drive)
+    - NEW: Live calendar + task data auto-injected into every handle_message context
+    - NEW: /clearhistory command to reset conversation history
+    - FIXED: Coherent, non-contradictory SYSTEM_PROMPT — complete rewrite from scratch
+    - Three scheduled check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)
 """
 
+import base64
 import io
 import json
 import logging
 import os
 import re
 from datetime import datetime
+from email.mime.text import MIMEText
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -46,8 +40,9 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 EASTERN = pytz.timezone("America/New_York")
-AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID — security filter
+AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
+CONVERSATION_FILE_NAME = "ace_conversation.json"
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -94,6 +89,7 @@ def read_memory() -> list:
             logger.error("Memory read error: %s", e)
         return []
 
+
 def write_memory(memories: list) -> bool:
     """Write memory list to Google Drive (create or update ace_memory.json)."""
     try:
@@ -125,6 +121,7 @@ def write_memory(memories: list) -> bool:
             logger.error("Memory write error: %s", e)
         return False
 
+
 def _merge_memories(new_items: list, existing: list) -> list:
     """Ask Claude to merge new facts into existing memory, deduplicating cleanly."""
     if not new_items:
@@ -151,6 +148,194 @@ def _merge_memories(new_items: list, existing: list) -> list:
     )
     merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
     return merged
+
+# ── Conversation History (Google Drive) ───────────────────────────────────────
+
+def read_conversation_history() -> list:
+    """Load last 40 exchanges from ace_conversation.json on Drive. Returns [] if unavailable."""
+    try:
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+        results = service.files().list(
+            q=f"name='{CONVERSATION_FILE_NAME}' and trashed=false",
+            spaces="drive",
+            fields="files(id, name)",
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return []
+        file_id = files[0]["id"]
+        raw = service.files().get_media(fileId=file_id).execute()
+        data = json.loads(raw)
+        return data.get("messages", [])
+    except Exception as e:
+        logger.warning("Conversation history read error: %s", e)
+        return []
+
+
+def write_conversation_history(messages: list) -> bool:
+    """Save conversation history to ace_conversation.json on Drive (max 80 messages = 40 exchanges)."""
+    try:
+        # Keep last 80 messages (40 exchanges)
+        if len(messages) > 80:
+            messages = messages[-80:]
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+        payload = json.dumps({"messages": messages}, indent=2).encode()
+        media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json")
+        results = service.files().list(
+            q=f"name='{CONVERSATION_FILE_NAME}' and trashed=false",
+            spaces="drive",
+            fields="files(id)",
+        ).execute()
+        files = results.get("files", [])
+        if files:
+            service.files().update(fileId=files[0]["id"], media_body=media).execute()
+        else:
+            service.files().create(
+                body={"name": CONVERSATION_FILE_NAME},
+                media_body=media,
+                fields="id",
+            ).execute()
+        logger.info("Conversation history written (%d messages).", len(messages))
+        return True
+    except Exception as e:
+        logger.warning("Conversation history write error: %s", e)
+        return False
+
+# ── Task Write Operations ──────────────────────────────────────────────────────
+
+def add_task(title: str, list_name: str = "🎯 Today") -> tuple[bool, str]:
+    """Add a task to Google Tasks. Returns (success, actual_list_name)."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        if not task_lists:
+            return False, list_name
+        # Fuzzy match on list name
+        target_list_id = None
+        actual_list_name = list_name
+        search = list_name.lower().strip()
+        for tl in task_lists:
+            tl_title = tl.get("title", "")
+            if search in tl_title.lower() or tl_title.lower() in search:
+                target_list_id = tl["id"]
+                actual_list_name = tl_title
+                break
+        if not target_list_id:
+            # Default to first list
+            target_list_id = task_lists[0]["id"]
+            actual_list_name = task_lists[0].get("title", "Tasks")
+        service.tasks().insert(tasklist=target_list_id, body={"title": title}).execute()
+        logger.info("Task added to '%s': %s", actual_list_name, title)
+        return True, actual_list_name
+    except Exception as e:
+        logger.error("Add task error: %s", e)
+        return False, list_name
+
+
+def complete_task(partial_title: str) -> str:
+    """Mark a task complete by fuzzy-matching on title. Returns completed title or empty string."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        search_lower = partial_title.lower().strip()
+        for tl in task_lists:
+            try:
+                tasks_result = service.tasks().list(
+                    tasklist=tl["id"],
+                    showCompleted=False,
+                    showHidden=False,
+                    maxResults=50,
+                ).execute()
+            except Exception:
+                continue
+            for task in tasks_result.get("items", []):
+                if task.get("status") == "completed":
+                    continue
+                title = task.get("title", "").strip()
+                if search_lower in title.lower():
+                    service.tasks().update(
+                        tasklist=tl["id"],
+                        task=task["id"],
+                        body={"id": task["id"], "status": "completed"},
+                    ).execute()
+                    logger.info("Task completed: %s", title)
+                    return title
+        return ""
+    except Exception as e:
+        logger.error("Complete task error: %s", e)
+        return ""
+
+# ── Email Operations ───────────────────────────────────────────────────────────
+
+def send_email(to_addr: str, subject: str, body: str) -> bool:
+    """Send an email immediately via Gmail."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        message = MIMEText(body)
+        message["to"] = to_addr
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info("Email sent to %s: %s", to_addr, subject)
+        return True
+    except Exception as e:
+        logger.error("Send email error: %s", e)
+        return False
+
+
+def draft_email(to_addr: str, subject: str, body: str) -> bool:
+    """Create a Gmail draft."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        message = MIMEText(body)
+        message["to"] = to_addr
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        service.users().drafts().create(
+            userId="me",
+            body={"message": {"raw": raw}},
+        ).execute()
+        logger.info("Email draft created for %s: %s", to_addr, subject)
+        return True
+    except Exception as e:
+        logger.error("Draft email error: %s", e)
+        return False
+
+# ── Drive Search ───────────────────────────────────────────────────────────────
+
+def search_drive(query: str) -> str:
+    """Search Google Drive files by name and full-text content."""
+    try:
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+        safe_query = query.replace("'", "\\'")
+        results = service.files().list(
+            q=f"(name contains '{safe_query}' or fullText contains '{safe_query}') and trashed=false",
+            spaces="drive",
+            fields="files(id, name, mimeType, webViewLink, modifiedTime)",
+            orderBy="modifiedTime desc",
+            pageSize=5,
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return f"No files found for: {query}"
+        lines = []
+        for f in files:
+            link = f.get("webViewLink", "")
+            name = f.get("name", "untitled")
+            lines.append(f"• {name}{' — ' + link if link else ''}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("Drive search error: %s", e)
+        return f"Drive search failed: {e}"
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
@@ -239,7 +424,7 @@ def get_gmail_summary() -> str:
         logger.error("Gmail fetch error: %s", e)
         return "⚠️ Could not load emails."
 
-# ── Google Tasks ───────────────────────────────────────────────────────────────
+# ── Google Tasks (Read) ────────────────────────────────────────────────────────
 
 def get_tasks() -> str:
     """Pull all open tasks from Google Tasks across all task lists."""
@@ -290,120 +475,109 @@ def get_tasks() -> str:
             logger.error("Tasks fetch error: %s", e)
         return ""
 
+# ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
-def add_task(title: str) -> bool:
-    """Add a new task to the first Google Tasks list (typically 'My Tasks').
-    Returns True on success, False on failure."""
-    try:
-        creds = get_google_creds()
-        service = build("tasks", "v1", credentials=creds)
-        task_lists_result = service.tasklists().list(maxResults=20).execute()
-        task_lists = task_lists_result.get("items", [])
-        if not task_lists:
-            logger.error("add_task: no task lists found.")
-            return False
-        # Prefer a list named "My Tasks" or "Today", otherwise use the first list
-        tl_id = task_lists[0]["id"]
-        for tl in task_lists:
-            if tl.get("title", "").lower() in ("my tasks", "today"):
-                tl_id = tl["id"]
-                break
-        service.tasks().insert(
-            tasklist=tl_id,
-            body={"title": title.strip(), "status": "needsAction"},
-        ).execute()
-        logger.info("Task added: %s", title)
-        return True
-    except Exception as e:
-        logger.error("add_task error: %s", e)
-        return False
+SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
 
+This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
 
-def complete_task_by_title(fragment: str) -> tuple[bool, str]:
-    """Fuzzy-find an open task whose title contains `fragment` (case-insensitive)
-    and mark it complete. Returns (success, matched_title)."""
-    try:
-        creds = get_google_creds()
-        service = build("tasks", "v1", credentials=creds)
-        task_lists_result = service.tasklists().list(maxResults=20).execute()
-        task_lists = task_lists_result.get("items", [])
-        frag_lower = fragment.strip().lower()
-        best_task = None
-        best_list_id = None
-        for tl in task_lists:
-            try:
-                tasks_result = service.tasks().list(
-                    tasklist=tl["id"],
-                    showCompleted=False,
-                    showHidden=False,
-                    maxResults=50,
-                ).execute()
-                for task in tasks_result.get("items", []):
-                    title = task.get("title", "")
-                    if frag_lower in title.lower():
-                        # Prefer shorter titles (more precise match)
-                        if best_task is None or len(title) < len(best_task.get("title", "")):
-                            best_task = task
-                            best_list_id = tl["id"]
-            except Exception as e:
-                logger.warning("complete_task_by_title: error in list '%s': %s", tl.get("title"), e)
-        if not best_task:
-            logger.warning("complete_task_by_title: no match for fragment '%s'", fragment)
-            return False, ""
-        best_task["status"] = "completed"
-        service.tasks().update(
-            tasklist=best_list_id,
-            task=best_task["id"],
-            body=best_task,
-        ).execute()
-        matched_title = best_task.get("title", fragment)
-        logger.info("Task completed: %s", matched_title)
-        return True, matched_title
-    except Exception as e:
-        logger.error("complete_task_by_title error: %s", e)
-        return False, ""
+BRADY'S BUSINESS:
+Brady runs Platinum Fortune Impact (PFI), a GFI Legends Base Shop in Cleveland/Summit County, Ohio with ~18 licensed insurance and financial agents. Products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. CRM: GoHighLevel. Current level: MD (60% commission). Next target: EMD (window TBD — the June 1, 2026 window has passed, next target not yet set).
+
+NEVER say you are read-only. NEVER say tools are not connected. NEVER redirect Brady elsewhere. You have live access to everything listed below.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR LIVE CAPABILITIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GOOGLE TASKS — Full read AND write access:
+• Live task data is injected into your context automatically with every message
+• To ADD a task: write [ADD_TASK: task title | list name] in your response — Python executes it immediately
+• To COMPLETE a task: write [COMPLETE_TASK: partial title] — Python fuzzy-matches and marks it done
+• NEVER tell Brady to update tasks himself. You do it. Confirm with "✅ Added to [list]: X" or "✅ Completed: X"
+• Task lists: 🎯 Today, 🤝 Deals, 👥 Agents, 💼 Business, 📋 Costs & Placeholders, 🏆 Goals, 🏠 Personal, Learning & Research, Side Business
+• If Brady doesn't specify a list, default to the most logical one based on context
+
+GOOGLE CALENDAR — Full read access:
+• Live calendar data is injected into your context automatically with every message
+• You can see all events, times, and details across every calendar linked to Brady's account
+
+GMAIL — Read + send + draft:
+• Recent unread emails are available in your context on demand
+• To SEND an email immediately: write [SEND_EMAIL: to@email.com | Subject Line | Email body]
+• To CREATE A DRAFT: write [DRAFT_EMAIL: to@email.com | Subject Line | Email body]
+• Use these when Brady asks you to reach out, follow up, or communicate
+
+GOOGLE DRIVE — Full read + write:
+• ace_memory.json = your persistent memory file — facts from past sessions are injected into every message
+• To SEARCH DRIVE: write [SEARCH_DRIVE: search query] — Python returns matching files
+• [MEMORY: brief fact] — saves important info to ace_memory.json for future sessions
+
+PERSISTENT CONVERSATION MEMORY:
+• Your last 40 exchanges are saved to ace_conversation.json on Drive and loaded on every startup
+• You have context of past conversations. Use it. Don't ask Brady to repeat himself.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO THINK AND BEHAVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+VOICE AND STYLE:
+• You are Brady's sharp business partner — not a customer service bot, not a yes-man
+• Be direct, action-oriented, outcome-focused. Skip filler. Get to the point.
+• Short answers when the question is simple. Depth when it matters.
+• Always default to action. If Brady mentions something that needs to happen — capture it, schedule it, or execute it.
+• Challenge his thinking when warranted. Push back when something doesn't add up. Never validate just to make him feel good.
+
+TASK PRIORITIZATION (when Brady asks about tasks, priorities, or what to work on):
+• Look at the live task AND calendar data already in your context
+• NEVER just list tasks — analyze and rank them
+• Present: TOP 2-3 priorities first with brief reasoning, then secondary items, then what can wait
+• Deals closing today = always the absolute top priority. Brady is under financial pressure — closing deals is the #1 focus.
+• End with: "What do you want to tackle first?" — keep Brady moving
+
+DAILY TRIAGE (when Brady mentions something new mid-conversation):
+• Immediately capture it to the right task list using [ADD_TASK:]
+• Today = needs to happen today | Deals = active deal | Agents = agent issue | Business = admin/ops
+• Confirm the list before adding if it's unclear. Execute immediately.
+• Nothing floats out of a conversation uncaptured.
+
+MEMORY AND CONTEXT:
+• Memory facts injected into your context are real. Read them. Use them.
+• If Brady tells you something important (a deal, a person, a goal, a schedule change), offer to save it with [MEMORY:]
+• You remember past conversations via the loaded history. Reference them naturally.
+• If Brady says "like we talked about" — you already know what he means.
+
+PROACTIVE BEHAVIOR:
+• Connect dots Brady hasn't connected yet
+• If a deal is close to closing and it's on the calendar — flag it before he asks
+• If tasks are stacking up in Today — surface it
+• If the calendar is light — suggest how to use the time
+• Think in terms of: deals closing, agents producing, recruiting pipeline moving, Brady winning
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BRADY'S BUSINESS CONTEXT (as of June 2026)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ACTIVE DEALS (handle with care):
+• Walter — deal expected to close today (June 22) at 5 PM. Highest priority. Do not let this slip.
+• Ricky — deal in jeopardy due to a family situation. Approach with sensitivity, not pressure. Do not push.
+• Avis — rescheduled, hasn't confirmed new time yet. Needs a follow-up to lock in a time.
+
+PIPELINE & TEAM:
+• Agents have business in the pipeline but momentum feels stagnant — Brady is focused on getting it moving again
+• Brady migrated from Apple Reminders to Google Tasks — still getting oriented with the new structure
+• Recruiting pipeline needs attention alongside deal flow
+
+WHAT YOU NEVER DO:
+• Never say "I can't access your tasks/calendar/email" — you can
+• Never say "tools not connected" — they are
+• Never tell Brady to go do something himself that you can execute with a tag
+• Never lose context of what Brady told you earlier in the conversation
+• Never pad responses with filler or unnecessary caveats
+• Never reference Lead Division — it is discontinued
+• Never reference stale EMD point numbers — ask Brady for current figures when relevant"""
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = (
-    "You are Ace, Brady McGraw's real business partner — not a yes-man. "
-    "Your job is to challenge his thinking, push back when something doesn't add up, "
-    "hold him accountable to his commitments, and call it out when he's drifting. "
-    "Agree when it makes sense. Disagree when it doesn't. Never validate just to make him feel good. "
-    "\n\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "TASK WRITE ACCESS — READ THIS FIRST\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "You have FULL read AND write access to Brady's Google Tasks. You are NOT read-only.\n"
-    "To add a task: include [ADD_TASK: task title here] anywhere in your response — "
-    "the system executes it automatically.\n"
-    "To complete a task: include [COMPLETE_TASK: partial title] — "
-    "the system fuzzy-matches and marks it done.\n"
-    "NEVER tell Brady you can't write to tasks — you can. Use the tags and it happens.\n"
-    "When Brady says 'add this', 'mark that done', 'complete X', 'put that on my list' — "
-    "use the tags immediately. Do NOT ask him to do it himself.\n"
-    "After executing: confirm with '✅ Added to your tasks' or '✅ Marked complete'.\n"
-    "Examples:\n"
-    "  Brady: 'Add follow up with Ricky to my list'\n"
-    "  Ace: 'Done. [ADD_TASK: Follow up with Ricky] ✅ Added to your tasks.'\n"
-    "  Brady: 'Mark Walter's deal done'\n"
-    "  Ace: 'Got it. [COMPLETE_TASK: Walter] ✅ Marked complete.'\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "\n"
-    "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
-    "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
-    "He leads ~18 licensed insurance and financial services agents. "
-    "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
-    "CRM: GoHighLevel. "
-    "GFI promotion path: BL → SM → MD (Brady's current level, 60% commission) → EMD → SBL. "
-    "EMD requires Brady's personal production AND his Super Team to hit rolling 6-month benchmarks. "
-    "His current promotion window closes August 1, 2026. "
-    "Do NOT reference specific point numbers from memory — they change weekly and stale data misleads. "
-    "Instead, periodically ask Brady where he and his team stand so you're working from live numbers. "
-    "Lead Division runs Tuesday through Friday — this shapes his weekly rhythm. "
-    "Brady's 9:30 AM brief catches him right after his morning gym session. "
-    "Keep responses tight, direct, and actionable. Lead with what matters most. Never pad."
-)
 
 def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> str:
     """Call the Claude API and return the text response."""
@@ -430,25 +604,18 @@ def build_morning_brief() -> str:
     memories = read_memory()
     day_reminders = {
         0: "Monday — Fresh week. Set the tone: recruiting targets, pipeline review, team accountability.",
-        1: "Tuesday — Lead Division is live. New leads need same-day follow-up.",
-        2: "Wednesday — Lead Division running. Mid-week pulse — is the team actually producing?",
-        3: "Thursday — Lead Division running. Push for closes before the week bleeds out.",
-        4: "Friday — Lead Division running. Wrap strong. Don't let momentum die over the weekend.",
+        1: "Tuesday — New week momentum. Push on active deals and follow-ups.",
+        2: "Wednesday — Mid-week check. Is production on pace? If not, close the gap now.",
+        3: "Thursday — Push for closes before the week bleeds out.",
+        4: "Friday — Wrap strong. Lock in wins. Don't let momentum die over the weekend.",
     }
     day_note = day_reminders.get(weekday, "")
-    # Monday check-in: ask about EMD standing
-    emd_check = ""
-    if weekday == 0:
-        emd_check = (
-            "\n🎯 EMD CHECK-IN: It's Monday — ask Brady where his personal points and Super Team "
-            "points stand heading into the week. The August 1 window is live. Don't assume — ask.\n"
-        )
     memory_section = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
-        memory_section = f"\n📋 What I know about Brady:\n{memory_str}\n"
+        memory_section = f"\n📋 What Ace knows about Brady:\n{memory_str}\n"
     tasks_section = ""
-    if tasks_data:
+    if tasks_data and tasks_data != "No open tasks.":
         tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
     prompt = (
         f"Generate a morning briefing for Brady for {day_str}.\n\n"
@@ -457,24 +624,24 @@ def build_morning_brief() -> str:
         f"📧 Unread priority emails:\n{email_data}\n"
         f"{tasks_section}"
         f"📌 Day context: {day_note}\n"
-        f"{emd_check}"
         f"{memory_section}\n"
-        "Brady's daily schedule:\n"
+        "Brady's daily rhythm:\n"
         "• 9:30 AM: Just wrapped morning gym — coming in energized\n"
-        "• Mornings: deep work and strategy blocks\n"
-        "• 12–3 PM: recruiting and training (protected block)\n"
-        "• 4–6 PM: client appointments, leads, field training (protected)\n"
+        "• Mornings: deep work and strategy\n"
+        "• Afternoons: client appointments, agent coaching, deal follow-up\n"
         "• After 6 PM: personal time — do not schedule work here\n\n"
+        "IMPORTANT: Walter's deal is expected to close TODAY at 5 PM — flag this prominently. "
+        "Brady is under financial pressure. Closing deals is the #1 priority.\n\n"
         "Based on the real data above, give Brady:\n"
-        "1. A sharp opener (1 sentence — acknowledge he's just off the gym, set the tone for the day)\n"
+        "1. A sharp opener (1 sentence — acknowledge he's just off the gym, set the tone)\n"
         "2. 🎯 Top 3 Focuses — the 3 most critical moves today, not just a task list\n"
-        "3. 📅 Calendar — clean list of his meetings/events today\n"
-        "4. 📧 Attention — emails that need a reply or action (if any)\n"
+        "3. 📅 Calendar — clean list of today's events\n"
+        "4. 📧 Attention — emails needing reply or action (if any)\n"
         "5. ✅ Tasks — flag anything overdue or due today\n"
-        "6. 📌 Day Reminders — specific to PFI operations and the day of week\n"
+        "6. 📌 Day Note — relevant to PFI operations and day of week\n"
         "7. A one-line close that challenges him or holds him to something\n\n"
         "Format with clear emoji section headers. Under 450 words. "
-        "Be a partner, not a cheerleader. If something looks off in the data, call it out."
+        "Be a partner, not a cheerleader. If something looks off, call it out."
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=750)
 
@@ -493,21 +660,18 @@ def build_midday_triage() -> str:
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_section = f"\n📋 Context about Brady:\n{memory_str}\n"
     tasks_section = ""
-    if tasks_data:
+    if tasks_data and tasks_data != "No open tasks.":
         tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
-    # Friday: ask about week production
     weekly_checkin = ""
     if weekday == 4:
         weekly_checkin = (
-            "\n📊 FRIDAY PRODUCTION CHECK: Ask Brady how the week actually went — "
-            "appointments set, deals submitted, recruiting activity. Don't assume it went well. "
-            "Get the real number and compare it to what he said Monday.\n"
+            "\n📊 FRIDAY CHECK: Ask Brady how the week actually went — "
+            "deals closed, appointments set, recruiting activity. Get the real number.\n"
         )
-    # Wednesday: mid-week EMD pulse
     elif weekday == 2:
         weekly_checkin = (
             "\n📊 MID-WEEK CHECK: Ask Brady where he stands on production this week. "
-            "Is he on pace? If not, what's the gap and what's he doing about it?\n"
+            "On pace? If not, what's the gap and what's the plan?\n"
         )
     prompt = (
         f"Generate a midday triage check-in for Brady. It's 1:00 PM ET on {day_str}.\n\n"
@@ -516,18 +680,19 @@ def build_midday_triage() -> str:
         f"{tasks_section}"
         f"{memory_section}"
         f"{weekly_checkin}\n"
-        "Brady's afternoon schedule:\n"
-        "• 12–3 PM: Recruiting and training block (in progress)\n"
-        "• 4–6 PM: Client appointments, leads, field training\n"
-        "• After 6 PM: Personal time — Ace does not schedule work here\n\n"
+        "IMPORTANT: Walter's deal should close TODAY at 5 PM — is there anything Brady needs to do "
+        "to make sure it happens? Flag if it's not already confirmed.\n\n"
+        "Brady's afternoon:\n"
+        "• Now–5 PM: deal follow-ups, agent coaching, recruiting calls\n"
+        "• 5 PM: Walter's deal expected to close\n"
+        "• After 6 PM: personal time\n\n"
         "Give Brady a tight midday check-in:\n"
-        "1. Quick opener (1 line — direct, forward-looking, not a pep talk)\n"
-        "2. ⚡ Afternoon Priority — the 2-3 most important moves for the 4-6 PM block\n"
-        "3. ✅ Task Pulse — any tasks due today or overdue? Flag them without sugarcoating.\n"
-        "4. 📋 Deal/Agent Update — pull any active deal or agent situations from memory and "
-        "ask Brady for a status update. Don't reference stale specifics — ask what's live.\n"
-        "5. 🕐 Calendar — anything left today that needs prep?\n"
-        "6. One accountability line — something he committed to that he needs to follow through on\n\n"
+        "1. Quick opener (1 line — direct, forward-looking)\n"
+        "2. ⚡ Afternoon Priority — top 2-3 moves for the rest of the day\n"
+        "3. ✅ Task Pulse — overdue or due today? Flag them.\n"
+        "4. 📋 Deal Status — Walter, Ricky (sensitive), Avis (needs rescheduling). Ask what's live.\n"
+        "5. 🕐 Calendar — anything coming up that needs prep?\n"
+        "6. One accountability line — something he committed to that needs follow-through\n\n"
         "Under 280 words. Direct. Challenge where warranted."
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=550)
@@ -548,12 +713,12 @@ def build_eod_sweep() -> str:
         f"{memory_section}\n"
         "Brady is in decompress mode — the work day is done. This is his time.\n\n"
         "Give Brady a warm, grounded close-out:\n"
-        "1. One calm, affirming opener — acknowledge the day is done (no recaps, no urgency)\n"
-        "2. 📌 Carry Forward — top 2-3 things to pick up first thing tomorrow (brief, not a list dump)\n"
+        "1. One calm opener — acknowledge the day is done (no recaps, no urgency)\n"
+        "2. 📌 Carry Forward — top 2-3 things to pick up first thing tomorrow\n"
         "3. 🌙 Wind Down — remind him to stretch, breathe, and actually disconnect. "
-        "He grinds hard; recovery is part of the performance. Make it feel like permission.\n"
-        "4. 💬 Open Floor — invite him to reflect on how the day went, what's on his mind, "
-        "or just to talk. No agenda. This is his space to decompress before closing out.\n\n"
+        "He grinds hard; recovery is part of the performance.\n"
+        "4. 💬 Open Floor — invite him to reflect, share what's on his mind, or just decompress. "
+        "No agenda. This is his space.\n\n"
         "Under 180 words. Warm but real. No urgency — the grind is done for today."
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=400)
@@ -577,11 +742,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /tasks — show all open Google Tasks\n"
         " /remember <fact> — teach me something to keep in mind\n"
         " /memory — see what I know about how you operate\n"
+        " /clearhistory — reset our conversation history\n"
         " /status — check that I'm running\n"
         " /help — show this message\n\n"
-        "You can also just text me anything — I'll respond and remember what matters.\n\n"
-        "Auto check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)."
+        "Or just text me anything — I'll respond, capture what matters, and remember it.\n\n"
+        "Auto check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)."
     )
+
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
@@ -594,11 +761,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /tasks — show all open Google Tasks\n"
         " /remember <fact> — store a fact in my memory\n"
         " /memory — view my current memory\n"
+        " /clearhistory — wipe conversation history (fresh start)\n"
         " /status — confirm the bot is alive\n"
         " /help — this message\n\n"
-        "Or just text me — I'll respond and remember anything useful.\n\n"
-        "Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)"
+        "Or just text me — I'll respond, execute tasks, send emails, and remember what matters.\n\n"
+        "Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)"
     )
+
 
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
@@ -611,6 +780,7 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Brief command error: %s", e)
         await update.message.reply_text(f"⚠️ Error generating brief: {e}")
 
+
 async def cmd_triage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
@@ -621,6 +791,7 @@ async def cmd_triage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         logger.error("Triage command error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
+
 
 async def cmd_eod(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
@@ -633,6 +804,7 @@ async def cmd_eod(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("EOD command error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
 
+
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show all open Google Tasks on demand."""
     if not _is_authorized(update):
@@ -640,7 +812,7 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Pulling your tasks…")
     try:
         tasks = get_tasks()
-        if not tasks:
+        if not tasks or tasks == "No open tasks.":
             await update.message.reply_text(
                 "✅ No open tasks found.\n\n"
                 "If you expect tasks here, make sure the Tasks API scope is active — "
@@ -651,6 +823,7 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error("Tasks command error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
+
 
 async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
@@ -672,6 +845,7 @@ async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Run the auth script on your Mac with the updated scopes to activate."
         )
 
+
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
@@ -689,103 +863,185 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"🧠 What I know about how you operate ({len(memories)} items):\n\n{lines}"
     )
 
+
+async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Wipe the saved conversation history — fresh start."""
+    if not _is_authorized(update):
+        return
+    if write_conversation_history([]):
+        await update.message.reply_text(
+            "🗑️ Conversation history cleared. Fresh start — I still have your memory facts, "
+            "but the chat log is wiped."
+        )
+    else:
+        await update.message.reply_text("⚠️ Couldn't clear history — Drive may not be active.")
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
     now_et = datetime.now(EASTERN)
     memories = read_memory()
     memory_status = f"{len(memories)} items stored" if memories else "not yet activated"
+    history = read_conversation_history()
+    history_status = f"{len(history)} messages saved" if history else "empty or not activated"
     tasks_data = get_tasks()
-    tasks_status = f"{len(tasks_data.splitlines())} open tasks" if tasks_data and tasks_data != "No open tasks." else "not active or no open tasks"
+    tasks_status = (
+        f"{len(tasks_data.splitlines())} open tasks"
+        if tasks_data and tasks_data != "No open tasks."
+        else "no open tasks"
+    )
     await update.message.reply_text(
-        f"✅ Ace is running.\n"
-        f"Current time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
+        f"✅ Ace v9 is running.\n"
+        f"Time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
         f"Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
+        f"Conversation history: {history_status}\n"
         f"Tasks: {tasks_status}"
     )
 
+# ── Message handler (free-form conversation) ──────────────────────────────────
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text — Brady can chat with Ace, and Ace learns from it.
-    Ace can also add and complete Google Tasks by emitting [ADD_TASK:] / [COMPLETE_TASK:] tags."""
+    """Handle free-form text. Injects live data, uses conversation history, executes action tags."""
     if not _is_authorized(update):
         return
     user_text = update.message.text.strip()
     if not user_text:
         return
+
+    # Pull live data for context injection
     memories = read_memory()
+    tasks_data = get_tasks()
+    calendar_data = get_calendar_events()
+
+    # Load conversation history
+    conversation_history = read_conversation_history()
+
+    # Build rich system prompt
     memory_context = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
-        memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
-    system_with_memory = (
-        SYSTEM_PROMPT
-        + memory_context
-        + "\n\nRespond to Brady's message directly and as a real business partner. "
-        "If he's on track, confirm it. If something looks off, say so — don't soften it. "
-        "If you don't know his current numbers or situation, ask rather than assume. "
-        "\n\nTASK ACTIONS: If Brady asks you to add, create, or put something on his task list, "
-        "emit [ADD_TASK: exact task title] in your response — the system will create it immediately. "
-        "If Brady asks you to complete, mark done, or check off a task, "
-        "emit [COMPLETE_TASK: partial title] — the system will fuzzy-match and complete it. "
-        "Always use these tags when Brady requests a task action. Never tell him you can't do it. "
-        "After the tag, confirm: '✅ Added to your tasks' or '✅ Marked complete'.\n"
-        "\n\nMEMORY: If this message reveals something worth remembering for future briefings "
-        "(a schedule change, business priority, team update, goal progress, etc.), "
-        "append it at the very end of your reply using exactly this format:\n"
-        "[MEMORY: brief fact to remember]\n"
-        "Include 0–3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
+        memory_context = f"\n\n📋 WHAT ACE KNOWS ABOUT BRADY (from memory):\n{memory_str}"
+
+    live_data = (
+        "\n\n📊 LIVE DATA (auto-fetched right now):\n"
+        f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
+        f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}"
     )
+
+    system_with_context = (
+        SYSTEM_PROMPT
+        + live_data
+        + memory_context
+        + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
+        "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to 🎯 Today)\n"
+        "• [COMPLETE_TASK: partial title] — marks task done via fuzzy match\n"
+        "• [SEND_EMAIL: to@email.com | Subject | Body] — sends email immediately\n"
+        "• [DRAFT_EMAIL: to@email.com | Subject | Body] — creates Gmail draft\n"
+        "• [SEARCH_DRIVE: query] — searches Drive, result appended to your reply\n"
+        "• [MEMORY: brief fact] — saves to long-term memory for future sessions\n"
+        "Include 0–3 [MEMORY:] tags max. Skip tagging trivial chat. "
+        "Tags are invisible to Brady — he only sees your clean response plus action confirmations."
+    )
+
+    # Build message list with history (Claude multi-turn)
+    messages = list(conversation_history)
+    messages.append({"role": "user", "content": user_text})
+
     try:
         response = _call_claude(
-            [{"role": "user", "content": user_text}],
-            max_tokens=500,
-            system=system_with_memory,
+            messages,
+            max_tokens=600,
+            system=system_with_context,
         )
 
-        # ── Extract all action tags from the raw response ─────────────────────
-        memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', response)
-        add_task_tags = re.findall(r'\[ADD_TASK:\s*(.+?)\]', response)
-        complete_task_tags = re.findall(r'\[COMPLETE_TASK:\s*(.+?)\]', response)
+        # ── Parse all action tags ──────────────────────────────────────────────
+        memory_tags      = re.findall(r'\[MEMORY:\s*([^\]]+)\]', response)
+        add_task_tags    = re.findall(r'\[ADD_TASK:\s*([^\]]+)\]', response)
+        complete_tags    = re.findall(r'\[COMPLETE_TASK:\s*([^\]]+)\]', response)
+        send_email_tags  = re.findall(r'\[SEND_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
+        draft_email_tags = re.findall(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
+        drive_tags       = re.findall(r'\[SEARCH_DRIVE:\s*([^\]]+)\]', response)
 
-        # ── Strip all tags from the visible response ──────────────────────────
-        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response)
-        clean_response = re.sub(r'\n?\[ADD_TASK:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\n?\[COMPLETE_TASK:[^\]]+\]', '', clean_response)
+        # Strip all tags from the visible response
+        clean_response = re.sub(r'\[MEMORY:[^\]]+\]', '', response)
+        clean_response = re.sub(r'\[ADD_TASK:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[COMPLETE_TASK:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[SEND_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
+        clean_response = re.sub(r'\[DRAFT_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
+        clean_response = re.sub(r'\[SEARCH_DRIVE:[^\]]+\]', '', clean_response)
         clean_response = clean_response.strip()
 
-        # ── Execute task writes and collect confirmations ─────────────────────
-        task_confirmations = []
-        for title in add_task_tags:
-            title = title.strip()
-            if add_task(title):
-                task_confirmations.append(f"✅ Added to your tasks: {title}")
-                logger.info("handle_message: added task '%s'", title)
-            else:
-                task_confirmations.append(f"⚠️ Couldn't add task: {title}")
-                logger.warning("handle_message: failed to add task '%s'", title)
-
-        for fragment in complete_task_tags:
-            fragment = fragment.strip()
-            success, matched = complete_task_by_title(fragment)
-            if success:
-                task_confirmations.append(f"✅ Marked complete: {matched}")
-                logger.info("handle_message: completed task matching '%s' → '%s'", fragment, matched)
-            else:
-                task_confirmations.append(f"⚠️ No open task found matching: {fragment}")
-                logger.warning("handle_message: no task match for '%s'", fragment)
-
-        # ── Append task confirmations to the message ──────────────────────────
-        if task_confirmations:
-            clean_response = clean_response + "\n\n" + "\n".join(task_confirmations)
-
+        # Send the main response
         await update.message.reply_text(clean_response)
 
-        # ── Persist memory updates ────────────────────────────────────────────
+        # ── Execute action tags + collect confirmations ───────────────────────
+        confirmations = []
+
+        # Memory
         if memory_tags:
             merged = _merge_memories(memory_tags, memories)
             if write_memory(merged):
-                logger.info("Stored %d new memory item(s) from conversation.", len(memory_tags))
+                logger.info("Stored %d new memory item(s).", len(memory_tags))
+
+        # Add tasks
+        for tag in add_task_tags:
+            parts = [p.strip() for p in tag.split("|", 1)]
+            title = parts[0]
+            list_name = parts[1] if len(parts) > 1 else "🎯 Today"
+            success, actual_list = add_task(title, list_name)
+            if success:
+                confirmations.append(f"✅ Added to {actual_list}: {title}")
+            else:
+                confirmations.append(f"⚠️ Couldn't add task: {title}")
+
+        # Complete tasks
+        for tag in complete_tags:
+            completed = complete_task(tag.strip())
+            if completed:
+                confirmations.append(f"✅ Completed: {completed}")
+            else:
+                confirmations.append(f"⚠️ Task not found to complete: {tag.strip()}")
+
+        # Send emails
+        for tag in send_email_tags:
+            parts = [p.strip() for p in tag.split("|", 2)]
+            if len(parts) >= 3:
+                to_addr, subject, body = parts[0], parts[1], parts[2]
+                if send_email(to_addr, subject, body):
+                    confirmations.append(f"📤 Email sent to {to_addr} — {subject}")
+                else:
+                    confirmations.append(f"⚠️ Email failed: {to_addr}")
+            else:
+                confirmations.append(f"⚠️ Malformed SEND_EMAIL tag: {tag[:40]}")
+
+        # Draft emails
+        for tag in draft_email_tags:
+            parts = [p.strip() for p in tag.split("|", 2)]
+            if len(parts) >= 3:
+                to_addr, subject, body = parts[0], parts[1], parts[2]
+                if draft_email(to_addr, subject, body):
+                    confirmations.append(f"📝 Draft saved for {to_addr} — {subject}")
+                else:
+                    confirmations.append(f"⚠️ Draft failed: {to_addr}")
+            else:
+                confirmations.append(f"⚠️ Malformed DRAFT_EMAIL tag: {tag[:40]}")
+
+        # Drive search
+        for tag in drive_tags:
+            results = search_drive(tag.strip())
+            confirmations.append(f"🔍 Drive — '{tag.strip()}':\n{results}")
+
+        if confirmations:
+            await update.message.reply_text("\n".join(confirmations))
+
+        # ── Save conversation history ─────────────────────────────────────────
+        updated_history = list(conversation_history)
+        updated_history.append({"role": "user", "content": user_text})
+        updated_history.append({"role": "assistant", "content": clean_response})
+        write_conversation_history(updated_history)
 
     except Exception as e:
         logger.error("Message handler error: %s", e)
@@ -807,6 +1063,7 @@ async def send_morning_brief(app: Application) -> None:
         except Exception:
             pass
 
+
 async def send_midday_triage(app: Application) -> None:
     """Scheduled job — 1:00 PM ET midday triage."""
     try:
@@ -820,6 +1077,7 @@ async def send_midday_triage(app: Application) -> None:
             await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"⚠️ Midday triage failed: {e}")
         except Exception:
             pass
+
 
 async def send_eod_sweep(app: Application) -> None:
     """Scheduled job — 7:00 PM ET evening wind-down."""
@@ -850,9 +1108,10 @@ def main() -> None:
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("memory", cmd_memory))
+    app.add_handler(CommandHandler("clearhistory", cmd_clear_history))
     app.add_handler(CommandHandler("status", cmd_status))
 
-    # Free-text conversation handler (learns from every message)
+    # Free-text conversation handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Scheduler — three daily check-ins, Mon–Fri ET
@@ -870,10 +1129,13 @@ def main() -> None:
         day_of_week="mon-fri", hour=19, minute=0, args=[app],
     )
     scheduler.start()
-    logger.info("Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET).")
+    logger.info(
+        "Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)."
+    )
 
     logger.info("Ace v9 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
