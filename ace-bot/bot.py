@@ -14,7 +14,8 @@ v7: Evening wind-down moves to 7:00 PM — reflection, stretch reminder, close-o
 v8: Ace becomes a real business partner — challenges Brady, pushes back, holds him accountable.
     EMD window updated to August 1, 2026. No hardcoded production numbers — Ace asks Brady
     where he stands instead of referencing stale data. Periodic check-in questions built in.
-v9: Sunday week-prep mode. /weekprep command + auto-detection in message handler.
+v9: Sunday week-prep mode.
+v10: Gmail send/draft + Drive search. Scopes: gmail.modify + drive. /weekprep command + auto-detection in message handler.
     Ace pulls open tasks + full week calendar, shows what's already committed, then drives
     a structured brain dump → Mon–Fri action plan. Sunday 12:00 PM nudge added.
 """
@@ -312,6 +313,71 @@ def get_gmail_summary() -> str:
         logger.error("Gmail fetch error: %s", e)
         return "⚠️ Could not load emails."
 
+
+
+def send_gmail(to: str, subject: str, body: str) -> str:
+    """Sends an email from Brady's Gmail account."""
+    import base64
+    from email.mime.text import MIMEText
+    try:
+        service = build("gmail", "v1", credentials=get_google_creds())
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info("Email sent to %s (id=%s)", to, sent.get("id"))
+        return f"Email sent to {to} (message ID: {sent['id']})"
+    except Exception as e:
+        logger.error("send_gmail error: %s", e)
+        return f"⚠️ Failed to send email: {e}"
+
+
+def draft_gmail(to: str, subject: str, body: str) -> str:
+    """Creates a Gmail draft (does not send)."""
+    import base64
+    from email.mime.text import MIMEText
+    try:
+        service = build("gmail", "v1", credentials=get_google_creds())
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        draft = service.users().drafts().create(
+            userId="me", body={"message": {"raw": raw}}
+        ).execute()
+        logger.info("Draft created for %s (id=%s)", to, draft.get("id"))
+        return f"Draft created for {to} — subject: '{subject}' (draft ID: {draft['id']})"
+    except Exception as e:
+        logger.error("draft_gmail error: %s", e)
+        return f"⚠️ Failed to create draft: {e}"
+
+
+def search_drive_files(query: str) -> str:
+    """Searches Brady's Google Drive for files matching the query."""
+    try:
+        service = build("drive", "v3", credentials=get_google_creds())
+        results = service.files().list(
+            q=f"name contains '{query}' or fullText contains '{query}'",
+            pageSize=10,
+            fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return f"No Drive files found matching '{query}'"
+        lines = [f"Found {len(files)} file(s) matching '{query}':"]
+        for f in files:
+            lines.append(f"• {f['name']} ({f['mimeType']}) — {f.get('webViewLink', 'no link')}")
+        return "\n".join(lines)
+    except Exception as e:
+        err = str(e)
+        if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
+            logger.warning("Drive scope not active — cannot search files.")
+            return "⚠️ Drive search not active — re-auth needed."
+        logger.error("search_drive_files error: %s", e)
+        return f"⚠️ Drive search failed: {e}"
+
+
 # ── Google Tasks ───────────────────────────────────────────────────────────────
 
 def get_tasks() -> str:
@@ -440,6 +506,10 @@ SYSTEM_PROMPT = (
     "To ADD a new task on Brady's behalf, append [ADD_TASK: task title here] anywhere in your reply. "
     "To COMPLETE/CHECK OFF a task, append [COMPLETE_TASK: task title fragment] in your reply. "
     "You CAN add and complete tasks — use the tags above and the bot will execute them. "
+    "To SEND an email from Brady's Gmail, append [SEND_EMAIL: to@email.com|Subject|Body text] in your reply — the bot sends it immediately. "
+    "To CREATE a Gmail draft without sending, append [DRAFT_EMAIL: to@email.com|Subject|Body text] in your reply. "
+    "To SEARCH Brady's Google Drive files, append [SEARCH_DRIVE: search query] in your reply — results will be shown. "
+    "When Brady asks to send an email: use [SEND_EMAIL: to|subject|body]. When he wants a draft: use [DRAFT_EMAIL: to|subject|body]. When he needs to find a file: use [SEARCH_DRIVE: query]. "
     "When Brady asks about calendar or email: that data is pulled live and will appear in context. "
     "Act on Brady's behalf — don't just inform him. If he says 'add that to my tasks', use [ADD_TASK: ...].\n\n"
     "PFI BUSINESS CONTEXT:\n"
@@ -957,11 +1027,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', response)
         add_task_tags = re.findall(r'\[ADD_TASK:\s*(.+?)\]', response)
         complete_task_tags = re.findall(r'\[COMPLETE_TASK:\s*(.+?)\]', response)
+        send_email_tags = re.findall(r'\[SEND_EMAIL:\s*(.+?)\]', response)
+        draft_email_tags = re.findall(r'\[DRAFT_EMAIL:\s*(.+?)\]', response)
+        search_drive_tags = re.findall(r'\[SEARCH_DRIVE:\s*(.+?)\]', response)
 
         # Strip all tags from the user-facing response
         clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response)
         clean_response = re.sub(r'\n?\[ADD_TASK:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\n?\[COMPLETE_TASK:[^\]]+\]', '', clean_response).strip()
+        clean_response = re.sub(r'\n?\[COMPLETE_TASK:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\n?\[SEND_EMAIL:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\n?\[DRAFT_EMAIL:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\n?\[SEARCH_DRIVE:[^\]]+\]', '', clean_response).strip()
 
         # Execute task writes
         task_confirmations = []
@@ -981,6 +1057,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.info("Task completed from conversation: %s", task_frag)
             else:
                 task_confirmations.append(f"⚠️ Couldn't complete task: {task_frag} (not found)")
+
+        # Execute email/drive actions
+        for tag in send_email_tags:
+            parts = tag.strip().split('|', 2)
+            if len(parts) == 3:
+                to, subj, body = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                result = send_gmail(to, subj, body)
+                task_confirmations.append(f"📧 {result}")
+                logger.info("Email sent via tag: %s", to)
+            else:
+                task_confirmations.append("⚠️ SEND_EMAIL format error — use [SEND_EMAIL: to|subject|body]")
+        for tag in draft_email_tags:
+            parts = tag.strip().split('|', 2)
+            if len(parts) == 3:
+                to, subj, body = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                result = draft_gmail(to, subj, body)
+                task_confirmations.append(f"📝 {result}")
+                logger.info("Draft created via tag: %s", to)
+            else:
+                task_confirmations.append("⚠️ DRAFT_EMAIL format error — use [DRAFT_EMAIL: to|subject|body]")
+        for query in search_drive_tags:
+            result = search_drive_files(query.strip())
+            task_confirmations.append(result)
+            logger.info("Drive search via tag: %s", query.strip())
 
         # Append task confirmations to the response if any actions were taken
         if task_confirmations:
@@ -1100,7 +1200,7 @@ def main() -> None:
         "12:00 PM nudge (Sun ET)."
     )
 
-    logger.info("Ace v9 is starting up…")
+    logger.info("Ace v10 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
