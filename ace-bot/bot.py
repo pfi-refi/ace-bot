@@ -857,9 +857,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
+
+    # ── Live task injection ────────────────────────────────────────────────────
+    live_context = ""
+    try:
+        tasks_str = get_tasks()
+        if tasks_str:
+            live_context = f"\n\n[LIVE DATA as of right now]\nOpen Tasks:\n{tasks_str}\n---"
+    except Exception as e:
+        logger.warning("Could not fetch live tasks for conversation context: %s", e)
+
     system_with_memory = (
         SYSTEM_PROMPT
         + memory_context
+        + live_context
         + "\n\nRespond to Brady's message directly and as a real business partner. "
         "If he's on track, confirm it. If something looks off, say so — don't soften it. "
         "If you don't know his current numbers or situation, ask rather than assume. "
