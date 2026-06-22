@@ -9,7 +9,7 @@ v5: Three daily check-ins — 9:30 AM brief, 1:00 PM midday triage, 5:30 PM EOD 
 v6: Google Tasks integration — open tasks surface in morning brief and midday triage.
     /tasks command shows all open tasks on demand.
 v7: Evening wind-down moves to 7:00 PM — reflection, stretch reminder, close-of-day chat.
-    System prompt expanded with EMD goal, commission level, Lead Division schedule.
+    System prompt expanded with EMD goal, commission level, and weekly rhythm.
     Morning brief acknowledges Brady is coming off his gym session.
 v8: Ace becomes a real business partner — challenges Brady, pushes back, holds him accountable.
     EMD window updated to August 1, 2026. No hardcoded production numbers — Ace asks Brady
@@ -363,7 +363,7 @@ SYSTEM_PROMPT = (
     "His current promotion window closes August 1, 2026. "
     "Do NOT reference specific point numbers from memory — they change weekly and stale data misleads. "
     "Instead, periodically ask Brady where he and his team stand so you're working from live numbers. "
-    "Lead Division runs Tuesday through Friday — this shapes his weekly rhythm. "
+    "Brady's week centers on recruiting pipeline, agent production, deal flow, and team development. "
     "Brady's 9:30 AM brief catches him right after his morning gym session. "
     "Keep responses tight, direct, and actionable. Lead with what matters most. Never pad."
     "\n\n"
@@ -373,11 +373,11 @@ SYSTEM_PROMPT = (
     "- Always pull get_tasks() AND get_calendar_events() together to see the full picture.\n"
     "- Do NOT just list tasks — analyze and rank them by urgency and business impact.\n"
     "- Present: TOP PRIORITIES first (2-3 max), then secondary, then what can wait.\n"
-    "- Factor in: Is today a Lead Division day (Tue-Fri)? Deals close to closing? Agent issues? Admin can wait.\n"
-    "- Monday = NO Lead Division: strategy, admin, recruiting, team accountability day.\n"
-    "- Tuesday-Friday = Lead Division ACTIVE: same-day lead follow-up is CRITICAL — jumps the queue.\n"
+    "- Factor in: Are there deals closing today? Agent issues brewing? Admin can wait.\n"
+    "- Monday: strategy, admin, recruiting, team accountability day.\n"
+    "- Tuesday-Friday: production days — recruiting, deal flow, agent activity, and closes.\n"
     "- Deals closing = highest urgency always.\n"
-    "- Agent production issues = urgent on Lead Division days.\n"
+    "- Agent production issues = always urgent.\n"
     "- Admin/business items = Monday or end-of-day slots.\n"
     "- The 🎯 Today list is Brady's daily execution list; Deals/Agents/Business are holding areas.\n"
     "- After presenting priorities, ask: 'Want me to block time for any of these?' and offer calendar events.\n"
@@ -417,10 +417,10 @@ def build_morning_brief() -> str:
     memories = read_memory()
     day_reminders = {
         0: "Monday — Fresh week. Set the tone: recruiting targets, pipeline review, team accountability.",
-        1: "Tuesday — Lead Division is live. New leads need same-day follow-up.",
-        2: "Wednesday — Lead Division running. Mid-week pulse — is the team actually producing?",
-        3: "Thursday — Lead Division running. Push for closes before the week bleeds out.",
-        4: "Friday — Lead Division running. Wrap strong. Don't let momentum die over the weekend.",
+        1: "Tuesday — First full production day. Push recruiting and deal flow hard.",
+        2: "Wednesday — Mid-week pulse — is the team actually producing? Close the gap if not.",
+        3: "Thursday — Push for closes before the week bleeds out.",
+        4: "Friday — Wrap strong. Don't let momentum die over the weekend.",
     }
     day_note = day_reminders.get(weekday, "")
     # Monday check-in: ask about EMD standing
