@@ -16,6 +16,9 @@ v8: Ace becomes a real business partner — challenges Brady, pushes back, holds
     where he stands instead of referencing stale data. Periodic check-in questions built in.
 v9: Persistent conversation history — saved to Google Drive as ace_conversation.json.
     Ace now remembers prior exchanges across Railway restarts/redeploys.
+v10: Fix free-text task/calendar handling — handle_message() now pre-fetches live Google data
+     when Brady asks about tasks, priorities, or calendar via free text. Removes incorrect
+     instruction telling Claude LLM to "pull" Python functions it has no access to.
 """
 
 import io
@@ -370,7 +373,7 @@ SYSTEM_PROMPT = (
     "--- HOW TO BEHAVE AS ACE ---\n"
     "\n"
     "TASK PRIORITIZATION — when Brady asks about tasks, what to work on, his list, or today's priorities:\n"
-    "- Always pull get_tasks() AND get_calendar_events() together to see the full picture.\n"
+    "- When live task and calendar data is included in the message below, use it to see the full picture.\n"
     "- Do NOT just list tasks — analyze and rank them by urgency and business impact.\n"
     "- Present: TOP PRIORITIES first (2-3 max), then secondary, then what can wait.\n"
     "- Factor in: Are there deals closing today? Agent issues brewing? Admin can wait.\n"
@@ -391,6 +394,20 @@ SYSTEM_PROMPT = (
     "- Always confirm which list before adding.\n"
     "- Never let Brady leave a conversation with open items floating — capture everything."
 )
+
+# Keywords that indicate Brady wants live task/calendar data
+_LIVE_DATA_KEYWORDS = [
+    "task", "tasks", "to-do", "todo", "priorities", "priority",
+    "calendar", "schedule", "what to work on", "what's on my plate",
+    "what do i have", "what should i", "today", "brief", "triage",
+    "plate", "agenda", "what's up", "what do i need", "my list",
+    "open items", "what's left",
+]
+
+def _needs_live_data(text: str) -> bool:
+    """Return True if Brady's message is asking about tasks or calendar."""
+    lower = text.lower()
+    return any(kw in lower for kw in _LIVE_DATA_KEYWORDS)
 
 def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> str:
     """Call the Claude API and return the text response."""
@@ -694,17 +711,42 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text — Brady can chat with Ace, and Ace learns from it."""
+    """Handle free-form text — Brady can chat with Ace, and Ace learns from it.
+
+    When Brady asks about tasks, priorities, or calendar, we pre-fetch the live
+    Google data here in Python and inject it into the prompt. Claude (the LLM)
+    has no direct access to Python functions — it only sees text we send it.
+    """
     if not _is_authorized(update):
         return
     user_text = update.message.text.strip()
     if not user_text:
         return
+
     memories = read_memory()
     memory_context = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
+
+    # If Brady is asking about tasks or calendar, pre-fetch live data and inject it
+    enriched_user_text = user_text
+    if _needs_live_data(user_text):
+        logger.info("Task/calendar intent detected — fetching live data for free-text response.")
+        tasks_data = get_tasks()
+        calendar_data = get_calendar_events()
+        live_data_parts = []
+        if calendar_data and "⚠️" not in calendar_data:
+            live_data_parts.append(f"📅 Today's Calendar:\n{calendar_data}")
+        if tasks_data:
+            live_data_parts.append(f"✅ Open Tasks:\n{tasks_data}")
+        if live_data_parts:
+            enriched_user_text = (
+                user_text
+                + "\n\n[LIVE DATA FETCHED FROM GOOGLE]\n"
+                + "\n\n".join(live_data_parts)
+            )
+
     system_with_memory = (
         SYSTEM_PROMPT
         + memory_context
@@ -718,8 +760,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Include 0–3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
     )
     try:
-        # Append user message to persistent history and call Claude with full context
-        conversation_history.append({"role": "user", "content": user_text})
+        # Append enriched message to persistent history and call Claude with full context
+        conversation_history.append({"role": "user", "content": enriched_user_text})
         response = _call_claude(
             conversation_history,
             max_tokens=500,
@@ -823,7 +865,7 @@ def main() -> None:
     scheduler.start()
     logger.info("Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET).")
 
-    logger.info("Ace v9 is starting up…")
+    logger.info("Ace v10 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
