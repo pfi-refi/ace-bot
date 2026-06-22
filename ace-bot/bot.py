@@ -813,18 +813,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_lower = user_text.lower()
     is_week_prep_trigger = any(kw in user_lower for kw in WEEK_PREP_KEYWORDS)
 
-    # Detect brain dump: long unstructured message that looks like a list of things
-    # (likely the follow-up after a /weekprep kickoff)
-    is_likely_brain_dump = (
-        len(user_text) > 120
-        and not user_lower.startswith("/")
-        and any(word in user_lower for word in [
-            "deal", "call", "close", "meet", "follow up", "agent", "recruit",
-            "fire", "need to", "have to", "must", "don't forget", "also",
-            "monday", "tuesday", "wednesday", "thursday", "friday",
-        ])
-    )
-
     if is_week_prep_trigger:
         # Trigger the week prep kickoff inline (same as /weekprep)
         await update.message.reply_text("⏳ Pulling your tasks and week calendar…")
@@ -833,17 +821,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(kickoff)
         except Exception as e:
             logger.error("Week prep inline error: %s", e)
-            await update.message.reply_text(f"⚠️ Error: {e}")
-        return
-
-    if is_likely_brain_dump:
-        # Treat as the brain dump follow-up — build a Mon-Fri action plan
-        await update.message.reply_text("⏳ Building your weekly action plan…")
-        try:
-            plan = build_week_plan_from_dump(user_text)
-            await update.message.reply_text(plan)
-        except Exception as e:
-            logger.error("Brain dump processing error: %s", e)
             await update.message.reply_text(f"⚠️ Error: {e}")
         return
 
