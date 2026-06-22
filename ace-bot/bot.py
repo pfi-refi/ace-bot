@@ -14,10 +14,8 @@ v7: Evening wind-down moves to 7:00 PM — reflection, stretch reminder, close-o
 v8: Ace becomes a real business partner — challenges Brady, pushes back, holds him accountable.
     EMD window updated to August 1, 2026. No hardcoded production numbers — Ace asks Brady
     where he stands instead of referencing stale data. Periodic check-in questions built in.
-v9: Sunday week-prep mode.
-v10: Gmail send/draft + Drive search. Scopes: gmail.modify + drive. /weekprep command + auto-detection in message handler.
-    Ace pulls open tasks + full week calendar, shows what's already committed, then drives
-    a structured brain dump → Mon–Fri action plan. Sunday 12:00 PM nudge added.
+v9: Persistent conversation history — saved to Google Drive as ace_conversation.json.
+    Ace now remembers prior exchanges across Railway restarts/redeploys.
 """
 
 import io
@@ -25,7 +23,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -48,14 +46,8 @@ logger = logging.getLogger(__name__)
 EASTERN = pytz.timezone("America/New_York")
 AUTHORIZED_USER_ID = 8681823830  # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
-
-# Week-prep trigger keywords
-WEEK_PREP_KEYWORDS = [
-    "week prep", "prep my week", "brain dump", "braindump",
-    "plan this week", "plan my week", "set up my week", "weekly plan",
-    "organize my week", "prep for the week", "get ready for the week",
-    "sunday prep", "week setup",
-]
+CONVERSATION_FILE = "ace_conversation.json"
+MAX_HISTORY_MESSAGES = 80  # keep last 80 messages (40 exchanges)
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -160,6 +152,62 @@ def _merge_memories(new_items: list, existing: list) -> list:
     merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
     return merged
 
+# ── Conversation history (Google Drive) ──────────────────────────────────────
+
+def save_conversation_to_drive(history: list) -> None:
+    """Saves conversation history to Google Drive as ace_conversation.json."""
+    try:
+        drive = build("drive", "v3", credentials=get_google_creds())
+        # Trim to last MAX_HISTORY_MESSAGES
+        trimmed = history[-MAX_HISTORY_MESSAGES:]
+        content = json.dumps(trimmed, ensure_ascii=False, indent=2)
+        results = drive.files().list(
+            q=f"name='{CONVERSATION_FILE}' and trashed=false",
+            fields="files(id, name)"
+        ).execute()
+        files = results.get("files", [])
+        media = MediaIoBaseUpload(
+            io.BytesIO(content.encode("utf-8")),
+            mimetype="application/json",
+            resumable=False
+        )
+        if files:
+            drive.files().update(
+                fileId=files[0]["id"],
+                media_body=media
+            ).execute()
+        else:
+            drive.files().create(
+                body={"name": CONVERSATION_FILE, "mimeType": "application/json"},
+                media_body=media
+            ).execute()
+        logger.info("Conversation history saved to Drive (%d messages)", len(trimmed))
+    except Exception as e:
+        logger.warning("Could not save conversation to Drive: %s", e)
+
+def load_conversation_from_drive() -> list:
+    """Loads conversation history from Google Drive. Returns empty list if not found."""
+    try:
+        drive = build("drive", "v3", credentials=get_google_creds())
+        results = drive.files().list(
+            q=f"name='{CONVERSATION_FILE}' and trashed=false",
+            fields="files(id, name)"
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return []
+        file_id = files[0]["id"]
+        content = drive.files().get_media(fileId=file_id).execute()
+        history = json.loads(content.decode("utf-8"))
+        logger.info("Loaded %d messages from Drive conversation history", len(history))
+        return history
+    except Exception as e:
+        logger.warning("Could not load conversation from Drive: %s", e)
+        return []
+
+# ── Module-level conversation history — loaded once on cold start ─────────────
+conversation_history = load_conversation_from_drive()
+
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
 def get_calendar_events() -> str:
@@ -211,72 +259,6 @@ def get_calendar_events() -> str:
         logger.error("Calendar fetch error: %s", e)
         return "⚠️ Could not load calendar."
 
-
-def get_week_calendar() -> str:
-    """Pull Mon–Fri calendar events for the upcoming week (used in week prep)."""
-    try:
-        creds = get_google_creds()
-        service = build("calendar", "v3", credentials=creds)
-        now_et = datetime.now(EASTERN)
-        # Find next Monday (or this Monday if today is Sunday)
-        days_until_monday = (7 - now_et.weekday()) % 7
-        if days_until_monday == 0:
-            days_until_monday = 7  # If today is Monday, get next week
-        # If today is Sunday, next Monday is tomorrow
-        if now_et.weekday() == 6:
-            days_until_monday = 1
-        monday = (now_et + timedelta(days=days_until_monday)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        friday = (monday + timedelta(days=4)).replace(
-            hour=23, minute=59, second=59, microsecond=0
-        )
-        calendars_result = service.calendarList().list().execute()
-        calendars = calendars_result.get("items", [])
-        all_events = []
-        seen_ids: set = set()
-        for calendar in calendars:
-            cal_id = calendar["id"]
-            try:
-                events_result = service.events().list(
-                    calendarId=cal_id,
-                    timeMin=monday.isoformat(),
-                    timeMax=friday.isoformat(),
-                    singleEvents=True,
-                    orderBy="startTime",
-                ).execute()
-                for event in events_result.get("items", []):
-                    event_id = event.get("id", "")
-                    if event_id in seen_ids:
-                        continue
-                    seen_ids.add(event_id)
-                    summary = event.get("summary", "No title")
-                    start = event.get("start", {})
-                    start_dt_str = start.get("dateTime", start.get("date", ""))
-                    if "T" in start_dt_str:
-                        dt = datetime.fromisoformat(start_dt_str)
-                        if dt.tzinfo:
-                            dt = dt.astimezone(EASTERN)
-                        day_str = dt.strftime("%a %-m/%-d")
-                        time_str = dt.strftime("%-I:%M %p")
-                        all_events.append((start_dt_str, f"• {day_str} {time_str} — {summary}"))
-                    else:
-                        try:
-                            d = datetime.strptime(start_dt_str, "%Y-%m-%d")
-                            day_str = d.strftime("%a %-m/%-d")
-                            all_events.append((start_dt_str, f"• {day_str} (all day) — {summary}"))
-                        except Exception:
-                            all_events.append((start_dt_str, f"• {summary}"))
-            except Exception as e:
-                logger.warning("Week calendar fetch error for '%s': %s", cal_id, e)
-        all_events.sort(key=lambda x: x[0])
-        if all_events:
-            return "\n".join(ev[1] for ev in all_events)
-        return "Nothing scheduled yet for the week."
-    except Exception as e:
-        logger.error("Week calendar fetch error: %s", e)
-        return "⚠️ Could not load week calendar."
-
 # ── Gmail ──────────────────────────────────────────────────────────────────────
 
 def get_gmail_summary() -> str:
@@ -312,71 +294,6 @@ def get_gmail_summary() -> str:
     except Exception as e:
         logger.error("Gmail fetch error: %s", e)
         return "⚠️ Could not load emails."
-
-
-
-def send_gmail(to: str, subject: str, body: str) -> str:
-    """Sends an email from Brady's Gmail account."""
-    import base64
-    from email.mime.text import MIMEText
-    try:
-        service = build("gmail", "v1", credentials=get_google_creds())
-        message = MIMEText(body)
-        message["to"] = to
-        message["subject"] = subject
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-        logger.info("Email sent to %s (id=%s)", to, sent.get("id"))
-        return f"Email sent to {to} (message ID: {sent['id']})"
-    except Exception as e:
-        logger.error("send_gmail error: %s", e)
-        return f"⚠️ Failed to send email: {e}"
-
-
-def draft_gmail(to: str, subject: str, body: str) -> str:
-    """Creates a Gmail draft (does not send)."""
-    import base64
-    from email.mime.text import MIMEText
-    try:
-        service = build("gmail", "v1", credentials=get_google_creds())
-        message = MIMEText(body)
-        message["to"] = to
-        message["subject"] = subject
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        draft = service.users().drafts().create(
-            userId="me", body={"message": {"raw": raw}}
-        ).execute()
-        logger.info("Draft created for %s (id=%s)", to, draft.get("id"))
-        return f"Draft created for {to} — subject: '{subject}' (draft ID: {draft['id']})"
-    except Exception as e:
-        logger.error("draft_gmail error: %s", e)
-        return f"⚠️ Failed to create draft: {e}"
-
-
-def search_drive_files(query: str) -> str:
-    """Searches Brady's Google Drive for files matching the query."""
-    try:
-        service = build("drive", "v3", credentials=get_google_creds())
-        results = service.files().list(
-            q=f"name contains '{query}' or fullText contains '{query}'",
-            pageSize=10,
-            fields="files(id, name, mimeType, modifiedTime, webViewLink)",
-        ).execute()
-        files = results.get("files", [])
-        if not files:
-            return f"No Drive files found matching '{query}'"
-        lines = [f"Found {len(files)} file(s) matching '{query}':"]
-        for f in files:
-            lines.append(f"• {f['name']} ({f['mimeType']}) — {f.get('webViewLink', 'no link')}")
-        return "\n".join(lines)
-    except Exception as e:
-        err = str(e)
-        if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
-            logger.warning("Drive scope not active — cannot search files.")
-            return "⚠️ Drive search not active — re-auth needed."
-        logger.error("search_drive_files error: %s", e)
-        return f"⚠️ Drive search failed: {e}"
-
 
 # ── Google Tasks ───────────────────────────────────────────────────────────────
 
@@ -429,107 +346,9 @@ def get_tasks() -> str:
             logger.error("Tasks fetch error: %s", e)
         return ""
 
-
-def add_task(title: str, notes: str = "", due_iso: str = None) -> str:
-    """Add a task to the default (first) Google Tasks list. Returns task ID or '' on failure."""
-    try:
-        creds = get_google_creds()
-        service = build("tasks", "v1", credentials=creds)
-        lists_result = service.tasklists().list(maxResults=1).execute()
-        task_lists = lists_result.get("items", [])
-        if not task_lists:
-            logger.warning("add_task: no task lists found.")
-            return ""
-        tl_id = task_lists[0]["id"]
-        body: dict = {"title": title, "status": "needsAction"}
-        if notes:
-            body["notes"] = notes
-        if due_iso:
-            body["due"] = due_iso
-        result = service.tasks().insert(tasklist=tl_id, body=body).execute()
-        logger.info("Task added: '%s' (id=%s)", title, result.get("id"))
-        return result.get("id", "")
-    except Exception as e:
-        err = str(e)
-        if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
-            logger.warning("Tasks write scope not active — cannot add task.")
-        else:
-            logger.error("add_task error: %s", e)
-        return ""
-
-
-def complete_task_by_title(title_fragment: str) -> bool:
-    """Find the first open task matching title_fragment and mark it completed. Returns True on success."""
-    try:
-        creds = get_google_creds()
-        service = build("tasks", "v1", credentials=creds)
-        task_lists_result = service.tasklists().list(maxResults=20).execute()
-        task_lists = task_lists_result.get("items", [])
-        frag_lower = title_fragment.lower().strip()
-        for tl in task_lists:
-            tl_id = tl["id"]
-            try:
-                tasks_result = service.tasks().list(
-                    tasklist=tl_id,
-                    showCompleted=False,
-                    showHidden=False,
-                    maxResults=100,
-                ).execute()
-                for task in tasks_result.get("items", []):
-                    if task.get("status") == "completed":
-                        continue
-                    task_title = task.get("title", "").lower()
-                    if frag_lower in task_title or task_title in frag_lower:
-                        task["status"] = "completed"
-                        service.tasks().update(
-                            tasklist=tl_id, task=task["id"], body=task
-                        ).execute()
-                        logger.info("Task completed: '%s'", task.get("title"))
-                        return True
-            except Exception as e:
-                logger.warning("complete_task search error in list '%s': %s", tl.get("title"), e)
-        logger.warning("complete_task: no match found for '%s'", title_fragment)
-        return False
-    except Exception as e:
-        logger.error("complete_task_by_title error: %s", e)
-        return False
-
 # ── Claude ─────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "IDENTITY: You are Ace, Brady McGraw's AI business assistant and partner, running directly inside Telegram. "
-    "This conversation IS the integration — you have live access to Brady's Google Tasks (full read+write), "
-    "Google Calendar, Gmail, and a persistent memory file on Google Drive. "
-    "NEVER tell Brady to 'go to Ace on Telegram' or redirect him elsewhere — you ARE Ace on Telegram right now. "
-    "NEVER say you can't access Google Tasks, Calendar, or Gmail — you have direct API access to all of them. "
-    "When Brady asks about tasks: live task data is already injected into your context — reference it directly. "
-    "To ADD a new task on Brady's behalf, append [ADD_TASK: task title here] anywhere in your reply. "
-    "To COMPLETE/CHECK OFF a task, append [COMPLETE_TASK: task title fragment] in your reply. "
-    "You CAN add and complete tasks — use the tags above and the bot will execute them. "
-    "To SEND an email from Brady's Gmail, append [SEND_EMAIL: to@email.com|Subject|Body text] in your reply — the bot sends it immediately. "
-    "To CREATE a Gmail draft without sending, append [DRAFT_EMAIL: to@email.com|Subject|Body text] in your reply. "
-    "To SEARCH Brady's Google Drive files, append [SEARCH_DRIVE: search query] in your reply — results will be shown. "
-    "When Brady asks to send an email: use [SEND_EMAIL: to|subject|body]. When he wants a draft: use [DRAFT_EMAIL: to|subject|body]. When he needs to find a file: use [SEARCH_DRIVE: query]. "
-    "When Brady asks about calendar or email: that data is pulled live and will appear in context. "
-    "Act on Brady's behalf — don't just inform him. If he says 'add that to my tasks', use [ADD_TASK: ...].\n\n"
-    "PFI BUSINESS CONTEXT:\n"
-    "- Brady McGraw is the owner and Marketing Director of Platinum Fortune Impact (PFI), a GFI Legends Base Shop in Summit County / Cleveland, Ohio.\n"
-    "- Brady leads a team of ~18 licensed insurance and financial services agents.\n"
-    "- Primary products: Life Insurance, IUL (Indexed Universal Life), FIA/Annuities, Mortgage Protection, Final Expense.\n"
-    "- CRM: GoHighLevel (GHL). Lead Division runs Tuesday–Friday only.\n"
-    "- Commission structure: 60% MD level.\n"
-    "- Current goal: EMD (Executive Marketing Director) promotion — rolling 6-month window Dec 1 2025 – June 1 2026.\n"
-    "- Weekly structure: Monday = NO Lead Division (strategy, admin, recruiting planning, team accountability). Tuesday–Friday = Lead Division ACTIVE (production days, same-day lead follow-up is critical).\n"
-    "- Brady's schedule priorities: recruiting pipeline, agent production, deal flow, mortgage protection campaigns, and team development.\n\n"
-    "HOW TO BEHAVE AS ACE:\n"
-    "- You are Brady's right hand. Speak like a sharp business partner, not a customer service bot.\n"
-    "- Be direct, action-oriented, and outcome-focused. Skip filler. Get to the point.\n"
-    "- When Brady mentions a deal, an agent, a lead, or a campaign — track it, act on it, or surface what's relevant.\n"
-    "- Proactively connect dots: if Brady mentions he has a call Tuesday, remind him Lead Division is active and same-day follow-up matters.\n"
-    "- When you see open tasks piling up, flag it. When the calendar is light, suggest how to use the time.\n"
-    "- You have memory (ace_memory.json on Google Drive) — read it and use it. If Brady tells you something important, offer to save it.\n"
-    "- Think in terms of: deals closing, agents producing, recruiting pipeline moving, and Brady hitting EMD.\n"
-    "- Always default to action. If Brady says 'I need to follow up with someone' — ask who, when, and offer to add it to Tasks.\n\n"
     "You are Ace, Brady McGraw's real business partner — not a yes-man. "
     "Your job is to challenge his thinking, push back when something doesn't add up, "
     "hold him accountable to his commitments, and call it out when he's drifting. "
@@ -545,15 +364,7 @@ SYSTEM_PROMPT = (
     "Do NOT reference specific point numbers from memory — they change weekly and stale data misleads. "
     "Instead, periodically ask Brady where he and his team stand so you're working from live numbers. "
     "Lead Division runs Tuesday through Friday — this shapes his weekly rhythm. "
-    "Brady's weekly schedule: Monday = planning/admin/recruiting (NO Lead Division — use this for strategy); "
-    "Tuesday–Friday = production days (Lead Division active, leads need same-day follow-up). "
     "Brady's 9:30 AM brief catches him right after his morning gym session. "
-    "SUNDAY WEEK PREP: When Brady initiates a week prep or brain dump (via /weekprep, or by saying "
-    "'week prep', 'prep my week', 'brain dump', etc.), drive the session — don't just ask open-ended questions. "
-    "Step 1: Show him what's already committed (tasks + calendar for the week). "
-    "Step 2: Ask him to dump everything else — deals, people to call, fires, ideas, anything in his head. Tell him not to filter. "
-    "Step 3: Once you have the full picture, organize it into a Mon–Fri action plan respecting his schedule. "
-    "Step 4: Surface the top 3 non-negotiables and confirm them. "
     "Keep responses tight, direct, and actionable. Lead with what matters most. Never pad."
 )
 
@@ -581,13 +392,14 @@ def build_morning_brief() -> str:
     tasks_data = get_tasks()
     memories = read_memory()
     day_reminders = {
-        0: "Monday — Fresh week. No Lead Division today. Set the tone: recruiting targets, pipeline review, team accountability.",
+        0: "Monday — Fresh week. Set the tone: recruiting targets, pipeline review, team accountability.",
         1: "Tuesday — Lead Division is live. New leads need same-day follow-up.",
         2: "Wednesday — Lead Division running. Mid-week pulse — is the team actually producing?",
         3: "Thursday — Lead Division running. Push for closes before the week bleeds out.",
         4: "Friday — Lead Division running. Wrap strong. Don't let momentum die over the weekend.",
     }
     day_note = day_reminders.get(weekday, "")
+    # Monday check-in: ask about EMD standing
     emd_check = ""
     if weekday == 0:
         emd_check = (
@@ -646,6 +458,7 @@ def build_midday_triage() -> str:
     tasks_section = ""
     if tasks_data:
         tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
+    # Friday: ask about week production
     weekly_checkin = ""
     if weekday == 4:
         weekly_checkin = (
@@ -653,6 +466,7 @@ def build_midday_triage() -> str:
             "appointments set, deals submitted, recruiting activity. Don't assume it went well. "
             "Get the real number and compare it to what he said Monday.\n"
         )
+    # Wednesday: mid-week EMD pulse
     elif weekday == 2:
         weekly_checkin = (
             "\n📊 MID-WEEK CHECK: Ask Brady where he stands on production this week. "
@@ -707,101 +521,6 @@ def build_eod_sweep() -> str:
     )
     return _call_claude([{"role": "user", "content": prompt}], max_tokens=400)
 
-# ── Sunday week prep ──────────────────────────────────────────────────────────
-
-def build_week_prep_kickoff() -> str:
-    """
-    Sunday week prep kickoff — pulls open tasks + Mon-Fri calendar,
-    shows Brady what's already committed, then drives a structured brain dump.
-    """
-    now_et = datetime.now(EASTERN)
-    tasks_data = get_tasks()
-    week_cal = get_week_calendar()
-    memories = read_memory()
-    memory_section = ""
-    if memories:
-        memory_str = "\n".join(f"• {m}" for m in memories)
-        memory_section = f"\n📋 What I know about you:\n{memory_str}\n"
-    tasks_section = ""
-    if tasks_data and tasks_data != "No open tasks.":
-        tasks_section = f"\n✅ Current Open Tasks:\n{tasks_data}\n"
-    else:
-        tasks_section = "\n✅ Current Open Tasks: None logged yet.\n"
-    prompt = (
-        f"Brady is doing his Sunday week prep. Today is {now_et.strftime('%A, %B %-d')}.\n\n"
-        "LIVE DATA PULLED:\n"
-        f"📅 Week Calendar (Mon–Fri):\n{week_cal}\n"
-        f"{tasks_section}"
-        f"{memory_section}\n"
-        "Brady's weekly structure:\n"
-        "• Monday: No Lead Division — use for planning, recruiting strategy, admin, team accountability\n"
-        "• Tuesday–Friday: Lead Division active — production days, leads need same-day follow-up\n"
-        "• Morning gym every day, 9:30 AM brief\n"
-        "• 12–3 PM recruiting/training block (protected)\n"
-        "• 4–6 PM client appointments / field training (protected)\n"
-        "• After 6 PM: personal time — off limits\n\n"
-        "Generate a week prep kickoff message that:\n"
-        "1. Opens with a sharp one-liner — it's Sunday, the week starts tomorrow, set the tone\n"
-        "2. 📅 Shows what's ALREADY committed (calendar events + open tasks) — organized by day\n"
-        "3. 🧠 Asks Brady for a full brain dump — tell him to throw EVERYTHING at you: "
-        "deals in flight, people to call, fires to put out, recruiting targets, team issues, "
-        "personal items, anything on his mind. Tell him not to filter or organize — just dump it. "
-        "You'll handle the structure.\n"
-        "4. Explicitly tell him: once he sends the dump, you'll build him a clean Mon–Fri action plan\n\n"
-        "Under 300 words. Drive this. Don't ask vague questions — tell him exactly what to send you."
-    )
-    return _call_claude([{"role": "user", "content": prompt}], max_tokens=600)
-
-
-def build_week_plan_from_dump(brain_dump: str) -> str:
-    """
-    Takes Brady's raw brain dump and organizes it into a structured Mon-Fri action plan.
-    """
-    tasks_data = get_tasks()
-    week_cal = get_week_calendar()
-    memories = read_memory()
-    memory_section = ""
-    if memories:
-        memory_str = "\n".join(f"• {m}" for m in memories)
-        memory_section = f"\nContext about Brady:\n{memory_str}\n"
-    prompt = (
-        "Brady just sent his Sunday brain dump. Organize it into a clean Mon–Fri action plan.\n\n"
-        f"BRADY'S BRAIN DUMP:\n{brain_dump}\n\n"
-        f"EXISTING CALENDAR (Mon–Fri):\n{week_cal}\n\n"
-        f"OPEN TASKS:\n{tasks_data}\n"
-        f"{memory_section}\n"
-        "Brady's weekly structure:\n"
-        "• Monday: NO Lead Division — strategy, admin, recruiting planning, team accountability\n"
-        "• Tuesday–Friday: Lead Division ACTIVE — production days, same-day lead follow-up\n"
-        "• 12–3 PM daily: recruiting/training (protected — don't schedule over this)\n"
-        "• 4–6 PM daily: client appointments / leads (protected)\n"
-        "• After 6 PM: personal time — nothing goes here\n\n"
-        "Build the plan:\n"
-        "1. 🎯 TOP 3 NON-NEGOTIABLES this week — the 3 moves that matter most, regardless of day\n"
-        "2. 📅 MON–FRI BREAKDOWN — for each day: 2-3 specific actions, slotted to the right day "
-        "based on his schedule (Monday for planning, Tue-Fri for production). "
-        "Work around existing calendar commitments.\n"
-        "3. 🔥 FIRES — anything that needs to happen TODAY or first thing Monday morning\n"
-        "4. 📋 PARKING LOT — items from the dump that don't fit this week but shouldn't get lost\n"
-        "5. Close with one line that holds him to the non-negotiables\n\n"
-        "Be specific. Use the actual names, deals, and tasks Brady mentioned. "
-        "Under 500 words. This is his operating plan for the week — make it usable."
-    )
-    return _call_claude([{"role": "user", "content": prompt}], max_tokens=900)
-
-
-def build_sunday_nudge() -> str:
-    """Scheduled Sunday 12 PM nudge — short prompt to kick off week prep."""
-    now_et = datetime.now(EASTERN)
-    return (
-        f"☀️ Sunday check-in — it's {now_et.strftime('%-I:%M %p')}.\n\n"
-        "Week starts tomorrow. Before the day gets away from you:\n\n"
-        "Type /weekprep and I'll pull your open tasks and calendar, "
-        "then walk you through a brain dump so you go into Monday with a real plan — "
-        "not just a list of things you hope to remember.\n\n"
-        "Takes 5 minutes. Worth it."
-    )
-
 # ── Security check ─────────────────────────────────────────────────────────────
 
 def _is_authorized(update: Update) -> bool:
@@ -818,15 +537,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /brief — morning briefing right now\n"
         " /triage — midday check-in on demand\n"
         " /eod — evening wind-down on demand\n"
-        " /weekprep — Sunday week prep (brain dump → Mon–Fri plan)\n"
         " /tasks — show all open Google Tasks\n"
         " /remember <fact> — teach me something to keep in mind\n"
         " /memory — see what I know about how you operate\n"
         " /status — check that I'm running\n"
         " /help — show this message\n\n"
         "You can also just text me anything — I'll respond and remember what matters.\n\n"
-        "Auto check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
-        "Sunday: 12:00 PM week prep nudge."
+        "Auto check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)."
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -837,15 +554,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /brief — on-demand morning brief (live calendar + email + tasks)\n"
         " /triage — midday priority check-in\n"
         " /eod — evening wind-down and carry-forward\n"
-        " /weekprep — Sunday brain dump → structured Mon–Fri action plan\n"
         " /tasks — show all open Google Tasks\n"
         " /remember <fact> — store a fact in my memory\n"
         " /memory — view my current memory\n"
         " /status — confirm the bot is alive\n"
         " /help — this message\n\n"
         "Or just text me — I'll respond and remember anything useful.\n\n"
-        "Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
-        "Sunday: 12:00 PM week prep nudge"
+        "Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)"
     )
 
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -879,18 +594,6 @@ async def cmd_eod(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(brief)
     except Exception as e:
         logger.error("EOD command error: %s", e)
-        await update.message.reply_text(f"⚠️ Error: {e}")
-
-async def cmd_weekprep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sunday week prep — pulls tasks + week calendar, drives structured brain dump."""
-    if not _is_authorized(update):
-        return
-    await update.message.reply_text("⏳ Pulling your tasks and week calendar…")
-    try:
-        kickoff = build_week_prep_kickoff()
-        await update.message.reply_text(kickoff)
-    except Exception as e:
-        logger.error("Week prep command error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -960,9 +663,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         f"✅ Ace is running.\n"
         f"Current time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
-        f"Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri) · 12:00 PM nudge (Sun)\n"
+        f"Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
-        f"Tasks: {tasks_status}"
+        f"Tasks: {tasks_status}\n"
+        f"Conversation history: {len(conversation_history)} messages loaded"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -972,42 +676,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text.strip()
     if not user_text:
         return
-
-    # ── Week prep detection ────────────────────────────────────────────────────
-    user_lower = user_text.lower()
-    is_week_prep_trigger = any(kw in user_lower for kw in WEEK_PREP_KEYWORDS)
-
-    if is_week_prep_trigger:
-        # Trigger the week prep kickoff inline (same as /weekprep)
-        await update.message.reply_text("⏳ Pulling your tasks and week calendar…")
-        try:
-            kickoff = build_week_prep_kickoff()
-            await update.message.reply_text(kickoff)
-        except Exception as e:
-            logger.error("Week prep inline error: %s", e)
-            await update.message.reply_text(f"⚠️ Error: {e}")
-        return
-
-    # ── Standard conversation ──────────────────────────────────────────────────
     memories = read_memory()
     memory_context = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_context = f"\n\nWhat I already know about Brady:\n{memory_str}"
-
-    # ── Live task injection ────────────────────────────────────────────────────
-    live_context = ""
-    try:
-        tasks_str = get_tasks()
-        if tasks_str:
-            live_context = f"\n\n[LIVE DATA as of right now]\nOpen Tasks:\n{tasks_str}\n---"
-    except Exception as e:
-        logger.warning("Could not fetch live tasks for conversation context: %s", e)
-
     system_with_memory = (
         SYSTEM_PROMPT
         + memory_context
-        + live_context
         + "\n\nRespond to Brady's message directly and as a real business partner. "
         "If he's on track, confirm it. If something looks off, say so — don't soften it. "
         "If you don't know his current numbers or situation, ask rather than assume. "
@@ -1018,83 +694,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Include 0–3 [MEMORY: ...] tags max. Skip tagging trivial or one-off chat."
     )
     try:
+        # Append user message to persistent history and call Claude with full context
+        conversation_history.append({"role": "user", "content": user_text})
         response = _call_claude(
-            [{"role": "user", "content": user_text}],
+            conversation_history,
             max_tokens=500,
             system=system_with_memory,
         )
-        # Parse action tags before cleaning
         memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', response)
-        add_task_tags = re.findall(r'\[ADD_TASK:\s*(.+?)\]', response)
-        complete_task_tags = re.findall(r'\[COMPLETE_TASK:\s*(.+?)\]', response)
-        send_email_tags = re.findall(r'\[SEND_EMAIL:\s*(.+?)\]', response)
-        draft_email_tags = re.findall(r'\[DRAFT_EMAIL:\s*(.+?)\]', response)
-        search_drive_tags = re.findall(r'\[SEARCH_DRIVE:\s*(.+?)\]', response)
-
-        # Strip all tags from the user-facing response
-        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response)
-        clean_response = re.sub(r'\n?\[ADD_TASK:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\n?\[COMPLETE_TASK:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\n?\[SEND_EMAIL:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\n?\[DRAFT_EMAIL:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\n?\[SEARCH_DRIVE:[^\]]+\]', '', clean_response).strip()
-
-        # Execute task writes
-        task_confirmations = []
-        for task_title in add_task_tags:
-            task_title = task_title.strip()
-            task_id = add_task(task_title)
-            if task_id:
-                task_confirmations.append(f"✅ Task added: {task_title}")
-                logger.info("Task added from conversation: %s", task_title)
-            else:
-                task_confirmations.append(f"⚠️ Couldn't add task: {task_title} (check Tasks scope)")
-        for task_frag in complete_task_tags:
-            task_frag = task_frag.strip()
-            success = complete_task_by_title(task_frag)
-            if success:
-                task_confirmations.append(f"✅ Task completed: {task_frag}")
-                logger.info("Task completed from conversation: %s", task_frag)
-            else:
-                task_confirmations.append(f"⚠️ Couldn't complete task: {task_frag} (not found)")
-
-        # Execute email/drive actions
-        for tag in send_email_tags:
-            parts = tag.strip().split('|', 2)
-            if len(parts) == 3:
-                to, subj, body = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                result = send_gmail(to, subj, body)
-                task_confirmations.append(f"📧 {result}")
-                logger.info("Email sent via tag: %s", to)
-            else:
-                task_confirmations.append("⚠️ SEND_EMAIL format error — use [SEND_EMAIL: to|subject|body]")
-        for tag in draft_email_tags:
-            parts = tag.strip().split('|', 2)
-            if len(parts) == 3:
-                to, subj, body = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                result = draft_gmail(to, subj, body)
-                task_confirmations.append(f"📝 {result}")
-                logger.info("Draft created via tag: %s", to)
-            else:
-                task_confirmations.append("⚠️ DRAFT_EMAIL format error — use [DRAFT_EMAIL: to|subject|body]")
-        for query in search_drive_tags:
-            result = search_drive_files(query.strip())
-            task_confirmations.append(result)
-            logger.info("Drive search via tag: %s", query.strip())
-
-        # Append task confirmations to the response if any actions were taken
-        if task_confirmations:
-            clean_response = clean_response + "\n\n" + "\n".join(task_confirmations)
-
+        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response).strip()
         await update.message.reply_text(clean_response)
-
-        # Save memory items
+        # Append assistant response and persist to Drive
+        conversation_history.append({"role": "assistant", "content": clean_response})
+        save_conversation_to_drive(conversation_history)
         if memory_tags:
             merged = _merge_memories(memory_tags, memories)
             if write_memory(merged):
                 logger.info("Stored %d new memory item(s) from conversation.", len(memory_tags))
     except Exception as e:
         logger.error("Message handler error: %s", e)
+        # Roll back the user message we appended if the exchange failed
+        if conversation_history and conversation_history[-1]["role"] == "user":
+            conversation_history.pop()
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 # ── Scheduler jobs ─────────────────────────────────────────────────────────────
@@ -1141,20 +762,6 @@ async def send_eod_sweep(app: Application) -> None:
         except Exception:
             pass
 
-async def send_sunday_nudge(app: Application) -> None:
-    """Scheduled job — Sunday 12:00 PM ET week prep nudge."""
-    try:
-        logger.info("Sending Sunday week prep nudge…")
-        nudge = build_sunday_nudge()
-        await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=nudge)
-        logger.info("Sunday nudge sent.")
-    except Exception as e:
-        logger.error("Sunday nudge error: %s", e)
-        try:
-            await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=f"⚠️ Sunday nudge failed: {e}")
-        except Exception:
-            pass
-
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1167,7 +774,6 @@ def main() -> None:
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("triage", cmd_triage))
     app.add_handler(CommandHandler("eod", cmd_eod))
-    app.add_handler(CommandHandler("weekprep", cmd_weekprep))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("memory", cmd_memory))
@@ -1176,7 +782,7 @@ def main() -> None:
     # Free-text conversation handler (learns from every message)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Scheduler — three daily check-ins Mon–Fri + Sunday nudge
+    # Scheduler — three daily check-ins, Mon–Fri ET
     scheduler = AsyncIOScheduler(timezone=EASTERN)
     scheduler.add_job(
         send_morning_brief, trigger="cron",
@@ -1190,17 +796,10 @@ def main() -> None:
         send_eod_sweep, trigger="cron",
         day_of_week="mon-fri", hour=19, minute=0, args=[app],
     )
-    scheduler.add_job(
-        send_sunday_nudge, trigger="cron",
-        day_of_week="sun", hour=12, minute=0, args=[app],
-    )
     scheduler.start()
-    logger.info(
-        "Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET) · "
-        "12:00 PM nudge (Sun ET)."
-    )
+    logger.info("Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET).")
 
-    logger.info("Ace v10 is starting up…")
+    logger.info("Ace v9 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
