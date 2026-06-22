@@ -363,6 +363,71 @@ def get_tasks() -> str:
             logger.error("Tasks fetch error: %s", e)
         return ""
 
+
+def add_task(title: str, notes: str = "", due_iso: str = None) -> str:
+    """Add a task to the default (first) Google Tasks list. Returns task ID or '' on failure."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        lists_result = service.tasklists().list(maxResults=1).execute()
+        task_lists = lists_result.get("items", [])
+        if not task_lists:
+            logger.warning("add_task: no task lists found.")
+            return ""
+        tl_id = task_lists[0]["id"]
+        body: dict = {"title": title, "status": "needsAction"}
+        if notes:
+            body["notes"] = notes
+        if due_iso:
+            body["due"] = due_iso
+        result = service.tasks().insert(tasklist=tl_id, body=body).execute()
+        logger.info("Task added: '%s' (id=%s)", title, result.get("id"))
+        return result.get("id", "")
+    except Exception as e:
+        err = str(e)
+        if "403" in err or "insufficient" in err.lower() or "scope" in err.lower():
+            logger.warning("Tasks write scope not active — cannot add task.")
+        else:
+            logger.error("add_task error: %s", e)
+        return ""
+
+
+def complete_task_by_title(title_fragment: str) -> bool:
+    """Find the first open task matching title_fragment and mark it completed. Returns True on success."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        frag_lower = title_fragment.lower().strip()
+        for tl in task_lists:
+            tl_id = tl["id"]
+            try:
+                tasks_result = service.tasks().list(
+                    tasklist=tl_id,
+                    showCompleted=False,
+                    showHidden=False,
+                    maxResults=100,
+                ).execute()
+                for task in tasks_result.get("items", []):
+                    if task.get("status") == "completed":
+                        continue
+                    task_title = task.get("title", "").lower()
+                    if frag_lower in task_title or task_title in frag_lower:
+                        task["status"] = "completed"
+                        service.tasks().update(
+                            tasklist=tl_id, task=task["id"], body=task
+                        ).execute()
+                        logger.info("Task completed: '%s'", task.get("title"))
+                        return True
+            except Exception as e:
+                logger.warning("complete_task search error in list '%s': %s", tl.get("title"), e)
+        logger.warning("complete_task: no match found for '%s'", title_fragment)
+        return False
+    except Exception as e:
+        logger.error("complete_task_by_title error: %s", e)
+        return False
+
 # ── Claude ─────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
@@ -371,10 +436,12 @@ SYSTEM_PROMPT = (
     "Google Calendar, Gmail, and a persistent memory file on Google Drive. "
     "NEVER tell Brady to 'go to Ace on Telegram' or redirect him elsewhere — you ARE Ace on Telegram right now. "
     "NEVER say you can't access Google Tasks, Calendar, or Gmail — you have direct API access to all of them. "
-    "When Brady asks about tasks: call get_tasks() and work with them directly. "
-    "When Brady asks about calendar: call get_calendar_events(). "
-    "When Brady asks about email: call get_gmail_messages(). "
-    "You can add tasks, complete tasks, edit tasks, and organize them. Act on Brady's behalf — don't just inform him.\n\n"
+    "When Brady asks about tasks: live task data is already injected into your context — reference it directly. "
+    "To ADD a new task on Brady's behalf, append [ADD_TASK: task title here] anywhere in your reply. "
+    "To COMPLETE/CHECK OFF a task, append [COMPLETE_TASK: task title fragment] in your reply. "
+    "You CAN add and complete tasks — use the tags above and the bot will execute them. "
+    "When Brady asks about calendar or email: that data is pulled live and will appear in context. "
+    "Act on Brady's behalf — don't just inform him. If he says 'add that to my tasks', use [ADD_TASK: ...].\n\n"
     "PFI BUSINESS CONTEXT:\n"
     "- Brady McGraw is the owner and Marketing Director of Platinum Fortune Impact (PFI), a GFI Legends Base Shop in Summit County / Cleveland, Ohio.\n"
     "- Brady leads a team of ~18 licensed insurance and financial services agents.\n"
@@ -886,9 +953,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             max_tokens=500,
             system=system_with_memory,
         )
+        # Parse action tags before cleaning
         memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', response)
-        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response).strip()
+        add_task_tags = re.findall(r'\[ADD_TASK:\s*(.+?)\]', response)
+        complete_task_tags = re.findall(r'\[COMPLETE_TASK:\s*(.+?)\]', response)
+
+        # Strip all tags from the user-facing response
+        clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', response)
+        clean_response = re.sub(r'\n?\[ADD_TASK:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\n?\[COMPLETE_TASK:[^\]]+\]', '', clean_response).strip()
+
+        # Execute task writes
+        task_confirmations = []
+        for task_title in add_task_tags:
+            task_title = task_title.strip()
+            task_id = add_task(task_title)
+            if task_id:
+                task_confirmations.append(f"✅ Task added: {task_title}")
+                logger.info("Task added from conversation: %s", task_title)
+            else:
+                task_confirmations.append(f"⚠️ Couldn't add task: {task_title} (check Tasks scope)")
+        for task_frag in complete_task_tags:
+            task_frag = task_frag.strip()
+            success = complete_task_by_title(task_frag)
+            if success:
+                task_confirmations.append(f"✅ Task completed: {task_frag}")
+                logger.info("Task completed from conversation: %s", task_frag)
+            else:
+                task_confirmations.append(f"⚠️ Couldn't complete task: {task_frag} (not found)")
+
+        # Append task confirmations to the response if any actions were taken
+        if task_confirmations:
+            clean_response = clean_response + "\n\n" + "\n".join(task_confirmations)
+
         await update.message.reply_text(clean_response)
+
+        # Save memory items
         if memory_tags:
             merged = _merge_memories(memory_tags, memories)
             if write_memory(merged):
