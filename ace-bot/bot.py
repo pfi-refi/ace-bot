@@ -593,7 +593,7 @@ BRADY'S BUSINESS CONTEXT (as of June 2026)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ACTIVE DEALS (handle with care):
-• Walter — deal expected to close today (June 22) at 5 PM. Highest priority. Do not let this slip.
+• Walter — personal deal in final close. Brady is with Walter on June 23 finishing it now. Top priority — support the close, do not add pressure.
 • Ricky — deal in jeopardy due to a family situation. Approach with sensitivity, not pressure. Do not push.
 • Avis — rescheduled, hasn't confirmed new time yet. Needs a follow-up to lock in a time.
 
