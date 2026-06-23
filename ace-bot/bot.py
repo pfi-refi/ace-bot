@@ -7,6 +7,7 @@ v9: Complete ground-up SYSTEM_PROMPT rewrite. Ace is now a true operational part
     - NEW: Drive file search via [SEARCH_DRIVE:] tag
     - NEW: Persistent 40-exchange conversation history (ace_conversation.json on Drive)
     - NEW: Live calendar + task data auto-injected into every handle_message context
+    - NEW: Calendar write — [CREATE_EVENT:] and [DELETE_EVENT:] tags for full calendar control
     - NEW: /clearhistory command to reset conversation history
     - FIXED: Coherent, non-contradictory SYSTEM_PROMPT — complete rewrite from scratch
     - Three scheduled check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)
@@ -18,7 +19,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 
 import pytz
@@ -458,6 +459,64 @@ def get_recent_read_emails() -> str:
         logger.error("Recent read email fetch error: %s", e)
         return "⚠️ Could not load recent read emails."
 
+# ── Google Calendar (Write) ────────────────────────────────────────────────────
+
+def create_calendar_event(title: str, date_str: str, time_str: str = None,
+                           duration_minutes: int = 60, description: str = "",
+                           calendar_id: str = "primary") -> tuple:
+    """Create a Google Calendar event. Returns (success, event_id_or_error)."""
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        if time_str and time_str.lower() not in ("all-day", "all day", ""):
+            start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            start_dt = EASTERN.localize(start_dt)
+            end_dt = start_dt + timedelta(minutes=int(duration_minutes))
+            event_body = {
+                "summary": title,
+                "description": description or "",
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": "America/New_York"},
+                "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "America/New_York"},
+            }
+        else:
+            event_body = {
+                "summary": title,
+                "description": description or "",
+                "start": {"date": date_str},
+                "end":   {"date": date_str},
+            }
+        result = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+        return True, result.get("id", "created")
+    except Exception as e:
+        logger.error("Calendar create error: %s", e)
+        return False, str(e)
+
+
+def delete_calendar_event(title: str, date_str: str, calendar_id: str = "primary") -> tuple:
+    """Delete a calendar event by title match on a given date. Returns (success, message)."""
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        start_dt = EASTERN.localize(datetime.strptime(date_str, "%Y-%m-%d"))
+        end_dt = start_dt + timedelta(days=1)
+        events_result = service.events().list(
+            calendarId=calendar_id,
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+        events = events_result.get("items", [])
+        title_lower = title.lower()
+        matches = [e for e in events if title_lower in e.get("summary", "").lower()]
+        if not matches:
+            return False, f"No event matching '{title}' on {date_str}"
+        service.events().delete(calendarId=calendar_id, eventId=matches[0]["id"]).execute()
+        return True, matches[0].get("summary", title)
+    except Exception as e:
+        logger.error("Calendar delete error: %s", e)
+        return False, str(e)
+
 # ── Google Tasks (Read) ────────────────────────────────────────────────────────
 
 def get_tasks() -> str:
@@ -532,9 +591,14 @@ GOOGLE TASKS — Full read AND write access:
 • Task lists: 🎯 Today, 🤝 Deals, 👥 Agents, 💼 Business, 📋 Costs & Placeholders, 🏆 Goals, 🏠 Personal, Learning & Research, Side Business
 • If Brady doesn't specify a list, default to the most logical one based on context
 
-GOOGLE CALENDAR — Full read access:
+GOOGLE CALENDAR — Full read AND write access:
 • Live calendar data is injected into your context automatically with every message
 • You can see all events, times, and details across every calendar linked to Brady's account
+• To CREATE an event: [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description]
+• To DELETE an event: [DELETE_EVENT: title | YYYY-MM-DD]
+• Time format: 24-hour (e.g., 14:00 = 2:00 PM). Omit time for all-day events.
+• NEVER tell Brady to add something to his calendar himself — use the tag and confirm.
+• Confirm creates with: "📅 Added to your calendar: [event] on [date] at [time]"
 
 GMAIL — Read + send + draft:
 • Recent unread emails are available in your context on demand
@@ -980,6 +1044,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "• [SEND_EMAIL: to@email.com | Subject | Body] — sends email immediately\n"
         "• [DRAFT_EMAIL: to@email.com | Subject | Body] — creates Gmail draft\n"
         "• [SEARCH_DRIVE: query] — searches Drive, result appended to your reply\n"
+        "• [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description] — creates calendar event (time + description optional)\n"
+        "• [DELETE_EVENT: title | YYYY-MM-DD] — deletes matching calendar event\n"
         "• [MEMORY: brief fact] — saves to long-term memory for future sessions\n"
         "Include 0–3 [MEMORY:] tags max. Skip tagging trivial chat. "
         "Tags are invisible to Brady — he only sees your clean response plus action confirmations."
@@ -1002,7 +1068,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         complete_tags    = re.findall(r'\[COMPLETE_TASK:\s*([^\]]+)\]', response)
         send_email_tags  = re.findall(r'\[SEND_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
         draft_email_tags = re.findall(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
-        drive_tags       = re.findall(r'\[SEARCH_DRIVE:\s*([^\]]+)\]', response)
+        drive_tags          = re.findall(r'\[SEARCH_DRIVE:\s*([^\]]+)\]', response)
+        create_event_tags   = re.findall(r'\[CREATE_EVENT:\s*([^\]]+)\]', response)
+        delete_event_tags   = re.findall(r'\[DELETE_EVENT:\s*([^\]]+)\]', response)
 
         # Strip all tags from the visible response
         clean_response = re.sub(r'\[MEMORY:[^\]]+\]', '', response)
@@ -1011,6 +1079,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         clean_response = re.sub(r'\[SEND_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
         clean_response = re.sub(r'\[DRAFT_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
         clean_response = re.sub(r'\[SEARCH_DRIVE:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[CREATE_EVENT:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[DELETE_EVENT:[^\]]+\]', '', clean_response)
         clean_response = clean_response.strip()
 
         # Send the main response
@@ -1072,6 +1142,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for tag in drive_tags:
             results = search_drive(tag.strip())
             confirmations.append(f"🔍 Drive — '{tag.strip()}':\n{results}")
+
+        # Create calendar events
+        for tag in create_event_tags:
+            parts = [p.strip() for p in tag.split("|")]
+            if len(parts) >= 2:
+                title = parts[0]
+                date_s = parts[1]
+                time_s = parts[2] if len(parts) > 2 else None
+                dur = int(parts[3]) if len(parts) > 3 and parts[3].strip().isdigit() else 60
+                desc = parts[4] if len(parts) > 4 else ""
+                success, msg = create_calendar_event(title, date_s, time_s, dur, desc)
+                if success:
+                    time_label = f" at {time_s}" if time_s else ""
+                    confirmations.append(f"📅 Added to calendar: {title} on {date_s}{time_label}")
+                else:
+                    confirmations.append(f"⚠️ Calendar create failed: {title} — {msg}")
+            else:
+                confirmations.append(f"⚠️ Malformed CREATE_EVENT tag: {tag[:50]}")
+
+        # Delete calendar events
+        for tag in delete_event_tags:
+            parts = [p.strip() for p in tag.split("|")]
+            if len(parts) >= 2:
+                title, date_s = parts[0], parts[1]
+                success, msg = delete_calendar_event(title, date_s)
+                if success:
+                    confirmations.append(f"🗑️ Removed from calendar: {msg} on {date_s}")
+                else:
+                    confirmations.append(f"⚠️ Calendar delete failed: {msg}")
+            else:
+                confirmations.append(f"⚠️ Malformed DELETE_EVENT tag: {tag[:50]}")
 
         if confirmations:
             await update.message.reply_text("\n".join(confirmations))
