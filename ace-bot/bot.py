@@ -424,6 +424,40 @@ def get_gmail_summary() -> str:
         logger.error("Gmail fetch error: %s", e)
         return "⚠️ Could not load emails."
 
+def get_recent_read_emails() -> str:
+    """Pull recently read emails from Gmail in the last 48 hours (excludes promos/social)."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        results = service.users().messages().list(
+            userId="me",
+            q="is:read newer_than:2d -category:promotions -category:social",
+            maxResults=10,
+        ).execute()
+        messages = results.get("messages", [])
+        if not messages:
+            return "No read emails in the last 48 hours."
+        email_lines = []
+        for msg in messages[:5]:
+            msg_data = service.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["From", "Subject"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
+            subject = headers.get("Subject", "No subject")[:60]
+            sender = headers.get("From", "Unknown")
+            if "<" in sender:
+                sender = sender.split("<")[0].strip().strip('"')
+            sender = sender[:30]
+            email_lines.append(f"• {sender}: {subject}")
+        count = len(messages)
+        if count > 5:
+            email_lines.append(f"  …and {count - 5} more")
+        return "\n".join(email_lines)
+    except Exception as e:
+        logger.error("Recent read email fetch error: %s", e)
+        return "⚠️ Could not load recent read emails."
+
 # ── Google Tasks (Read) ────────────────────────────────────────────────────────
 
 def get_tasks() -> str:
@@ -925,11 +959,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_context = f"\n\n📋 WHAT ACE KNOWS ABOUT BRADY (from memory):\n{memory_str}"
 
+    now_et = datetime.now(EASTERN)
+    recent_email_data = get_recent_read_emails()
     live_data = (
-        "\n\n📊 LIVE DATA (auto-fetched right now):\n"
+        f"\n\n📊 LIVE DATA (auto-fetched right now — {now_et.strftime('%A, %B %-d, %Y %-I:%M %p ET')}):\n"
         f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
         f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
-        f"📧 UNREAD EMAILS:\n{email_data}"
+        f"📧 UNREAD EMAILS:\n{email_data}\n\n"
+        f"📨 RECENT READ EMAILS (last 48hrs):\n{recent_email_data}"
     )
 
     system_with_context = (
