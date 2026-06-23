@@ -397,7 +397,7 @@ def get_gmail_summary() -> str:
         service = build("gmail", "v1", credentials=creds)
         results = service.users().messages().list(
             userId="me",
-            q="is:unread newer_than:1d -category:promotions -category:social",
+            q="is:unread -category:promotions -category:social",
             maxResults=10,
         ).execute()
         messages = results.get("messages", [])
