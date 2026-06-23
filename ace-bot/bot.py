@@ -928,7 +928,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     live_data = (
         "\n\n📊 LIVE DATA (auto-fetched right now):\n"
         f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
-        f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}"\n\n"
+        f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
         f"📧 UNREAD EMAILS:\n{email_data}"
     )
 
