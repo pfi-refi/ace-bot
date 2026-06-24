@@ -378,7 +378,9 @@ def get_calendar_events() -> str:
                         time_str = dt.strftime("%-I:%M %p")
                     else:
                         time_str = "All day"
-                    all_events.append((start_dt_str, f"• {time_str} — {summary}"))
+                    is_primary_cal = cal_id in ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimpact.com")
+                    cal_label = f" [{cal_name}]" if not is_primary_cal else ""
+                    all_events.append((start_dt_str, f"• {time_str} — {summary}{cal_label}"))
             except Exception as e:
                 logger.warning("Error fetching calendar '%s': %s", cal_name, e)
         all_events.sort(key=lambda x: x[0])
