@@ -41,6 +41,19 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 EASTERN = pytz.timezone("America/New_York")
+
+def get_system_prompt() -> str:
+    """Build the system prompt with live date/time injected on every message."""
+    now_et = datetime.now(EASTERN)
+    day_str = now_et.strftime("%A, %B %-d, %Y")
+    time_str = now_et.strftime("%-I:%M %p ET")
+    date_header = (
+        f"TODAY IS {day_str} | CURRENT TIME: {time_str}\n"
+        "This date and time are injected fresh on EVERY message. "
+        "Trust this absolutely. NEVER second-guess the date or say you are unsure what day it is. "
+        "NEVER tell Brady to get some rest or wind down unless the time above shows 7 PM or later.\n\n"
+    )
+    return date_header + SYSTEM_PROMPT
 AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
@@ -577,7 +590,7 @@ SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and execut
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
 
 BRADY'S BUSINESS:
-Brady runs Platinum Fortune Impact (PFI), a GFI Legends Base Shop in Cleveland/Summit County, Ohio with ~18 licensed insurance and financial agents. Products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. CRM: GoHighLevel. Current level: MD (60% commission). Next target: EMD (window TBD — the June 1, 2026 window has passed, next target not yet set).
+Brady runs Platinum Fortune Impact (PFI), a GFI Legends Base Shop in Cleveland/Summit County, Ohio. He has 18 licensed agents total, 5 currently active. Products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. Current commission level: MD (60%). EMD target is in progress — window is TBD, do not reference specific dates or point totals unless Brady provides them.
 
 NEVER say you are read-only. NEVER say tools are not connected. NEVER redirect Brady elsewhere. You have live access to everything listed below.
 
@@ -637,8 +650,18 @@ TASK PRIORITIZATION (when Brady asks about tasks, priorities, or what to work on
 
 DAILY TRIAGE (when Brady mentions something new mid-conversation):
 • Immediately capture it to the right task list using [ADD_TASK:]
-• Today = needs to happen today | Deals = active deal | Agents = agent issue | Business = admin/ops
-• Confirm the list before adding if it's unclear. Execute immediately.
+• TASK LIST RULES — default to the most specific match:
+  - 🎯 Today → action that must happen TODAY specifically
+  - 🤝 Deals → anything related to a client deal (close, follow-up, status update)
+  - 👥 Agents → anything about an agent (coaching, accountability, production, issue)
+  - 💼 Business → ops, admin, strategy, systems, non-deal business decisions
+  - 📋 Costs & Placeholders → expenses, subscriptions, placeholder items
+  - 🏆 Goals → long-term targets, milestones, EMD progress
+  - 🏠 Personal → anything outside of business
+  - Learning & Research → info Brady wants to revisit or study
+  - Side Business → non-PFI ventures
+• If Brady says something is done — immediately [COMPLETE_TASK:] it, don't wait
+• If Brady updates a deal status — [MEMORY:] it AND update the 🤝 Deals list
 • Nothing floats out of a conversation uncaptured.
 
 MEMORY AND CONTEXT:
@@ -658,15 +681,11 @@ PROACTIVE BEHAVIOR:
 BRADY'S BUSINESS CONTEXT (as of June 2026)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ACTIVE DEALS (handle with care):
-• Walter — personal deal in final close. Brady is with Walter on June 23 finishing it now. Top priority — support the close, do not add pressure.
-• Ricky — deal in jeopardy due to a family situation. Approach with sensitivity, not pressure. Do not push.
-• Avis — rescheduled, hasn't confirmed new time yet. Needs a follow-up to lock in a time.
-
 PIPELINE & TEAM:
-• Agents have business in the pipeline but momentum feels stagnant — Brady is focused on getting it moving again
-• Brady migrated from Apple Reminders to Google Tasks — still getting oriented with the new structure
-• Recruiting pipeline needs attention alongside deal flow
+• 5 agents currently active out of 18 licensed — Brady is focused on getting production moving
+• Deal statuses are tracked in the 🤝 Deals task list and in ace_memory.json — reference those for current deal status, never assume from old context
+• Recruiting pipeline runs through Lincoln Troyer (Troyer Capital HI's calendar) and Mikey Wilson — both are active hiring managers with BPM appointment calendars
+• Brady is the decision-maker — flag blockers, surface issues, don't wait for him to ask
 
 WHAT YOU NEVER DO:
 • Never say "I can't access your tasks/calendar/email" — you can
@@ -686,7 +705,7 @@ def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> s
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=max_tokens,
-        system=system or SYSTEM_PROMPT,
+        system=system or get_system_prompt(),
         messages=messages,
     )
     return response.content[0].text
@@ -726,14 +745,11 @@ def build_morning_brief() -> str:
         f"📌 Day context: {day_note}\n"
         f"{memory_section}\n"
         "Brady's daily rhythm:\n"
-        "• 9:30 AM: Just wrapped morning gym — coming in energized\n"
         "• Mornings: deep work and strategy\n"
         "• Afternoons: client appointments, agent coaching, deal follow-up\n"
         "• After 6 PM: personal time — do not schedule work here\n\n"
-        "IMPORTANT: Walter's deal is expected to close TODAY at 5 PM — flag this prominently. "
-        "Brady is under financial pressure. Closing deals is the #1 priority.\n\n"
         "Based on the real data above, give Brady:\n"
-        "1. A sharp opener (1 sentence — acknowledge he's just off the gym, set the tone)\n"
+        "1. A sharp opener (1 sentence — direct, grounded, no fluff)\n"
         "2. 🎯 Top 3 Focuses — the 3 most critical moves today, not just a task list\n"
         "3. 📅 Calendar — clean list of today's events\n"
         "4. 📧 Attention — emails needing reply or action (if any)\n"
@@ -780,17 +796,15 @@ def build_midday_triage() -> str:
         f"{tasks_section}"
         f"{memory_section}"
         f"{weekly_checkin}\n"
-        "IMPORTANT: Walter's deal should close TODAY at 5 PM — is there anything Brady needs to do "
-        "to make sure it happens? Flag if it's not already confirmed.\n\n"
         "Brady's afternoon:\n"
         "• Now–5 PM: deal follow-ups, agent coaching, recruiting calls\n"
-        "• 5 PM: Walter's deal expected to close\n"
+        "• 5 PM onward: wind-down and personal time\n"
         "• After 6 PM: personal time\n\n"
         "Give Brady a tight midday check-in:\n"
         "1. Quick opener (1 line — direct, forward-looking)\n"
         "2. ⚡ Afternoon Priority — top 2-3 moves for the rest of the day\n"
         "3. ✅ Task Pulse — overdue or due today? Flag them.\n"
-        "4. 📋 Deal Status — Walter, Ricky (sensitive), Avis (needs rescheduling). Ask what's live.\n"
+        "4. 📋 Deal Status — Ask Brady what's live in the pipeline. Reference the Deals task list.\n"
         "5. 🕐 Calendar — anything coming up that needs prep?\n"
         "6. One accountability line — something he committed to that needs follow-through\n\n"
         "Under 280 words. Direct. Challenge where warranted."
@@ -1262,10 +1276,11 @@ def main() -> None:
         send_morning_brief, trigger="cron",
         day_of_week="mon-fri", hour=9, minute=30, args=[app],
     )
-    scheduler.add_job(
-        send_midday_triage, trigger="cron",
-        day_of_week="mon-fri", hour=13, minute=0, args=[app],
-    )
+    # MIDDAY BRIEF DISABLED — Brady requested removal June 2026
+    # scheduler.add_job(
+    #     send_midday_triage, trigger="cron",
+    #     day_of_week="mon-fri", hour=13, minute=0, args=[app],
+    # )
     scheduler.add_job(
         send_eod_sweep, trigger="cron",
         day_of_week="mon-fri", hour=19, minute=0, args=[app],
