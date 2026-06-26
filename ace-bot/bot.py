@@ -1464,24 +1464,39 @@ async def _tts_speak(text: str, update: Update) -> bool:
         import openai
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
-            await update.message.reply_text(text)
+            await update.message.reply_text("⚠️ No OPENAI_API_KEY set.\n\n" + text)
             return False
         client = openai.OpenAI(api_key=api_key)
-        tts_response = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="ember",   # ChatGPT Ember — warm, energetic, natural
-            input=text,
-            response_format="opus",  # OGG Opus — required for Telegram reply_voice
-            speed=1.0,              # Slightly faster = more energy, less monotone
-        )
+        # Try preferred voice model first; fall back to tts-1/nova if rejected
+        try:
+            tts_response = client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                voice="ember",
+                input=text,
+                response_format="opus",
+                speed=1.0,
+            )
+            logger.info("TTS: gpt-4o-mini-tts/ember → %d bytes", len(tts_response.content))
+        except Exception as tts_err:
+            logger.warning("Primary TTS failed (%s), falling back to tts-1/nova", tts_err)
+            tts_response = client.audio.speech.create(
+                model="tts-1",
+                voice="nova",
+                input=text,
+                response_format="opus",
+                speed=1.0,
+            )
+            logger.info("TTS fallback: tts-1/nova → %d bytes", len(tts_response.content))
         audio_buf = io.BytesIO(tts_response.content)
+        audio_buf.seek(0)
         audio_buf.name = "ace_response.ogg"
         await update.message.reply_voice(audio_buf)
-        logger.info("TTS sent: %d chars → %d bytes", len(text), len(tts_response.content))
+        logger.info("TTS voice reply sent: %d chars", len(text))
         return True
     except Exception as e:
         logger.error("TTS error: %s", e)
-        await update.message.reply_text(text)   # graceful fallback
+        # Surface the real error so we can debug
+        await update.message.reply_text(f"⚠️ Voice failed [{type(e).__name__}]: {e}\n\n{text}")
         return False
 
 
