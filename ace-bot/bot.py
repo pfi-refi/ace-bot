@@ -56,6 +56,7 @@ AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
 SESSION_MODE = {"active": False}   # Set True by /session until next user message
+LAST_BRIEF_SENT: datetime | None = None   # Tracks last manual /brief to suppress duplicate scheduled brief
 
 # ── Task list config ───────────────────────────────────────────────────────────
 # Truly read-only lists — Ace never adds tasks here
@@ -1132,6 +1133,8 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         brief = build_morning_brief()
         await update.message.reply_text(brief)
+        global LAST_BRIEF_SENT
+        LAST_BRIEF_SENT = datetime.now(EASTERN)
     except Exception as e:
         logger.error("Brief command error: %s", e)
         await update.message.reply_text(f"⚠️ Error generating brief: {e}")
@@ -1534,7 +1537,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def send_morning_brief(app: Application) -> None:
     """Scheduled job — 9:30 AM ET morning brief."""
-    try:
+    global LAST_BRIEF_SENT
+        if LAST_BRIEF_SENT is not None:
+            mins_ago = (datetime.now(EASTERN) - LAST_BRIEF_SENT).total_seconds() / 60
+            if mins_ago < 180:
+                logger.info("Skipping scheduled brief — manual brief sent %.0f min ago.", mins_ago)
+                return
+        try:
         logger.info("Sending scheduled morning brief…")
         brief = build_morning_brief()
         await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=brief)
