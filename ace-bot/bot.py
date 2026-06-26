@@ -6,7 +6,7 @@ v13: Memory cross-reference, pattern learning, updated task lists, all-list morn
     - EOD captures carry-forward items and stores them in memory automatically
     - System prompt updated to Brady's actual current task lists (Today list removed)
     - Pattern learning: Ace logs behavioral patterns to memory over time
-    - Reference lists (Business cost - NO TOUCH, To learn / Questions) excluded from morning scan
+    - Reference lists + Personal/Goals excluded from morning brief scan
     - add_task() defaults to 'Admin List - back log' (Today list no longer exists)
     - OpenAI API key now in Railway env (OPENAI_API_KEY) for future voice support
 """
@@ -58,8 +58,10 @@ CONVERSATION_FILE_NAME = "ace_conversation.json"
 SESSION_MODE = {"active": False}   # Set True by /session until next user message
 
 # ── Task list config ───────────────────────────────────────────────────────────
-# Lists Ace should SKIP when building morning briefs (reference/static lists)
+# Truly read-only lists — Ace never adds tasks here
 REFERENCE_LISTS = {"Business cost - NO TOUCH", "To learn / Questions"}
+# Lists excluded from morning brief scan (reference + personal/goals clutter)
+MORNING_SKIP_LISTS = REFERENCE_LISTS | {"🏠 Personal", "🏆 Goals"}
 # Default list for tasks when context doesn't point elsewhere
 DEFAULT_TASK_LIST = "Admin List - back log"
 
@@ -575,7 +577,7 @@ def get_tasks(skip_reference: bool = False) -> str:
         all_tasks = []
         for tl in task_lists:
             tl_title = tl.get("title", "Tasks")
-            if skip_reference and tl_title in REFERENCE_LISTS:
+            if skip_reference and tl_title in MORNING_SKIP_LISTS:
                 logger.info("Skipping reference list: %s", tl_title)
                 continue
             try:
@@ -774,7 +776,8 @@ def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> s
 def build_morning_brief() -> str:
     """Generate today's morning brief using live Calendar, Gmail, Tasks, and memory data.
 
-    v13: Tasks use skip_reference=True to exclude Business cost / To learn lists.
+    v13: Tasks use skip_reference=True to exclude Business cost / To learn /
+         Personal / Goals lists from morning scan (MORNING_SKIP_LISTS).
          Memory cross-reference: Ace looks for open tasks related to things Brady mentioned
          in memory and flags anything that needs carry-through today.
     """
