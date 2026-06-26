@@ -1,12 +1,14 @@
 """
 Ace — Brady McGraw's Telegram business partner bot.
 
-v12: Major upgrade — task dedup, conversational briefs, /session brain-dump, 9 PM EOD.
-    - Task dedup: checks existing tasks before adding (no more double-entries)
-    - Better completion detection: expanded signals in SYSTEM_PROMPT
-    - Morning brief + EOD rewritten as conversation openers, not structured reports
-    - EOD brief moved from 7 PM to 9 PM
-    - /session command: Sunday brain-dump → categorize to task lists + calendar blocks
+v13: Memory cross-reference, pattern learning, updated task lists, all-list morning scan.
+    - Morning brief cross-references memory with open tasks to surface carry-forward items
+    - EOD captures carry-forward items and stores them in memory automatically
+    - System prompt updated to Brady's actual current task lists (Today list removed)
+    - Pattern learning: Ace logs behavioral patterns to memory over time
+    - Reference lists (Business cost - NO TOUCH, To learn / Questions) excluded from morning scan
+    - add_task() defaults to 'Admin List - back log' (Today list no longer exists)
+    - OpenAI API key now in Railway env (OPENAI_API_KEY) for future voice support
 """
 
 import base64
@@ -54,6 +56,12 @@ AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
 SESSION_MODE = {"active": False}   # Set True by /session until next user message
+
+# ── Task list config ───────────────────────────────────────────────────────────
+# Lists Ace should SKIP when building morning briefs (reference/static lists)
+REFERENCE_LISTS = {"Business cost - NO TOUCH", "To learn / Questions"}
+# Default list for tasks when context doesn't point elsewhere
+DEFAULT_TASK_LIST = "Admin List - back log"
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -216,7 +224,7 @@ def write_conversation_history(messages: list) -> bool:
 
 # ── Task Write Operations ──────────────────────────────────────────────────────
 
-def add_task(title: str, list_name: str = "🎯 Today") -> tuple[bool, str, bool]:
+def add_task(title: str, list_name: str = DEFAULT_TASK_LIST) -> tuple[bool, str, bool]:
     """Add a task to Google Tasks. Returns (success, actual_list_name, was_duplicate)."""
     try:
         creds = get_google_creds()
@@ -550,8 +558,13 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = "primary
 
 # ── Google Tasks (Read) ────────────────────────────────────────────────────────
 
-def get_tasks() -> str:
-    """Pull all open tasks from Google Tasks across all task lists."""
+def get_tasks(skip_reference: bool = False) -> str:
+    """Pull all open tasks from Google Tasks across all task lists.
+
+    Args:
+        skip_reference: If True, skips REFERENCE_LISTS (used for morning briefs
+                        so Business cost / To learn clutter is excluded).
+    """
     try:
         creds = get_google_creds()
         service = build("tasks", "v1", credentials=creds)
@@ -562,6 +575,9 @@ def get_tasks() -> str:
         all_tasks = []
         for tl in task_lists:
             tl_title = tl.get("title", "Tasks")
+            if skip_reference and tl_title in REFERENCE_LISTS:
+                logger.info("Skipping reference list: %s", tl_title)
+                continue
             try:
                 tasks_result = service.tasks().list(
                     tasklist=tl["id"],
@@ -619,8 +635,18 @@ GOOGLE TASKS — Full read AND write access:
 • To ADD a task: write [ADD_TASK: task title | list name] in your response — Python executes it immediately
 • To COMPLETE a task: write [COMPLETE_TASK: partial title] — Python fuzzy-matches and marks it done
 • NEVER tell Brady to update tasks himself. You do it. Confirm with "✅ Added to [list]: X" or "✅ Completed: X"
-• Task lists: 🎯 Today, 🤝 Deals, 👥 Agents, 💼 Business, 📋 Costs & Placeholders, 🏆 Goals, 🏠 Personal, Learning & Research, Side Business
-• If Brady doesn't specify a list, default to the most logical one based on context
+• ACTIVE TASK LISTS (add tasks here):
+  - 🤝 Deals → client deals, follow-ups, policy submissions, rollovers
+  - 👥 Agents - active → agent coaching, accountability, FTAs, licensing status
+  - Admin List - back log → admin tasks, SOPs, research, anything that doesn't fit elsewhere (DEFAULT)
+  - 💼 Business items & Systems & Tech → ops, systems, marketing, content, GHL, tech builds
+  - Networking/People/Events → seminars, partnerships, referral sources, events, outreach
+  - 🏠 Personal → non-business items (health, family, finances, personal goals)
+  - 🏆 Goals → long-term targets, milestones, EMD progress, vision items
+• REFERENCE LISTS (never add tasks here — read-only):
+  - Business cost - NO TOUCH → Brady's recurring subscriptions and costs (reference only)
+  - To learn / Questions → study items and questions (reference only)
+• If Brady doesn't specify a list, pick the most logical one. Default to 'Admin List - back log' when unclear.
 
 GOOGLE CALENDAR — Full read AND write access:
 • Live calendar data is injected into your context automatically with every message
@@ -667,15 +693,14 @@ TASK PRIORITIZATION (when Brady asks about tasks, priorities, or what to work on
 DAILY TRIAGE (when Brady mentions something new mid-conversation):
 • Immediately capture it to the right task list using [ADD_TASK:]
 • TASK LIST RULES — default to the most specific match:
-  - 🎯 Today → action that must happen TODAY specifically
-  - 🤝 Deals → anything related to a client deal (close, follow-up, status update)
-  - 👥 Agents → anything about an agent (coaching, accountability, production, issue)
-  - 💼 Business → ops, admin, strategy, systems, non-deal business decisions
-  - 📋 Costs & Placeholders → expenses, subscriptions, placeholder items
-  - 🏆 Goals → long-term targets, milestones, EMD progress
-  - 🏠 Personal → anything outside of business
-  - Learning & Research → info Brady wants to revisit or study
-  - Side Business → non-PFI ventures
+  - 🤝 Deals → anything related to a client deal (close, follow-up, status, rollover, policy)
+  - 👥 Agents - active → agent coaching, FTA scheduling, accountability, licensing, production issues
+  - 💼 Business items & Systems & Tech → ops, admin, strategy, content, systems, GHL, tech
+  - Networking/People/Events → seminars, partnership outreach, events, referral source follow-ups
+  - 🏆 Goals → long-term targets, milestones, EMD progress, financial goals
+  - 🏠 Personal → anything outside of business (health, family, personal finances, house)
+  - Admin List - back log → catch-all for items that don't fit the above; default when unsure
+• NEVER add to: Business cost - NO TOUCH or To learn / Questions (reference lists)
 • If Brady says something is done — immediately [COMPLETE_TASK:] it, don't wait
 • Natural completion signals to watch for: "handled that", "already done", "crossed that off",
   "took care of it", "finished that", "got that done", "done with that", "handled it",
@@ -686,9 +711,23 @@ DAILY TRIAGE (when Brady mentions something new mid-conversation):
 
 MEMORY AND CONTEXT:
 • Memory facts injected into your context are real. Read them. Use them.
-• If Brady tells you something important (a deal, a person, a goal, a schedule change), offer to save it with [MEMORY:]
+• Cross-reference memory with open tasks every morning: if Brady mentioned a deal status, agent issue,
+  or commitment in a past conversation, check whether there's a corresponding open task. If yes, surface it.
+  If no task exists for something Brady said he'd handle, flag it or create one.
+• If Brady tells you something important (a deal, a person, a goal, a schedule change), save it with [MEMORY:]
 • You remember past conversations via the loaded history. Reference them naturally.
 • If Brady says "like we talked about" — you already know what he means.
+
+PATTERN LEARNING:
+• Over time, you learn how Brady operates. Log what you notice with [MEMORY:] — especially:
+  - Which days/times he focuses on deals vs. recruiting vs. admin
+  - Which agents need the most attention and why
+  - What kinds of tasks consistently slip (flag these proactively)
+  - Deal patterns: who refers, who stalls, what closes fastest
+  - Communication patterns: when he's responsive vs. heads-down
+• Use pattern memory to sharpen your briefs — e.g., if Brady always pushes deals Thursday, remind him
+  Wednesday night. If a certain agent type needs weekly check-ins, build that into your EOD questions.
+• Do NOT log every trivial exchange. Log what would actually change how you brief him tomorrow.
 
 PROACTIVE BEHAVIOR:
 • Connect dots Brady hasn't connected yet
@@ -733,13 +772,18 @@ def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> s
 # ── Morning brief ──────────────────────────────────────────────────────────────
 
 def build_morning_brief() -> str:
-    """Generate today's morning brief using live Calendar, Gmail, Tasks, and memory data."""
+    """Generate today's morning brief using live Calendar, Gmail, Tasks, and memory data.
+
+    v13: Tasks use skip_reference=True to exclude Business cost / To learn lists.
+         Memory cross-reference: Ace looks for open tasks related to things Brady mentioned
+         in memory and flags anything that needs carry-through today.
+    """
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
     weekday = now_et.weekday()
     calendar_data = get_calendar_events()
     email_data = get_gmail_summary()
-    tasks_data = get_tasks()
+    tasks_data = get_tasks(skip_reference=True)   # v13: exclude reference lists
     memories = read_memory()
     day_reminders = {
         0: "Monday — Fresh week. Set the tone: recruiting targets, pipeline review, team accountability.",
@@ -752,10 +796,10 @@ def build_morning_brief() -> str:
     memory_section = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
-        memory_section = f"\n📋 What Ace knows about Brady:\n{memory_str}\n"
+        memory_section = f"\n📋 Memory (what Brady told you or what you noticed):\n{memory_str}\n"
     tasks_section = ""
     if tasks_data and tasks_data != "No open tasks.":
-        tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
+        tasks_section = f"\n✅ Open Tasks (all lists):\n{tasks_data}\n"
     prompt = (
         f"It's 9:30 AM on {day_str}. You're opening the day with Brady — your business partner.\n\n"
         "LIVE DATA:\n"
@@ -764,9 +808,14 @@ def build_morning_brief() -> str:
         f"{tasks_section}"
         f"📌 Day context: {day_note}\n"
         f"{memory_section}\n"
+        "CROSS-REFERENCE INSTRUCTION (do this before writing):\n"
+        "Look at the memory items and the open tasks together. "
+        "If Brady mentioned a deal, an agent situation, or a commitment in memory that has a matching "
+        "open task — that task is likely important today. Prioritize those. "
+        "If Brady mentioned something in memory that has NO open task yet — consider whether it needs one.\n\n"
         "Write him ONE opening message — not a report, a conversation opener. "
         "Sound like you just picked up where you left off. "
-        "Pull the 1-2 most important things from his calendar and tasks and lead with those. "
+        "Lead with the 1-2 highest priority items based on BOTH the tasks AND the memory context. "
         "If email needs attention or the day looks stacked, call it out. "
         "Under 120 words. No numbered lists, no section headers — just talk to him like a partner. "
         "End with one question or one thing you're watching for him today."
@@ -828,11 +877,15 @@ def build_midday_triage() -> str:
 # ── Evening wind-down ─────────────────────────────────────────────────────────
 
 def build_eod_sweep() -> str:
-    """Generate 9:00 PM evening check-in — conversational, carry-forward, open floor."""
+    """Generate 9:00 PM evening check-in — conversational, carry-forward, open floor.
+
+    v13: Explicitly prompts for carry-forward items to store in memory, so tomorrow's
+         morning brief has context on what today produced and what's pending.
+    """
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
     memories = read_memory()
-    tasks_data = get_tasks()
+    tasks_data = get_tasks(skip_reference=True)
     memory_section = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
@@ -844,13 +897,25 @@ def build_eod_sweep() -> str:
         f"It's 9 PM on {day_str}. Brady is winding down — the work day is behind him.\n\n"
         f"{memory_section}"
         f"{tasks_section}\n"
-        "Check in with him like a business partner who's been in it all day with him. "
-        "Glance at what's still open — is anything worth moving to tomorrow before he shuts down? "
-        "Anything important to capture before he signs off? "
-        "Keep it conversational and light — he's done grinding. "
-        "Under 100 words. No lists, no headers. Just reach out."
+        "Check in with him like a business partner who's been in it all day with him.\n\n"
+        "Do TWO things:\n"
+        "1. Write a short conversational message (under 80 words). Glance at what's still open. "
+        "Ask one specific question — something meaningful from today that you want to capture "
+        "before he goes dark. Example: 'How did the Ricky call go?' or 'Did you end up connecting with Nina?' "
+        "Keep it light — he's done grinding. No lists, no headers.\n\n"
+        "2. If you already know enough from context to log something for tomorrow, add 1-2 [MEMORY:] tags "
+        "BEFORE the conversational message. Use them to note deal status updates, agent developments, "
+        "or anything Brady mentioned today that should inform tomorrow's brief. "
+        "Tags are invisible to Brady — only the conversational text goes to him."
     )
-    result = _call_claude([{"role": "user", "content": prompt}], max_tokens=280)
+    result = _call_claude([{"role": "user", "content": prompt}], max_tokens=320)
+    # Extract and execute memory tags before stripping
+    memory_tags = re.findall(r'\[MEMORY:\s*([^\]]+)\]', result)
+    if memory_tags:
+        existing = read_memory()
+        merged = _merge_memories(memory_tags, existing)
+        write_memory(merged)
+        logger.info("EOD stored %d memory item(s) from check-in.", len(memory_tags))
     result = re.sub(r'\[[A-Z_]+:[^\]]+\]', '', result).strip()
     return result
 
@@ -927,7 +992,7 @@ async def _process_session_dump(user_text: str, update: Update, context: Context
         f"MEMORY CONTEXT:\n{memory_str}\n\n"
         "Process this brain dump completely:\n"
         "1. Extract every action item and add it to the right task list using [ADD_TASK: title | list name]\n"
-        "   Lists: 🎯 Today, 🤝 Deals, 👥 Agents, 💼 Business, 📋 Costs & Placeholders, 🏆 Goals, 🏠 Personal\n"
+        "   Lists: 🤝 Deals, 👥 Agents - active, Admin List - back log, 💼 Business items & Systems & Tech, Networking/People/Events, 🏆 Goals, 🏠 Personal\n"
         "2. For items needing 1+ hour to complete, create a calendar block: [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description]\n"
         "   Pick open times Mon–Fri this week that don't conflict with the calendar above.\n"
         "3. Save important new facts to memory: [MEMORY: brief fact]\n"
@@ -1178,7 +1243,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else "no open tasks"
     )
     await update.message.reply_text(
-        f"✅ Ace v12 is running.\n"
+        f"✅ Ace v13 is running.\n"
         f"Time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
         f"Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
@@ -1472,7 +1537,7 @@ def main() -> None:
         "Scheduler started — 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET)."
     )
 
-    logger.info("Ace v12 is starting up…")
+    logger.info("Ace v13 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
