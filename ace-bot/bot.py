@@ -1,16 +1,12 @@
 """
 Ace — Brady McGraw's Telegram business partner bot.
 
-v9: Complete ground-up SYSTEM_PROMPT rewrite. Ace is now a true operational partner with:
-    - NEW: Live task write/complete via [ADD_TASK:] and [COMPLETE_TASK:] tags
-    - NEW: Email send/draft via [SEND_EMAIL:] and [DRAFT_EMAIL:] tags
-    - NEW: Drive file search via [SEARCH_DRIVE:] tag
-    - NEW: Persistent 40-exchange conversation history (ace_conversation.json on Drive)
-    - NEW: Live calendar + task data auto-injected into every handle_message context
-    - NEW: Calendar write — [CREATE_EVENT:] and [DELETE_EVENT:] tags for full calendar control
-    - NEW: /clearhistory command to reset conversation history
-    - FIXED: Coherent, non-contradictory SYSTEM_PROMPT — complete rewrite from scratch
-    - Three scheduled check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)
+v12: Major upgrade — task dedup, conversational briefs, /session brain-dump, 9 PM EOD.
+    - Task dedup: checks existing tasks before adding (no more double-entries)
+    - Better completion detection: expanded signals in SYSTEM_PROMPT
+    - Morning brief + EOD rewritten as conversation openers, not structured reports
+    - EOD brief moved from 7 PM to 9 PM
+    - /session command: Sunday brain-dump → categorize to task lists + calendar blocks
 """
 
 import base64
@@ -57,6 +53,7 @@ def get_system_prompt() -> str:
 AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
+SESSION_MODE = {"active": False}   # Set True by /session until next user message
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -219,15 +216,15 @@ def write_conversation_history(messages: list) -> bool:
 
 # ── Task Write Operations ──────────────────────────────────────────────────────
 
-def add_task(title: str, list_name: str = "🎯 Today") -> tuple[bool, str]:
-    """Add a task to Google Tasks. Returns (success, actual_list_name)."""
+def add_task(title: str, list_name: str = "🎯 Today") -> tuple[bool, str, bool]:
+    """Add a task to Google Tasks. Returns (success, actual_list_name, was_duplicate)."""
     try:
         creds = get_google_creds()
         service = build("tasks", "v1", credentials=creds)
         task_lists_result = service.tasklists().list(maxResults=20).execute()
         task_lists = task_lists_result.get("items", [])
         if not task_lists:
-            return False, list_name
+            return False, list_name, False
         # Fuzzy match on list name
         target_list_id = None
         actual_list_name = list_name
@@ -242,12 +239,31 @@ def add_task(title: str, list_name: str = "🎯 Today") -> tuple[bool, str]:
             # Default to first list
             target_list_id = task_lists[0]["id"]
             actual_list_name = task_lists[0].get("title", "Tasks")
+        # ── Deduplication check ──────────────────────────────────────────────
+        title_lower = title.lower().strip()
+        try:
+            existing_result = service.tasks().list(
+                tasklist=target_list_id,
+                showCompleted=False,
+                showHidden=False,
+                maxResults=100,
+            ).execute()
+            for existing_task in existing_result.get("items", []):
+                existing_title = existing_task.get("title", "").lower().strip()
+                if (existing_title == title_lower or
+                        title_lower in existing_title or
+                        existing_title in title_lower):
+                    logger.info("Task dedup — already exists in '%s': %s", actual_list_name, title)
+                    return True, actual_list_name, True
+        except Exception as dedup_err:
+            logger.warning("Dedup check skipped: %s", dedup_err)
+        # ────────────────────────────────────────────────────────────────────
         service.tasks().insert(tasklist=target_list_id, body={"title": title}).execute()
         logger.info("Task added to '%s': %s", actual_list_name, title)
-        return True, actual_list_name
+        return True, actual_list_name, False
     except Exception as e:
         logger.error("Add task error: %s", e)
-        return False, list_name
+        return False, list_name, False
 
 
 def complete_task(partial_title: str) -> str:
@@ -661,6 +677,10 @@ DAILY TRIAGE (when Brady mentions something new mid-conversation):
   - Learning & Research → info Brady wants to revisit or study
   - Side Business → non-PFI ventures
 • If Brady says something is done — immediately [COMPLETE_TASK:] it, don't wait
+• Natural completion signals to watch for: "handled that", "already done", "crossed that off",
+  "took care of it", "finished that", "got that done", "done with that", "handled it",
+  "that's done", "did that", "already got that", "took care of that", "got it done" —
+  when you hear these, cross-reference the open task list and [COMPLETE_TASK:] any match
 • If Brady updates a deal status — [MEMORY:] it AND update the 🤝 Deals list
 • Nothing floats out of a conversation uncaptured.
 
@@ -737,29 +757,23 @@ def build_morning_brief() -> str:
     if tasks_data and tasks_data != "No open tasks.":
         tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
     prompt = (
-        f"Generate a morning briefing for Brady for {day_str}.\n\n"
-        "LIVE DATA PULLED FROM HIS ACCOUNTS:\n"
-        f"📅 Today's calendar:\n{calendar_data}\n\n"
-        f"📧 Unread priority emails:\n{email_data}\n"
+        f"It's 9:30 AM on {day_str}. You're opening the day with Brady — your business partner.\n\n"
+        "LIVE DATA:\n"
+        f"📅 Calendar today:\n{calendar_data}\n\n"
+        f"📧 Unread emails:\n{email_data}\n"
         f"{tasks_section}"
         f"📌 Day context: {day_note}\n"
         f"{memory_section}\n"
-        "Brady's daily rhythm:\n"
-        "• Mornings: deep work and strategy\n"
-        "• Afternoons: client appointments, agent coaching, deal follow-up\n"
-        "• After 6 PM: personal time — do not schedule work here\n\n"
-        "Based on the real data above, give Brady:\n"
-        "1. A sharp opener (1 sentence — direct, grounded, no fluff)\n"
-        "2. 🎯 Top 3 Focuses — the 3 most critical moves today, not just a task list\n"
-        "3. 📅 Calendar — clean list of today's events\n"
-        "4. 📧 Attention — emails needing reply or action (if any)\n"
-        "5. ✅ Tasks — flag anything overdue or due today\n"
-        "6. 📌 Day Note — relevant to PFI operations and day of week\n"
-        "7. A one-line close that challenges him or holds him to something\n\n"
-        "Format with clear emoji section headers. Under 450 words. "
-        "Be a partner, not a cheerleader. If something looks off, call it out."
+        "Write him ONE opening message — not a report, a conversation opener. "
+        "Sound like you just picked up where you left off. "
+        "Pull the 1-2 most important things from his calendar and tasks and lead with those. "
+        "If email needs attention or the day looks stacked, call it out. "
+        "Under 120 words. No numbered lists, no section headers — just talk to him like a partner. "
+        "End with one question or one thing you're watching for him today."
     )
-    return _call_claude([{"role": "user", "content": prompt}], max_tokens=750)
+    result = _call_claude([{"role": "user", "content": prompt}], max_tokens=350)
+    result = re.sub(r'\[[A-Z_]+:[^\]]+\]', '', result).strip()
+    return result
 
 # ── Midday triage ──────────────────────────────────────────────────────────────
 
@@ -814,28 +828,183 @@ def build_midday_triage() -> str:
 # ── Evening wind-down ─────────────────────────────────────────────────────────
 
 def build_eod_sweep() -> str:
-    """Generate 7:00 PM evening wind-down — reflection, stretch reminder, open floor."""
+    """Generate 9:00 PM evening check-in — conversational, carry-forward, open floor."""
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
     memories = read_memory()
+    tasks_data = get_tasks()
     memory_section = ""
     if memories:
         memory_str = "\n".join(f"• {m}" for m in memories)
         memory_section = f"\n📋 Context about Brady:\n{memory_str}\n"
+    tasks_section = ""
+    if tasks_data and tasks_data != "No open tasks.":
+        tasks_section = f"\n✅ Open Tasks:\n{tasks_data}\n"
     prompt = (
-        f"Generate an evening wind-down message for Brady. It's 7:00 PM ET on {day_str}.\n\n"
-        f"{memory_section}\n"
-        "Brady is in decompress mode — the work day is done. This is his time.\n\n"
-        "Give Brady a warm, grounded close-out:\n"
-        "1. One calm opener — acknowledge the day is done (no recaps, no urgency)\n"
-        "2. 📌 Carry Forward — top 2-3 things to pick up first thing tomorrow\n"
-        "3. 🌙 Wind Down — remind him to stretch, breathe, and actually disconnect. "
-        "He grinds hard; recovery is part of the performance.\n"
-        "4. 💬 Open Floor — invite him to reflect, share what's on his mind, or just decompress. "
-        "No agenda. This is his space.\n\n"
-        "Under 180 words. Warm but real. No urgency — the grind is done for today."
+        f"It's 9 PM on {day_str}. Brady is winding down — the work day is behind him.\n\n"
+        f"{memory_section}"
+        f"{tasks_section}\n"
+        "Check in with him like a business partner who's been in it all day with him. "
+        "Glance at what's still open — is anything worth moving to tomorrow before he shuts down? "
+        "Anything important to capture before he signs off? "
+        "Keep it conversational and light — he's done grinding. "
+        "Under 100 words. No lists, no headers. Just reach out."
     )
-    return _call_claude([{"role": "user", "content": prompt}], max_tokens=400)
+    result = _call_claude([{"role": "user", "content": prompt}], max_tokens=280)
+    result = re.sub(r'\[[A-Z_]+:[^\]]+\]', '', result).strip()
+    return result
+
+# ── Week Calendar (for /session) ──────────────────────────────────────────────────────────────────────────────
+
+def get_week_calendar() -> str:
+    """Pull this week's events (today through Sunday) from all Google Calendars."""
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        now_et = datetime.now(EASTERN)
+        week_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        days_to_sunday = 6 - now_et.weekday()
+        week_end = (now_et + timedelta(days=days_to_sunday)).replace(hour=23, minute=59, second=59)
+        calendars_result = service.calendarList().list().execute()
+        calendars = calendars_result.get("items", [])
+        all_events = []
+        seen_ids: set = set()
+        for calendar in calendars:
+            cal_id = calendar["id"]
+            cal_name = calendar.get("summary", cal_id)
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=week_start.isoformat(),
+                    timeMax=week_end.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=60,
+                ).execute()
+                for event in events_result.get("items", []):
+                    event_id = event.get("id", "")
+                    if event_id in seen_ids:
+                        continue
+                    seen_ids.add(event_id)
+                    summary = event.get("summary", "No title")
+                    start = event.get("start", {})
+                    start_dt_str = start.get("dateTime", start.get("date", ""))
+                    if "T" in start_dt_str:
+                        dt = datetime.fromisoformat(start_dt_str)
+                        if dt.tzinfo:
+                            dt = dt.astimezone(EASTERN)
+                        time_str = dt.strftime("%a %-m/%-d %-I:%M %p")
+                    else:
+                        time_str = start_dt_str[:10] + " (all day)"
+                    is_primary_cal = cal_id in ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimpact.com")
+                    cal_label = f" [{cal_name}]" if not is_primary_cal else ""
+                    all_events.append((start_dt_str, f"• {time_str} — {summary}{cal_label}"))
+            except Exception as e:
+                logger.warning("Week calendar error for '%s': %s", cal_name, e)
+        all_events.sort(key=lambda x: x[0])
+        return "\n".join(ev[1] for ev in all_events) if all_events else "No events this week."
+    except Exception as e:
+        logger.error("Week calendar fetch error: %s", e)
+        return "⚠️ Could not load weekly calendar."
+
+
+async def _process_session_dump(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process the Sunday brain dump: categorize tasks, create calendar blocks, save memory."""
+    await update.message.reply_text("⏳ Processing your week…")
+    memories = read_memory()
+    tasks_data = get_tasks()
+    week_calendar = get_week_calendar()
+    now_et = datetime.now(EASTERN)
+    days_to_sunday = 6 - now_et.weekday()
+    week_start = now_et.strftime("%Y-%m-%d")
+    week_end = (now_et + timedelta(days=days_to_sunday)).strftime("%Y-%m-%d")
+    memory_str = "\n".join(f"• {m}" for m in memories) if memories else ""
+    prompt = (
+        f"Brady just did a brain dump for the week of {week_start}.\n\n"
+        f"BRAIN DUMP:\n{user_text}\n\n"
+        f"CURRENT OPEN TASKS:\n{tasks_data or 'None'}\n\n"
+        f"THIS WEEK'S CALENDAR:\n{week_calendar}\n\n"
+        f"MEMORY CONTEXT:\n{memory_str}\n\n"
+        "Process this brain dump completely:\n"
+        "1. Extract every action item and add it to the right task list using [ADD_TASK: title | list name]\n"
+        "   Lists: 🎯 Today, 🤝 Deals, 👥 Agents, 💼 Business, 📋 Costs & Placeholders, 🏆 Goals, 🏠 Personal\n"
+        "2. For items needing 1+ hour to complete, create a calendar block: [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description]\n"
+        "   Pick open times Mon–Fri this week that don't conflict with the calendar above.\n"
+        "3. Save important new facts to memory: [MEMORY: brief fact]\n"
+        "4. After the tags, give Brady a plain-language summary: what went to which task lists, "
+        "what got scheduled on the calendar, your top 3 priorities for the week, and any gaps or conflicts.\n\n"
+        f"Week: {week_start} to {week_end}. Use YYYY-MM-DD for all dates. Time format: HH:MM (24hr).\n"
+        "Be thorough — capture everything Brady mentioned. Nothing floats."
+    )
+    system_ctx = get_system_prompt() + (
+        "\n\nACTION TAGS YOU MAY USE (all invisible to Brady):\n"
+        "• [ADD_TASK: title | list name]\n"
+        "• [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description]\n"
+        "• [MEMORY: brief fact]"
+    )
+    try:
+        response = _call_claude(
+            [{"role": "user", "content": prompt}],
+            max_tokens=1800,
+            system=system_ctx,
+        )
+        memory_tags = re.findall(r'\[MEMORY:\s*([^\]]+)\]', response)
+        add_task_tags = re.findall(r'\[ADD_TASK:\s*([^\]]+)\]', response)
+        create_event_tags = re.findall(r'\[CREATE_EVENT:\s*([^\]]+)\]', response)
+        clean_response = re.sub(r'\[MEMORY:[^\]]+\]', '', response)
+        clean_response = re.sub(r'\[ADD_TASK:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[CREATE_EVENT:[^\]]+\]', '', clean_response)
+        clean_response = clean_response.strip()
+        await update.message.reply_text(clean_response)
+        confirmations = []
+        if memory_tags:
+            merged = _merge_memories(memory_tags, read_memory())
+            write_memory(merged)
+        for tag in add_task_tags:
+            parts = [p.strip() for p in tag.split("|", 1)]
+            t_title = parts[0]
+            t_list = parts[1] if len(parts) > 1 else "🎯 Today"
+            success, actual_list, was_dup = add_task(t_title, t_list)
+            if success:
+                if was_dup:
+                    confirmations.append(f"ℹ️ Already in {actual_list}: {t_title}")
+                else:
+                    confirmations.append(f"✅ Added to {actual_list}: {t_title}")
+        for tag in create_event_tags:
+            parts = [p.strip() for p in tag.split("|")]
+            if len(parts) >= 2:
+                ev_title = parts[0]
+                ev_date = parts[1]
+                ev_time = parts[2] if len(parts) > 2 else None
+                ev_dur = int(parts[3]) if len(parts) > 3 and parts[3].strip().isdigit() else 60
+                ev_desc = parts[4] if len(parts) > 4 else "Added via /session"
+                ok, msg = create_calendar_event(ev_title, ev_date, ev_time, ev_dur, ev_desc)
+                if ok:
+                    t_lbl = f" at {ev_time}" if ev_time else ""
+                    confirmations.append(f"📅 Scheduled: {ev_title} on {ev_date}{t_lbl}")
+                else:
+                    confirmations.append(f"⚠️ Calendar block failed: {ev_title} — {msg}")
+        if confirmations:
+            await update.message.reply_text("\n".join(confirmations))
+        hist = read_conversation_history()
+        hist.append({"role": "user", "content": f"[/session brain dump] {user_text}"})
+        hist.append({"role": "assistant", "content": clean_response})
+        write_conversation_history(hist)
+    except Exception as e:
+        logger.error("Session dump error: %s", e)
+        await update.message.reply_text(f"⚠️ Session processing failed: {e}")
+
+
+async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sunday brain dump — Brady unloads the week, Ace categorizes and schedules everything."""
+    if not _is_authorized(update):
+        return
+    SESSION_MODE["active"] = True
+    await update.message.reply_text(
+        "I'm ready. Drop everything on your mind — tasks, calls, follow-ups, deals, ideas, whatever. "
+        "I'll sort it into your lists, schedule the big blocks, and map the week. Go."
+    )
+
 
 # ── Security check ─────────────────────────────────────────────────────────────
 
@@ -857,10 +1026,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /remember <fact> — teach me something to keep in mind\n"
         " /memory — see what I know about how you operate\n"
         " /clearhistory — reset our conversation history\n"
+        " /session — Sunday brain dump (I categorize + schedule your week)\n"
         " /status — check that I'm running\n"
         " /help — show this message\n\n"
         "Or just text me anything — I'll respond, capture what matters, and remember it.\n\n"
-        "Auto check-ins: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)."
+        "Auto check-ins: 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET).\n"
+        "Use /session on Sunday to dump your week — I'll sort it and schedule it."
     )
 
 
@@ -875,11 +1046,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /tasks — show all open Google Tasks\n"
         " /remember <fact> — store a fact in my memory\n"
         " /memory — view my current memory\n"
+        " /session — Sunday brain dump (drop everything, I sort + schedule the week)\n"
         " /clearhistory — wipe conversation history (fresh start)\n"
         " /status — confirm the bot is alive\n"
         " /help — this message\n\n"
         "Or just text me — I'll respond, execute tasks, send emails, and remember what matters.\n\n"
-        "Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)"
+        "Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET)"
     )
 
 
@@ -1006,9 +1178,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else "no open tasks"
     )
     await update.message.reply_text(
-        f"✅ Ace v9 is running.\n"
+        f"✅ Ace v12 is running.\n"
         f"Time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
-        f"Schedule: 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri)\n"
+        f"Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
         f"Conversation history: {history_status}\n"
         f"Tasks: {tasks_status}"
@@ -1022,6 +1194,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     user_text = update.message.text.strip()
     if not user_text:
+        return
+
+    # ── /session brain-dump intercept ────────────────────────────────────────────
+    if SESSION_MODE.get("active"):
+        SESSION_MODE["active"] = False
+        await _process_session_dump(user_text, update, context)
         return
 
     # Pull live data for context injection
@@ -1116,9 +1294,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parts = [p.strip() for p in tag.split("|", 1)]
             title = parts[0]
             list_name = parts[1] if len(parts) > 1 else "🎯 Today"
-            success, actual_list = add_task(title, list_name)
+            success, actual_list, was_dup = add_task(title, list_name)
             if success:
-                confirmations.append(f"✅ Added to {actual_list}: {title}")
+                if was_dup:
+                    confirmations.append(f"ℹ️ Already in {actual_list}: {title}")
+                else:
+                    confirmations.append(f"✅ Added to {actual_list}: {title}")
             else:
                 confirmations.append(f"⚠️ Couldn't add task: {title}")
 
@@ -1266,6 +1447,7 @@ def main() -> None:
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("clearhistory", cmd_clear_history))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("session", cmd_session))
 
     # Free-text conversation handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -1283,14 +1465,14 @@ def main() -> None:
     # )
     scheduler.add_job(
         send_eod_sweep, trigger="cron",
-        day_of_week="mon-fri", hour=19, minute=0, args=[app],
+        day_of_week="mon-fri", hour=21, minute=0, args=[app],
     )
     scheduler.start()
     logger.info(
-        "Scheduler started — 9:30 AM brief · 1:00 PM triage · 7:00 PM wind-down (Mon–Fri ET)."
+        "Scheduler started — 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET)."
     )
 
-    logger.info("Ace v9 is starting up…")
+    logger.info("Ace v12 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
