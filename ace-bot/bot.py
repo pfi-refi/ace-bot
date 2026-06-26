@@ -1465,8 +1465,8 @@ async def _tts_speak(text: str, update: Update) -> bool:
             return False
         client = openai.OpenAI(api_key=api_key)
         tts_response = client.audio.speech.create(
-            model="tts-1-hd",
-            voice="onyx",    # Deep authoritative — Jarvis feel
+            model="gpt-4o-mini-tts",
+            voice="ember",   # ChatGPT Ember — warm, energetic, natural
             input=text,
             response_format="opus",  # OGG Opus — required for Telegram reply_voice
             speed=1.15,              # Slightly faster = more energy, less monotone
