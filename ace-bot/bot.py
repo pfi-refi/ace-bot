@@ -620,6 +620,8 @@ def get_tasks(skip_reference: bool = False) -> str:
 # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (Onyx voice). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
+
 
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
 
@@ -1467,6 +1469,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             voice="onyx",    # Deep authoritative — Jarvis feel
             input=text,
             response_format="opus",  # OGG Opus — required for Telegram reply_voice
+            speed=1.15,              # Slightly faster = more energy, less monotone
         )
         audio_buf = io.BytesIO(tts_response.content)
         audio_buf.name = "ace_response.mp3"
