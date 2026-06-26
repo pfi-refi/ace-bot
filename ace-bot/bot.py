@@ -1466,6 +1466,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             model="tts-1",
             voice="fable",   # British male — Brady's pick
             input=text,
+            response_format="opus",  # OGG Opus — required for Telegram reply_voice
         )
         audio_buf = io.BytesIO(tts_response.content)
         audio_buf.name = "ace_response.mp3"
