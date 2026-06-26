@@ -1472,7 +1472,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             speed=1.0,              # Slightly faster = more energy, less monotone
         )
         audio_buf = io.BytesIO(tts_response.content)
-        audio_buf.name = "ace_response.mp3"
+        audio_buf.name = "ace_response.ogg"
         await update.message.reply_voice(audio_buf)
         logger.info("TTS sent: %d chars → %d bytes", len(text), len(tts_response.content))
         return True
