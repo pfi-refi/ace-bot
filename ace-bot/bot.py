@@ -766,7 +766,7 @@ def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> s
     import anthropic
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-8",
         max_tokens=max_tokens,
         system=system or get_system_prompt(),
         messages=messages,
