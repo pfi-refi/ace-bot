@@ -1256,15 +1256,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 # ── Message handler (free-form conversation) ──────────────────────────────────
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text. Injects live data, uses conversation history, executes action tags."""
-    if not _is_authorized(update):
-        return
-    user_text = update.message.text.strip()
-    if not user_text:
-        return
-
-    # ── /session brain-dump intercept ────────────────────────────────────────────
+async def _process_text(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Core message processing — called by both text and voice handlers."""
     if SESSION_MODE.get("active"):
         SESSION_MODE["active"] = False
         await _process_session_dump(user_text, update, context)
@@ -1452,6 +1445,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error("Message handler error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
 
+async def _transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download a Telegram voice message and transcribe it via OpenAI Whisper."""
+    try:
+        import openai  # lazy import — only needed for voice
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            await update.message.reply_text(
+                "⚠️ OPENAI_API_KEY not set in Railway — voice transcription unavailable."
+            )
+            return None
+        voice = update.message.voice
+        tg_file = await context.bot.get_file(voice.file_id)
+        ogg_bytes = await tg_file.download_as_bytearray()
+        client = openai.OpenAI(api_key=api_key)
+        result = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=("voice.ogg", bytes(ogg_bytes), "audio/ogg"),
+        )
+        transcript = result.text.strip()
+        logger.info("Voice transcribed: %d bytes \u2192 %d chars", len(ogg_bytes), len(transcript))
+        return transcript
+    except Exception as e:
+        logger.error("Voice transcription error: %s", e)
+        await update.message.reply_text(f"\u26a0\ufe0f Couldn't transcribe voice message: {e}")
+        return None
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle free-form text messages."""
+    if not _is_authorized(update):
+        return
+    user_text = (update.message.text or "").strip()
+    if not user_text:
+        return
+    await _process_text(user_text, update, context)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle voice messages \u2014 transcribe via Whisper, then process as text."""
+    if not _is_authorized(update):
+        return
+    transcript = await _transcribe_voice(update, context)
+    if not transcript:
+        return
+    await update.message.reply_text(f"\U0001f3d9\ufe0f Heard: \"{transcript}\"")
+    await _process_text(transcript, update, context)
+
+
 # ── Scheduler jobs ─────────────────────────────────────────────────────────────
 
 async def send_morning_brief(app: Application) -> None:
@@ -1517,8 +1558,9 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("session", cmd_session))
 
-    # Free-text conversation handler
+    # Free-text and voice conversation handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     # Scheduler — three daily check-ins, Mon–Fri ET
     scheduler = AsyncIOScheduler(timezone=EASTERN)
