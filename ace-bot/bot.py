@@ -1463,8 +1463,8 @@ async def _tts_speak(text: str, update: Update) -> bool:
             return False
         client = openai.OpenAI(api_key=api_key)
         tts_response = client.audio.speech.create(
-            model="tts-1",
-            voice="fable",   # British male — Brady's pick
+            model="tts-1-hd",
+            voice="onyx",    # Deep authoritative — Jarvis feel
             input=text,
             response_format="opus",  # OGG Opus — required for Telegram reply_voice
         )
@@ -1523,7 +1523,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     transcript = await _transcribe_voice(update, context)
     if not transcript:
         return
-    await update.message.reply_text(f"U0001f3d9️ \"{transcript}\"")
+    await update.message.reply_text(f"🎤 Heard: \"{transcript}\"")
     await _process_text(transcript, update, context, reply_as_voice=True)
 
 
