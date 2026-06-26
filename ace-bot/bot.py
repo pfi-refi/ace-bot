@@ -1256,8 +1256,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 # ── Message handler (free-form conversation) ──────────────────────────────────
 
-async def _process_text(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Core message processing — called by both text and voice handlers."""
+async def _process_text(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE, reply_as_voice: bool = False) -> None:
+    """Core message processing — called by both text and voice handlers.
+
+    reply_as_voice: when True, final response is sent as TTS (British fable voice).
+    """
     if SESSION_MODE.get("active"):
         SESSION_MODE["active"] = False
         await _process_session_dump(user_text, update, context)
@@ -1338,8 +1341,11 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         clean_response = re.sub(r'\[DELETE_EVENT:[^\]]+\]', '', clean_response)
         clean_response = clean_response.strip()
 
-        # Send the main response
-        await update.message.reply_text(clean_response)
+        # Send the main response (voice or text depending on how the message arrived)
+        if reply_as_voice and clean_response:
+            await _tts_speak(clean_response, update)
+        else:
+            await update.message.reply_text(clean_response)
 
         # ── Execute action tags + collect confirmations ───────────────────────
         confirmations = []
@@ -1445,6 +1451,33 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         logger.error("Message handler error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
 
+async def _tts_speak(text: str, update: Update) -> bool:
+    """Convert text to speech (OpenAI TTS, fable = British male) and send as Telegram voice note.
+    Falls back to plain text if TTS fails or key is missing.
+    """
+    try:
+        import openai
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            await update.message.reply_text(text)
+            return False
+        client = openai.OpenAI(api_key=api_key)
+        tts_response = client.audio.speech.create(
+            model="tts-1",
+            voice="fable",   # British male — Brady's pick
+            input=text,
+        )
+        audio_buf = io.BytesIO(tts_response.content)
+        audio_buf.name = "ace_response.mp3"
+        await update.message.reply_voice(audio_buf)
+        logger.info("TTS sent: %d chars → %d bytes", len(text), len(tts_response.content))
+        return True
+    except Exception as e:
+        logger.error("TTS error: %s", e)
+        await update.message.reply_text(text)   # graceful fallback
+        return False
+
+
 async def _transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Download a Telegram voice message and transcribe it via OpenAI Whisper."""
     try:
@@ -1489,8 +1522,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     transcript = await _transcribe_voice(update, context)
     if not transcript:
         return
-    await update.message.reply_text(f"\U0001f3d9\ufe0f Heard: \"{transcript}\"")
-    await _process_text(transcript, update, context)
+    await update.message.reply_text(f"U0001f3d9️ \"{transcript}\"")
+    await _process_text(transcript, update, context, reply_as_voice=True)
 
 
 # ── Scheduler jobs ─────────────────────────────────────────────────────────────
