@@ -621,7 +621,7 @@ def get_tasks(skip_reference: bool = False) -> str:
 # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
-VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (Ember voice). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (British male voice — calm, intelligent, Jarvis-style). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
 
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
@@ -1457,7 +1457,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 async def _tts_speak(text: str, update: Update) -> bool:
-    """Convert text to speech (OpenAI TTS, fable = British male) and send as Telegram voice note.
+    """Convert text to speech — British male (Jarvis-style fable voice) via OpenAI TTS.
     Falls back to plain text if TTS fails or key is missing.
     """
     try:
@@ -1471,7 +1471,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
         try:
             tts_response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
-                voice="ember",
+                voice="fable",   # British male — Jarvis-style
                 input=text,
                 response_format="opus",
                 speed=1.0,
@@ -1481,7 +1481,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             logger.warning("Primary TTS failed (%s), falling back to tts-1/nova", tts_err)
             tts_response = client.audio.speech.create(
                 model="tts-1",
-                voice="nova",
+                voice="fable",   # British male fallback
                 input=text,
                 response_format="opus",
                 speed=1.0,
