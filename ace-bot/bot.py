@@ -56,7 +56,7 @@ AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
 SESSION_MODE = {"active": False}   # Set True by /session until next user message
-LAST_BRIEF_SENT: datetime | None = None   # Tracks last manual /brief to suppress duplicate scheduled brief
+LAST_BRIEF_SENT = None  # Optional[datetime] — tracks last manual /brief to suppress duplicate auto-brief
 
 # ── Task list config ───────────────────────────────────────────────────────────
 # Truly read-only lists — Ace never adds tasks here
@@ -621,7 +621,7 @@ def get_tasks(skip_reference: bool = False) -> str:
 # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
-VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (Onyx voice). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (Ember voice). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
 
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
@@ -1538,12 +1538,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def send_morning_brief(app: Application) -> None:
     """Scheduled job — 9:30 AM ET morning brief."""
     global LAST_BRIEF_SENT
-        if LAST_BRIEF_SENT is not None:
-            mins_ago = (datetime.now(EASTERN) - LAST_BRIEF_SENT).total_seconds() / 60
-            if mins_ago < 180:
-                logger.info("Skipping scheduled brief — manual brief sent %.0f min ago.", mins_ago)
-                return
-        try:
+    if LAST_BRIEF_SENT is not None:
+        mins_ago = (datetime.now(EASTERN) - LAST_BRIEF_SENT).total_seconds() / 60
+        if mins_ago < 180:
+            logger.info("Skipping scheduled brief — manual brief sent %.0f min ago.", mins_ago)
+            return
+    try:
         logger.info("Sending scheduled morning brief…")
         brief = build_morning_brief()
         await app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=brief)
