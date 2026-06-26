@@ -1469,7 +1469,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             voice="ember",   # ChatGPT Ember — warm, energetic, natural
             input=text,
             response_format="opus",  # OGG Opus — required for Telegram reply_voice
-            speed=1.15,              # Slightly faster = more energy, less monotone
+            speed=1.0,              # Slightly faster = more energy, less monotone
         )
         audio_buf = io.BytesIO(tts_response.content)
         audio_buf.name = "ace_response.mp3"
