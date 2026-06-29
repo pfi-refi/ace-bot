@@ -546,6 +546,24 @@ def get_recent_read_emails() -> str:
 
 # ── Google Calendar (Write) ────────────────────────────────────────────────────
 
+def parse_time_flexible(time_str: str) -> str:
+    """Parse time in either 24-hour (18:30) or 12-hour (6:30 PM) format, return HH:MM."""
+    time_str = time_str.strip()
+    # Try 24-hour first
+    for fmt in ["%H:%M", "%H:%M:%S"]:
+        try:
+            return datetime.strptime(time_str, fmt).strftime("%H:%M")
+        except ValueError:
+            pass
+    # Try 12-hour formats
+    for fmt in ["%I:%M %p", "%I:%M%p", "%I %p", "%-I:%M %p", "%-I %p"]:
+        try:
+            return datetime.strptime(time_str.upper(), fmt).strftime("%H:%M")
+        except ValueError:
+            pass
+    raise ValueError(f"Cannot parse time: {time_str}")
+
+
 def create_calendar_event(title: str, date_str: str, time_str: str = None,
                            duration_minutes: int = 60, description: str = "",
                            calendar_id: str = "pfi@platinumfortuneimpact.com") -> tuple:
@@ -554,7 +572,8 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
         creds = get_google_creds()
         service = build("calendar", "v3", credentials=creds)
         if time_str and time_str.lower() not in ("all-day", "all day", ""):
-            start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            time_24h = parse_time_flexible(time_str)
+            start_dt = datetime.strptime(f"{date_str} {time_24h}", "%Y-%m-%d %H:%M")
             start_dt = EASTERN.localize(start_dt)
             end_dt = start_dt + timedelta(minutes=int(duration_minutes))
             event_body = {
@@ -1527,7 +1546,9 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
                     time_label = f" at {time_s}" if time_s else ""
                     confirmations.append(f"📅 Added to calendar: {title} on {date_s}{time_label}")
                 else:
-                    confirmations.append(f"⚠️ Calendar create failed: {title} — {msg}")
+                    await update.message.reply_text(
+                        f"❌ Calendar booking failed: {msg}. Please try again or book manually."
+                    )
             else:
                 confirmations.append(f"⚠️ Malformed CREATE_EVENT tag: {tag[:50]}")
 
@@ -1540,7 +1561,9 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
                 if success:
                     confirmations.append(f"🗑️ Removed from calendar: {msg} on {date_s}")
                 else:
-                    confirmations.append(f"⚠️ Calendar delete failed: {msg}")
+                    await update.message.reply_text(
+                        f"❌ Calendar delete failed: {msg}. Please try again or remove manually."
+                    )
             else:
                 confirmations.append(f"⚠️ Malformed DELETE_EVENT tag: {tag[:50]}")
 
