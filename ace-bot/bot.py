@@ -513,7 +513,7 @@ def get_recent_read_emails() -> str:
 
 def create_calendar_event(title: str, date_str: str, time_str: str = None,
                            duration_minutes: int = 60, description: str = "",
-                           calendar_id: str = "primary") -> tuple:
+                           calendar_id: str = "pfi@platinumfortuneimpact.com") -> tuple:
     """Create a Google Calendar event. Returns (success, event_id_or_error)."""
     try:
         creds = get_google_creds()
@@ -542,7 +542,7 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
         return False, str(e)
 
 
-def delete_calendar_event(title: str, date_str: str, calendar_id: str = "primary") -> tuple:
+def delete_calendar_event(title: str, date_str: str, calendar_id: str = "pfi@platinumfortuneimpact.com") -> tuple:
     """Delete a calendar event by title match on a given date. Returns (success, message)."""
     try:
         creds = get_google_creds()
