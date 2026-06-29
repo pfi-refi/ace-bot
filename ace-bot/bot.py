@@ -388,17 +388,21 @@ def search_drive(query: str) -> str:
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
-def get_calendar_events() -> str:
-    """Pull today's events from ALL Google Calendar calendars."""
+def get_calendar_events(days_ahead: int = 1) -> str:
+    """Pull calendar events from today through `days_ahead` days from ALL Google Calendars.
+
+    - days_ahead=1  → today only, flat bullet list (morning brief / context default)
+    - days_ahead=30 → full 30-day window, grouped by date with headers (/calendar command)
+    """
     try:
         creds = get_google_creds()
         service = build("calendar", "v3", credentials=creds)
         now_et = datetime.now(EASTERN)
         start_of_day = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_of_day = now_et.replace(hour=23, minute=59, second=59, microsecond=0)
+        end_window = start_of_day + timedelta(days=days_ahead)
         calendars_result = service.calendarList().list().execute()
         calendars = calendars_result.get("items", [])
-        all_events = []
+        all_events: list = []
         seen_ids: set = set()
         for calendar in calendars:
             cal_id = calendar["id"]
@@ -407,7 +411,7 @@ def get_calendar_events() -> str:
                 events_result = service.events().list(
                     calendarId=cal_id,
                     timeMin=start_of_day.isoformat(),
-                    timeMax=end_of_day.isoformat(),
+                    timeMax=end_window.isoformat(),
                     singleEvents=True,
                     orderBy="startTime",
                 ).execute()
@@ -424,17 +428,48 @@ def get_calendar_events() -> str:
                         if dt.tzinfo:
                             dt = dt.astimezone(EASTERN)
                         time_str = dt.strftime("%-I:%M %p")
+                        date_str = dt.strftime("%Y-%m-%d")
+                        date_label = dt.strftime("%A, %B %-d")
                     else:
+                        dt_naive = datetime.strptime(start_dt_str, "%Y-%m-%d")
                         time_str = "All day"
+                        date_str = start_dt_str
+                        date_label = dt_naive.strftime("%A, %B %-d")
                     is_primary_cal = cal_id in ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimpact.com")
                     cal_label = f" [{cal_name}]" if not is_primary_cal else ""
-                    all_events.append((start_dt_str, f"• {time_str} — {summary}{cal_label}"))
+                    all_events.append((start_dt_str, date_str, date_label, time_str, summary + cal_label))
             except Exception as e:
                 logger.warning("Error fetching calendar '%s': %s", cal_name, e)
         all_events.sort(key=lambda x: x[0])
-        if all_events:
-            return "\n".join(ev[1] for ev in all_events)
-        return "Nothing scheduled today."
+
+        if not all_events:
+            return "Nothing scheduled today." if days_ahead == 1 else f"No events in the next {days_ahead} days."
+
+        # ── Single-day view: flat list (compact for morning brief / context) ──
+        if days_ahead == 1:
+            return "\n".join(f"• {ev[3]} — {ev[4]}" for ev in all_events)
+
+        # ── Multi-day view: grouped by date with emoji headers ────────────────
+        today_str = now_et.strftime("%Y-%m-%d")
+        tomorrow_str = (now_et + timedelta(days=1)).strftime("%Y-%m-%d")
+        events_by_date: dict = {}
+        date_order: list = []
+        for _, date_str, date_label, time_str, summary in all_events:
+            label = date_label
+            if date_str == today_str:
+                label += " (Today)"
+            elif date_str == tomorrow_str:
+                label += " (Tomorrow)"
+            key = (date_str, label)
+            if key not in events_by_date:
+                events_by_date[key] = []
+                date_order.append(key)
+            events_by_date[key].append(f"  • {time_str} — {summary}")
+        sections = []
+        for key in sorted(date_order, key=lambda k: k[0]):
+            sections.append(f"📅 {key[1]}\n" + "\n".join(events_by_date[key]))
+        return "\n\n".join(sections)
+
     except Exception as e:
         logger.error("Calendar fetch error: %s", e)
         return "⚠️ Could not load calendar."
@@ -448,7 +483,7 @@ def get_gmail_summary() -> str:
         service = build("gmail", "v1", credentials=creds)
         results = service.users().messages().list(
             userId="me",
-            q="is:unread -category:promotions -category:social",
+            q="is:unread newer_than:2d -category:promotions -category:social",
             maxResults=10,
         ).execute()
         messages = results.get("messages", [])
@@ -629,7 +664,7 @@ def get_tasks(skip_reference: bool = False) -> str:
 # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
-VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (ember voice — warm, energetic). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (fable voice — British male, calm and intelligent). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
 
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
@@ -795,7 +830,7 @@ def build_morning_brief() -> str:
     now_et = datetime.now(EASTERN)
     day_str = now_et.strftime("%A, %B %-d")
     weekday = now_et.weekday()
-    calendar_data = get_calendar_events()
+    calendar_data = get_calendar_events(days_ahead=1)
     email_data = get_gmail_summary()
     tasks_data = get_tasks(skip_reference=True)   # v13: exclude reference lists
     memories = read_memory()
@@ -1084,6 +1119,22 @@ async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a full 30-day calendar view across all linked calendars, split if needed."""
+    if not _is_authorized(update):
+        return
+    await update.message.reply_text("⏳ Pulling your 30-day calendar…")
+    try:
+        events = get_calendar_events(days_ahead=30)
+        now_et = datetime.now(EASTERN)
+        end_date = (now_et + timedelta(days=30)).strftime("%B %-d, %Y")
+        header = f"📆 Calendar: {now_et.strftime('%B %-d')} – {end_date}\n\n"
+        await _send_split(header + events, update)
+    except Exception as e:
+        logger.error("Calendar command error: %s", e)
+        await update.message.reply_text(f"⚠️ Error fetching calendar: {e}")
+
+
 # ── Security check ─────────────────────────────────────────────────────────────
 
 def _is_authorized(update: Update) -> bool:
@@ -1098,6 +1149,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🤖 Ace is online.\n\n"
         "Commands:\n"
         " /brief — morning briefing right now\n"
+        " /calendar — 30-day calendar view (all linked calendars)\n"
         " /triage — midday check-in on demand\n"
         " /eod — evening wind-down on demand\n"
         " /tasks — show all open Google Tasks\n"
@@ -1119,6 +1171,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Ace commands:\n"
         " /brief — on-demand morning brief (live calendar + email + tasks)\n"
+        " /calendar — 30-day calendar view (all linked calendars)\n"
         " /triage — midday priority check-in\n"
         " /eod — evening wind-down and carry-forward\n"
         " /tasks — show all open Google Tasks\n"
@@ -1515,26 +1568,26 @@ async def _tts_speak(text: str, update: Update) -> bool:
             await update.message.reply_text("⚠️ No OPENAI_API_KEY set.\n\n" + text)
             return False
         client = openai.OpenAI(api_key=api_key)
-        # Try preferred voice model first; fall back to tts-1/nova if rejected
+        # Try preferred voice model first; fall back to tts-1/fable if rejected
         try:
             tts_response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
-                voice="ember",   # warm, energetic — ember voice
+                voice="fable",   # British male — calm, intelligent, Jarvis-style
                 input=text,
                 response_format="opus",
                 speed=1.0,
             )
-            logger.info("TTS: gpt-4o-mini-tts/ember → %d bytes", len(tts_response.content))
+            logger.info("TTS: gpt-4o-mini-tts/fable → %d bytes", len(tts_response.content))
         except Exception as tts_err:
-            logger.warning("Primary TTS failed (%s), falling back to tts-1/nova", tts_err)
+            logger.warning("Primary TTS failed (%s), falling back to tts-1/fable", tts_err)
             tts_response = client.audio.speech.create(
                 model="tts-1",
-                voice="ember",   # ember fallback
+                voice="fable",   # fable fallback (valid on tts-1)
                 input=text,
                 response_format="opus",
                 speed=1.0,
             )
-            logger.info("TTS fallback: tts-1/nova → %d bytes", len(tts_response.content))
+            logger.info("TTS fallback: tts-1/fable → %d bytes", len(tts_response.content))
         audio_buf = io.BytesIO(tts_response.content)
         audio_buf.seek(0)
         audio_buf.name = "ace_response.ogg"
@@ -1658,6 +1711,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("calendar", cmd_calendar))
     app.add_handler(CommandHandler("triage", cmd_triage))
     app.add_handler(CommandHandler("eod", cmd_eod))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
