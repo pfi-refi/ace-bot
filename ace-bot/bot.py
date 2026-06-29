@@ -1,6 +1,14 @@
 """
 Ace — Brady McGraw's Telegram business partner bot.
 
+v15: 30-day calendar window, Telegram 4096-char message splitting, voice (Whisper STT +
+     OpenAI TTS ember voice), model claude-opus-4-8, memory cross-reference, pattern learning.
+    - get_week_calendar() now pulls 30 days forward (was current week to Sunday)
+    - _send_split() helper splits any message > 4096 chars at natural break points
+    - All main AI response sends now route through _send_split()
+    - Voice: Whisper STT transcription + gpt-4o-mini-tts ember voice output
+    - EMD data lives in Ace's memory file (ace_memory.json on Drive) — not hardcoded here
+
 v13: Memory cross-reference, pattern learning, updated task lists, all-list morning scan.
     - Morning brief cross-references memory with open tasks to surface carry-forward items
     - EOD captures carry-forward items and stores them in memory automatically
@@ -621,7 +629,7 @@ def get_tasks(skip_reference: bool = False) -> str:
 # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
-VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (British male voice — calm, intelligent, Jarvis-style). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (ember voice — warm, energetic). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
 
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
@@ -925,17 +933,16 @@ def build_eod_sweep() -> str:
     result = re.sub(r'\[[A-Z_]+:[^\]]+\]', '', result).strip()
     return result
 
-# ── Week Calendar (for /session) ──────────────────────────────────────────────────────────────────────────────
+# ── Upcoming Calendar (30-day window, for /session brain dump) ────────────────
 
 def get_week_calendar() -> str:
-    """Pull this week's events (today through Sunday) from all Google Calendars."""
+    """Pull the next 30 days of events from all Google Calendars (used in /session brain dump)."""
     try:
         creds = get_google_creds()
         service = build("calendar", "v3", credentials=creds)
         now_et = datetime.now(EASTERN)
         week_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-        days_to_sunday = 6 - now_et.weekday()
-        week_end = (now_et + timedelta(days=days_to_sunday)).replace(hour=23, minute=59, second=59)
+        week_end = (now_et + timedelta(days=30)).replace(hour=23, minute=59, second=59)
         calendars_result = service.calendarList().list().execute()
         calendars = calendars_result.get("items", [])
         all_events = []
@@ -950,7 +957,7 @@ def get_week_calendar() -> str:
                     timeMax=week_end.isoformat(),
                     singleEvents=True,
                     orderBy="startTime",
-                    maxResults=60,
+                    maxResults=100,
                 ).execute()
                 for event in events_result.get("items", []):
                     event_id = event.get("id", "")
@@ -973,10 +980,10 @@ def get_week_calendar() -> str:
             except Exception as e:
                 logger.warning("Week calendar error for '%s': %s", cal_name, e)
         all_events.sort(key=lambda x: x[0])
-        return "\n".join(ev[1] for ev in all_events) if all_events else "No events this week."
+        return "\n".join(ev[1] for ev in all_events) if all_events else "No events in the next 30 days."
     except Exception as e:
         logger.error("Week calendar fetch error: %s", e)
-        return "⚠️ Could not load weekly calendar."
+        return "⚠️ Could not load upcoming calendar."
 
 
 async def _process_session_dump(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1026,7 +1033,7 @@ async def _process_session_dump(user_text: str, update: Update, context: Context
         clean_response = re.sub(r'\[ADD_TASK:[^\]]+\]', '', clean_response)
         clean_response = re.sub(r'\[CREATE_EVENT:[^\]]+\]', '', clean_response)
         clean_response = clean_response.strip()
-        await update.message.reply_text(clean_response)
+        await _send_split(clean_response, update)
         confirmations = []
         if memory_tags:
             merged = _merge_memories(memory_tags, read_memory())
@@ -1178,7 +1185,7 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "re-run ace_auth.py and update GOOGLE_TOKEN_JSON in Railway."
             )
         else:
-            await update.message.reply_text(f"✅ Open Tasks:\n\n{tasks}")
+            await _send_split(f"✅ Open Tasks:\n\n{tasks}", update)
     except Exception as e:
         logger.error("Tasks command error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
@@ -1251,7 +1258,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else "no open tasks"
     )
     await update.message.reply_text(
-        f"✅ Ace v13 is running.\n"
+        f"✅ Ace v14 is running.\n"
         f"Time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
         f"Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
@@ -1259,12 +1266,53 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Tasks: {tasks_status}"
     )
 
+# ── Message splitting helper ───────────────────────────────────────────────────
+
+async def _send_split(text: str, update: Update, max_len: int = 4096) -> None:
+    """Send a message, splitting at paragraph/sentence/word boundaries if > max_len chars.
+
+    Telegram enforces a 4096-char limit per message. Splits at double newline first
+    (paragraph boundary), then single newline, then sentence period, then hard-cuts.
+    """
+    if len(text) <= max_len:
+        await update.message.reply_text(text)
+        return
+    chunks = []
+    remaining = text.strip()
+    while len(remaining) > max_len:
+        # 1. Try paragraph break
+        split_at = remaining.rfind("\n\n", 0, max_len)
+        if split_at > 0:
+            chunks.append(remaining[:split_at].strip())
+            remaining = remaining[split_at:].strip()
+            continue
+        # 2. Try single newline
+        split_at = remaining.rfind("\n", 0, max_len)
+        if split_at > 0:
+            chunks.append(remaining[:split_at].strip())
+            remaining = remaining[split_at:].strip()
+            continue
+        # 3. Try sentence boundary (". ")
+        split_at = remaining.rfind(". ", 0, max_len)
+        if split_at > 0:
+            chunks.append(remaining[:split_at + 1].strip())
+            remaining = remaining[split_at + 2:].strip()
+            continue
+        # 4. Hard split at max_len
+        chunks.append(remaining[:max_len])
+        remaining = remaining[max_len:].strip()
+    if remaining:
+        chunks.append(remaining)
+    for chunk in chunks:
+        if chunk:
+            await update.message.reply_text(chunk)
+
 # ── Message handler (free-form conversation) ──────────────────────────────────
 
 async def _process_text(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE, reply_as_voice: bool = False) -> None:
     """Core message processing — called by both text and voice handlers.
 
-    reply_as_voice: when True, final response is sent as TTS (British fable voice).
+    reply_as_voice: when True, final response is sent as TTS (ember voice).
     """
     if SESSION_MODE.get("active"):
         SESSION_MODE["active"] = False
@@ -1350,7 +1398,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         if reply_as_voice and clean_response:
             await _tts_speak(clean_response, update)
         else:
-            await update.message.reply_text(clean_response)
+            await _send_split(clean_response, update)
 
         # ── Execute action tags + collect confirmations ───────────────────────
         confirmations = []
@@ -1457,7 +1505,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 async def _tts_speak(text: str, update: Update) -> bool:
-    """Convert text to speech — British male (Jarvis-style fable voice) via OpenAI TTS.
+    """Convert text to speech — ember voice via OpenAI TTS (warm, energetic).
     Falls back to plain text if TTS fails or key is missing.
     """
     try:
@@ -1471,7 +1519,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
         try:
             tts_response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
-                voice="fable",   # British male — Jarvis-style
+                voice="ember",   # warm, energetic — ember voice
                 input=text,
                 response_format="opus",
                 speed=1.0,
@@ -1481,7 +1529,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             logger.warning("Primary TTS failed (%s), falling back to tts-1/nova", tts_err)
             tts_response = client.audio.speech.create(
                 model="tts-1",
-                voice="fable",   # British male fallback
+                voice="ember",   # ember fallback
                 input=text,
                 response_format="opus",
                 speed=1.0,
@@ -1643,7 +1691,7 @@ def main() -> None:
         "Scheduler started — 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET)."
     )
 
-    logger.info("Ace v13 is starting up…")
+    logger.info("Ace v14 is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
