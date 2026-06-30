@@ -23,12 +23,10 @@ except ImportError:
 
 # All scopes Ace needs — calendar write is the new one
 SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.compose",
-    "https://www.googleapis.com/auth/calendar",          # ← NEW: full calendar read+write
-    "https://www.googleapis.com/auth/tasks",
-    "https://www.googleapis.com/auth/drive",
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/tasks',
+    'https://www.googleapis.com/auth/drive',
 ]
 
 
@@ -60,6 +58,7 @@ def main():
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes),
+        "expiry": creds.expiry.isoformat() + "Z" if creds.expiry else None,
     }
 
     token_json = json.dumps(token_data, indent=2)
