@@ -536,6 +536,23 @@ def get_tomorrow_events() -> str:
         return "\u26a0\ufe0f Could not load tomorrow's calendar."
 
 
+def get_calendar_events_range(days: int = 7) -> str:
+    """Fetch calendar events for the next N days (1-30), grouped by date.
+
+    Starts from tomorrow through N days ahead.  Thin wrapper around
+    get_calendar_events() which already supports multi-day grouped output.
+    days is clamped to 1-30.
+    """
+    days = max(1, min(int(days), 30))
+    # get_calendar_events(days_ahead) covers today through days_ahead days.
+    # days_ahead > 1 triggers the grouped-by-date output mode.
+    # We fetch days+1 so the window spans today + days more days.
+    result = get_calendar_events(days_ahead=days + 1)
+    if result.startswith("\u26a0\ufe0f") or "No events" in result:
+        return f"Nothing on the calendar for the next {days} days."
+    return f"\U0001f4c6 Next {days} days:\n\n{result}"
+
+
 # ── Gmail ──────────────────────────────────────────────────────────────────────
 
 def get_gmail_summary() -> str:
@@ -1462,6 +1479,15 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
     tomorrow_events = get_tomorrow_events()
     email_data = get_gmail_summary()
 
+    # Detect if Brady is asking about a multi-day calendar range
+    msg_lower = user_text.lower()
+    if any(phrase in msg_lower for phrase in ['next week', 'this week', 'next 7', '7 days', 'week ahead', 'upcoming', 'next 10', '10 days']):
+        calendar_range = get_calendar_events_range(days=10)
+    elif any(phrase in msg_lower for phrase in ['next month', '30 days', 'this month', 'month ahead']):
+        calendar_range = get_calendar_events_range(days=30)
+    else:
+        calendar_range = ""
+
     # Load conversation history
     conversation_history = read_conversation_history()
 
@@ -1477,7 +1503,8 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         f"\n\n📊 LIVE DATA (auto-fetched right now — {now_et.strftime('%A, %B %-d, %Y %-I:%M %p ET')}):\n"
         f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
         f"📅 TOMORROW'S SCHEDULE:\n{tomorrow_events}\n\n"
-        f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
+        + (f"📆 UPCOMING CALENDAR RANGE:\n{calendar_range}\n\n" if calendar_range else "")
+        + f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
         f"📧 UNREAD EMAILS:\n{email_data}\n\n"
         f"📨 RECENT READ EMAILS (last 48hrs):\n{recent_email_data}"
     )
