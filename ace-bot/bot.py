@@ -1514,10 +1514,13 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         + live_data
         + memory_context
         + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔧 BACKEND STATUS (fixed tonight): Google Calendar writes are FULLY OPERATIONAL. "
+        "🔧 BACKEND STATUS: Google Calendar writes are FULLY OPERATIONAL. "
         "Earlier 403 errors are RESOLVED — do NOT let past failures stop you from using [CREATE_EVENT:...] tags. "
         "When Brady asks to schedule ANYTHING, you MUST include the [CREATE_EVENT:...] tag in your response. "
         "Never just describe the booking in text — always include the actual tag so Python executes it.\n"
+        "📅 CALENDAR READ STATUS: Your calendar data is pulled LIVE on every single message Brady sends — "
+        "it is NOT a session-start snapshot and is NOT frozen. You always have a current, real-time view of Brady's full calendar. "
+        "NEVER tell Brady your calendar view is outdated, frozen, or from 'this morning' — it is always current.\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
         "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to 🎯 Today)\n"
