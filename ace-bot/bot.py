@@ -1514,6 +1514,11 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         + live_data
         + memory_context
         + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔧 BACKEND STATUS (fixed tonight): Google Calendar writes are FULLY OPERATIONAL. "
+        "Earlier 403 errors are RESOLVED — do NOT let past failures stop you from using [CREATE_EVENT:...] tags. "
+        "When Brady asks to schedule ANYTHING, you MUST include the [CREATE_EVENT:...] tag in your response. "
+        "Never just describe the booking in text — always include the actual tag so Python executes it.\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
         "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to 🎯 Today)\n"
         "• [COMPLETE_TASK: partial title] — marks task done via fuzzy match\n"
@@ -1534,7 +1539,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
     try:
         response = _call_claude(
             messages,
-            max_tokens=600,
+            max_tokens=900,
             system=system_with_context,
         )
 
@@ -1546,6 +1551,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         draft_email_tags = re.findall(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
         drive_tags          = re.findall(r'\[SEARCH_DRIVE:\s*([^\]]+)\]', response)
         create_event_tags   = re.findall(r'\[CREATE_EVENT:\s*([^\]]+)\]', response)
+        logger.info("ACE_DEBUG create_event_tags=%d raw_preview=%s", len(create_event_tags), response[:200])
         delete_event_tags   = re.findall(r'\[DELETE_EVENT:\s*([^\]]+)\]', response)
 
         # Strip all tags from the visible response
