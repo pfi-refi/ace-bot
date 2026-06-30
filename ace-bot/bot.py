@@ -474,6 +474,68 @@ def get_calendar_events(days_ahead: int = 1) -> str:
         logger.error("Calendar fetch error: %s", e)
         return "⚠️ Could not load calendar."
 
+
+def get_tomorrow_events() -> str:
+    """Fetch all calendar events for tomorrow across all linked calendars."""
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+
+        # Calculate tomorrow's date range in Eastern time
+        now_et = datetime.now(EASTERN)
+        tomorrow = (now_et + timedelta(days=1)).date()
+        start = EASTERN.localize(datetime.combine(tomorrow, datetime.min.time()))
+        end = EASTERN.localize(datetime.combine(tomorrow, datetime.max.time()))
+
+        # Get all linked calendars
+        calendars_result = service.calendarList().list().execute()
+        calendars = calendars_result.get("items", [])
+
+        all_events = []
+        seen_ids: set = set()
+        for calendar in calendars:
+            cal_id = calendar["id"]
+            cal_name = calendar.get("summary", cal_id)
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=start.isoformat(),
+                    timeMax=end.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                ).execute()
+                for event in events_result.get("items", []):
+                    event_id = event.get("id", "")
+                    if event_id in seen_ids:
+                        continue
+                    seen_ids.add(event_id)
+                    summary = event.get("summary", "No title")
+                    start_info = event.get("start", {})
+                    start_dt_str = start_info.get("dateTime", start_info.get("date", ""))
+                    if "T" in start_dt_str:
+                        dt = datetime.fromisoformat(start_dt_str)
+                        if dt.tzinfo:
+                            dt = dt.astimezone(EASTERN)
+                        time_str = dt.strftime("%-I:%M %p")
+                    else:
+                        time_str = "All day"
+                    is_primary_cal = cal_id in ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimpact.com")
+                    cal_label = f" [{cal_name}]" if not is_primary_cal else ""
+                    all_events.append((start_dt_str, f"\u2022 {time_str} \u2014 {summary}{cal_label}"))
+            except Exception as e:
+                logger.warning("Error fetching tomorrow calendar '%s': %s", cal_name, e)
+
+        all_events.sort(key=lambda x: x[0])
+        tomorrow_str = tomorrow.strftime("%A, %B %-d")
+        if all_events:
+            lines = [f"\U0001f4c5 Tomorrow \u2014 {tomorrow_str}:"] + [ev[1] for ev in all_events]
+            return "\n".join(lines)
+        return f"Nothing scheduled tomorrow ({tomorrow_str})."
+    except Exception as e:
+        logger.error("Tomorrow calendar fetch error: %s", e)
+        return "\u26a0\ufe0f Could not load tomorrow's calendar."
+
+
 # ── Gmail ──────────────────────────────────────────────────────────────────────
 
 def get_gmail_summary() -> str:
@@ -850,6 +912,7 @@ def build_morning_brief() -> str:
     day_str = now_et.strftime("%A, %B %-d")
     weekday = now_et.weekday()
     calendar_data = get_calendar_events(days_ahead=1)
+    tomorrow_events = get_tomorrow_events()
     email_data = get_gmail_summary()
     tasks_data = get_tasks(skip_reference=True)   # v13: exclude reference lists
     memories = read_memory()
@@ -872,6 +935,7 @@ def build_morning_brief() -> str:
         f"It's 9:30 AM on {day_str}. You're opening the day with Brady — your business partner.\n\n"
         "LIVE DATA:\n"
         f"📅 Calendar today:\n{calendar_data}\n\n"
+        f"📅 Tomorrow's schedule:\n{tomorrow_events}\n\n"
         f"📧 Unread emails:\n{email_data}\n"
         f"{tasks_section}"
         f"📌 Day context: {day_note}\n"
@@ -1395,6 +1459,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
     memories = read_memory()
     tasks_data = get_tasks()
     calendar_data = get_calendar_events()
+    tomorrow_events = get_tomorrow_events()
     email_data = get_gmail_summary()
 
     # Load conversation history
@@ -1411,6 +1476,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
     live_data = (
         f"\n\n📊 LIVE DATA (auto-fetched right now — {now_et.strftime('%A, %B %-d, %Y %-I:%M %p ET')}):\n"
         f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
+        f"📅 TOMORROW'S SCHEDULE:\n{tomorrow_events}\n\n"
         f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
         f"📧 UNREAD EMAILS:\n{email_data}\n\n"
         f"📨 RECENT READ EMAILS (last 48hrs):\n{recent_email_data}"
