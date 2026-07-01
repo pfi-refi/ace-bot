@@ -1057,7 +1057,9 @@ def build_eod_sweep() -> str:
         "or anything Brady mentioned today that should inform tomorrow's brief. "
         "Tags are invisible to Brady — only the conversational text goes to him."
     )
-    result = _call_claude([{"role": "user", "content": prompt}], max_tokens=320)
+    hist = read_conversation_history()
+    messages = list(hist) + [{"role": "user", "content": prompt}]
+    result = _call_claude(messages, max_tokens=400)
     # Extract and execute memory tags before stripping
     memory_tags = re.findall(r'\[MEMORY:\s*([^\]]+)\]', result)
     if memory_tags:
