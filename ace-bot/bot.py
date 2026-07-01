@@ -1516,6 +1516,8 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         + live_data
         + memory_context
         + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 CURRENT TIME: {now_et.strftime('%A, %B %-d, %Y — %-I:%M %p ET')} (live, injected every message — always accurate. Use this to give Brady time-aware responses: flag upcoming events, note time of day, calculate how long until next appointment.)\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔧 BACKEND STATUS: Google Calendar writes are FULLY OPERATIONAL. "
         "Earlier 403 errors are RESOLVED — do NOT let past failures stop you from using [CREATE_EVENT:...] tags. "
         "When Brady asks to schedule ANYTHING, you MUST include the [CREATE_EVENT:...] tag in your response. "
