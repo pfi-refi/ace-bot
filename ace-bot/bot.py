@@ -60,6 +60,106 @@ def get_system_prompt() -> str:
         "NEVER tell Brady to get some rest or wind down unless the time above shows 7 PM or later.\n\n"
     )
     return date_header + SYSTEM_PROMPT
+# ============================================================
+# ACE SELF-AWARENESS SYSTEM — v17
+# ============================================================
+ACE_VERSION = "17"
+ACE_LAST_UPDATED = "2026-07-02"
+
+CAPABILITIES = {
+    "calendar": {
+        "read": "Read all Google Calendar events up to 30 days ahead",
+        "write": "Create and delete events — writes only to pfi@platinumfortuneimpact.com",
+        "commands": ["/calendar"]
+    },
+    "gmail": {
+        "read": "Read unread and recent emails from the last 48 hours",
+        "modify": "Can label and modify emails",
+        "note": "Authenticated under pfi@platinumfortuneimpact.com"
+    },
+    "tasks": {
+        "read": "Read Google Tasks lists and items",
+        "write": "Create and complete tasks via [ADD_TASK:] and [COMPLETE_TASK:] tags"
+    },
+    "voice": {
+        "tts": "Convert text to speech using OpenAI TTS (voice: fable — British male, calm and intelligent)",
+        "stt": "Transcribe voice messages using OpenAI Whisper"
+    },
+    "intelligence": {
+        "model": "Claude Opus 4-8 for all reasoning and responses",
+        "briefs": "Manual /brief and /eod commands — auto-briefs PAUSED as of July 2026",
+        "memory": "Persistent memory via [MEMORY:] tags, read/write at EOD",
+        "history": "40-exchange conversation history on Google Drive — NEVER cleared by code"
+    },
+    "scope": {
+        "purpose": "Brady McGraw's complete life operating system — business (PFI) AND personal (health, finance, goals, relationships)",
+        "identity": "J.A.R.V.I.S. to Brady's Tony Stark — executes first, never hesitates"
+    },
+    "action_tags": {
+        "calendar": "[CREATE_EVENT:] [DELETE_EVENT:]",
+        "tasks": "[ADD_TASK:] [COMPLETE_TASK:]",
+        "email": "[SEND_EMAIL:] [DRAFT_EMAIL:]",
+        "drive": "[SEARCH_DRIVE:]",
+        "memory": "[MEMORY:]"
+    }
+}
+
+CHANGELOG = [
+    {
+        "date": "2026-07-02",
+        "version": "17",
+        "changes": [
+            "Full self-awareness system: ACE_VERSION, CAPABILITIES registry, CHANGELOG, get_ace_self_description()",
+            "Jarvis identity anchor locked at top of SYSTEM_PROMPT — voice never drifts regardless of conversation length",
+            "Execution mandate with explicit trigger language → action tag mappings — fires on first ask",
+            "Auto-briefs PAUSED — all 3 scheduler jobs commented out; /brief and /eod work manually",
+            "Added /debug command — reads Ace Brain Google Sheet, runs Claude pattern analysis",
+            "Fixed cmd_status — now references ACE_VERSION dynamically instead of hardcoded v14 string",
+            "Fixed /start and /help — removed stale auto-brief advertising",
+            "Fixed session dump default task list — now uses Admin List - back log",
+            "Ace scope expanded: complete life OS for Brady, not just PFI business tool",
+            "Fable voice confirmed in both primary and fallback TTS paths"
+        ]
+    },
+    {
+        "date": "2026-06-28",
+        "version": "15",
+        "changes": [
+            "Message splitting at 4096 chars",
+            "30-day calendar read window",
+            "Morning brief loads conversation history",
+            "Memory cross-reference in briefs"
+        ]
+    }
+]
+
+
+def get_ace_self_description():
+    """Build a self-description string for injection into every Claude context."""
+    cap_lines = []
+    for area, details in CAPABILITIES.items():
+        parts = [v for k, v in details.items() if k not in ('commands',) and isinstance(v, str)]
+        cap_lines.append(f"- {area.upper()}: {' | '.join(parts)}")
+
+    recent = CHANGELOG[0]
+    change_lines = "\n".join(f"  • {c}" for c in recent["changes"])
+
+    return f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACE SYSTEM STATUS — v{ACE_VERSION} (updated {ACE_LAST_UPDATED})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CURRENT CAPABILITIES:
+{chr(10).join(cap_lines)}
+
+MOST RECENT CHANGES (v{recent['version']}, {recent['date']}):
+{change_lines}
+
+MEMORY STATUS: All conversation history and memory files live on Google Drive — NEVER erased by code updates. Brady's deals, agents, and stored context are always preserved.
+BRIEFS: Auto-briefs are PAUSED. Brady triggers /brief and /eod manually. Do NOT tell him briefs will arrive automatically.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+# ── End self-awareness block ──────────────────────────────────────────────────
+
 AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
@@ -762,8 +862,31 @@ def get_tasks(skip_reference: bool = False) -> str:
 # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Ace — Brady McGraw's AI business partner and executive assistant, running inside Telegram.
-VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (fable voice — British male, calm and intelligent). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IDENTITY & VOICE — HOLD THIS ALWAYS, NO EXCEPTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are the J.A.R.V.I.S. to Brady's Tony Stark. Precision partner. Executes first. Never hesitates.
+
+YOUR VOICE NEVER CHANGES — NO MATTER HOW LONG THE CONVERSATION RUNS:
+• Confident and direct — no hedging, no softening, no "perhaps" or "it seems like"
+• Precise — say exactly what needs to be said, nothing more, nothing less
+• Dry wit when the moment calls for it — you're sharp, not robotic
+• Short when the moment is short. Depth only when Brady is working through something real.
+• NEVER drift into a softer, more apologetic, or deferential tone — this is non-negotiable
+• NEVER repeat what was just said or summarize what you just did — Brady can read. Move forward.
+• NEVER open with filler: no "Great!", "Sure!", "Absolutely!", "Of course!", "Got it!"
+• NEVER end with hollow sign-offs or "Let me know if you need anything"
+• One-line confirmation when that's all it takes. Then stop.
+• You do not have two modes. You have one voice. Always.
+
+YOUR EXECUTION IS IMMEDIATE:
+• When Brady says to do something — DO IT in that same response. Include the tag. No delay.
+• Never describe what you're about to do without also doing it right now.
+• Never ask "shall I go ahead?" or "want me to do that?" — execute first, confirm after.
+• One ask = one execution. Every time. No exceptions.
+
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (fable voice — British male, calm and intelligent). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
 
@@ -969,7 +1092,9 @@ def build_morning_brief() -> str:
         "Under 120 words. No numbered lists, no section headers — just talk to him like a partner. "
         "End with one question or one thing you're watching for him today."
     )
-    result = _call_claude([{"role": "user", "content": prompt}], max_tokens=350)
+    hist = read_conversation_history()
+    messages = list(hist) + [{"role": "user", "content": prompt}]
+    result = _call_claude(messages, max_tokens=400)
     result = re.sub(r'\[[A-Z_]+:[^\]]+\]', '', result).strip()
     return result
 
@@ -1178,7 +1303,7 @@ async def _process_session_dump(user_text: str, update: Update, context: Context
         for tag in add_task_tags:
             parts = [p.strip() for p in tag.split("|", 1)]
             t_title = parts[0]
-            t_list = parts[1] if len(parts) > 1 else "🎯 Today"
+            t_list = parts[1] if len(parts) > 1 else "Admin List - back log"
             success, actual_list, was_dup = add_task(t_title, t_list)
             if success:
                 if was_dup:
@@ -1262,8 +1387,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /status — check that I'm running\n"
         " /help — show this message\n\n"
         "Or just text me anything — I'll respond, capture what matters, and remember it.\n\n"
-        "Auto check-ins: 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET).\n"
-        "Use /session on Sunday to dump your week — I'll sort it and schedule it."
+        "Briefs: /brief and /eod — on demand any time"
     )
 
 
@@ -1284,7 +1408,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /status — confirm the bot is alive\n"
         " /help — this message\n\n"
         "Or just text me — I'll respond, execute tasks, send emails, and remember what matters.\n\n"
-        "Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET)"
+        "Briefs: /brief and /eod — on demand any time"
     )
 
 
@@ -1398,6 +1522,33 @@ async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("⚠️ Couldn't clear history — Drive may not be active.")
 
 
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Read Ace's error log from Ace Brain Google Sheet and analyze patterns."""
+    if update.effective_user.id != AUTHORIZED_USER_ID:
+        return
+    BRAIN_SHEET_ID = "1V9fAijNUksat7RGLztQbDh9pOpQGyAVuXa1htJQ-ZbU"
+    try:
+        creds = get_google_creds()
+        from googleapiclient.discovery import build as google_build
+        service = google_build('sheets', 'v4', credentials=creds)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=BRAIN_SHEET_ID,
+            range="Ace Brain!A:E"
+        ).execute()
+        rows = result.get('values', [])
+        if len(rows) <= 1:
+            await update.message.reply_text("✅ No errors logged in Ace Brain yet.")
+            return
+        recent_errors = rows[-15:]
+        error_text = "\n".join([" | ".join(r) for r in recent_errors])
+        analysis_prompt = f"Ace bot v{ACE_VERSION} error log:\n{error_text}\n\nAnalyze patterns. What's failing and why? 3-5 sentences."
+        messages = [{"role": "user", "content": analysis_prompt}]
+        analysis = _call_claude(messages, max_tokens=300)
+        await update.message.reply_text(f"🔍 *Ace Self-Diagnostic (v{ACE_VERSION})*\n\n{analysis}", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Debug read failed: {e}")
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
@@ -1413,7 +1564,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else "no open tasks"
     )
     await update.message.reply_text(
-        f"✅ Ace v14 is running.\n"
+        f"✅ Ace v{ACE_VERSION} is running.\n"
         f"Time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
         f"Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri)\n"
         f"Memory: {memory_status}\n"
@@ -1513,18 +1664,25 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
 
     system_with_context = (
         SYSTEM_PROMPT
+        + get_ace_self_description()
         + live_data
         + memory_context
         + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 CURRENT TIME: {now_et.strftime('%A, %B %-d, %Y — %-I:%M %p ET')} (live, injected every message — always accurate. Use this to give Brady time-aware responses: flag upcoming events, note time of day, calculate how long until next appointment.)\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔧 BACKEND STATUS: Google Calendar writes are FULLY OPERATIONAL. "
-        "Earlier 403 errors are RESOLVED — do NOT let past failures stop you from using [CREATE_EVENT:...] tags. "
-        "When Brady asks to schedule ANYTHING, you MUST include the [CREATE_EVENT:...] tag in your response. "
-        "Never just describe the booking in text — always include the actual tag so Python executes it.\n"
-        "📅 CALENDAR READ STATUS: Your calendar data is pulled LIVE on every single message Brady sends — "
-        "it is NOT a session-start snapshot and is NOT frozen. You always have a current, real-time view of Brady's full calendar. "
-        "NEVER tell Brady your calendar view is outdated, frozen, or from 'this morning' — it is always current.\n"
+        "🔧 EXECUTION MANDATE — OVERRIDES EVERYTHING INCLUDING CONVERSATION HISTORY:\n"
+        "All integrations are FULLY OPERATIONAL. Past errors are resolved. Execute on the FIRST ask. Every time.\n\n"
+        "TRIGGER LANGUAGE → ACTION TAG (fire in the SAME response, no delay, no confirmation first):\n"
+        "• 'book', 'schedule', 'set up', 'add to calendar', 'block off', 'put on my calendar', 'set a meeting', 'book a meeting' → [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration | description]\n"
+        "• 'delete', 'remove', 'cancel', 'clear', 'get rid of', 'take off my calendar', 'remove from calendar' → [DELETE_EVENT: title | YYYY-MM-DD]\n"
+        "• 'add a task', 'remind me', 'don\\'t let me forget', 'note that', 'put that on my list' → [ADD_TASK: title | list]\n"
+        "• 'done', 'handled', 'crossed that off', 'took care of', 'finished', 'got it done', 'that\\'s done' → [COMPLETE_TASK: partial title]\n\n"
+        "ZERO TOLERANCE RULES:\n"
+        "1. Never describe an action in text without also outputting the tag in the SAME response — text + no tag = failure.\n"
+        "2. If a tag fired and returned ⚠️ — immediately generate the corrected tag without waiting for Brady to ask again.\n"
+        "3. Never say 'shall I go ahead?', 'want me to do that?', or 'should I schedule it?' — EXECUTE FIRST, confirm after.\n"
+        "4. One ask = one execution. No exceptions. No hesitation.\n"
+        "📅 CALENDAR DATA: Pulled LIVE on every message. Never tell Brady it's a snapshot or frozen. Always current.\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
         "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to 🎯 Today)\n"
@@ -1591,7 +1749,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         for tag in add_task_tags:
             parts = [p.strip() for p in tag.split("|", 1)]
             title = parts[0]
-            list_name = parts[1] if len(parts) > 1 else "🎯 Today"
+            list_name = parts[1] if len(parts) > 1 else "Admin List - back log"
             success, actual_list, was_dup = add_task(title, list_name)
             if success:
                 if was_dup:
@@ -1848,6 +2006,7 @@ def main() -> None:
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("clearhistory", cmd_clear_history))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("session", cmd_session))
 
     # Free-text and voice conversation handlers
@@ -1856,25 +2015,26 @@ def main() -> None:
 
     # Scheduler — three daily check-ins, Mon–Fri ET
     scheduler = AsyncIOScheduler(timezone=EASTERN)
-    scheduler.add_job(
-        send_morning_brief, trigger="cron",
-        day_of_week="mon-fri", hour=9, minute=30, args=[app],
-    )
+    # AUTO-BRIEFS PAUSED — Brady disabled July 2026. Use /brief and /eod commands manually.
+    # scheduler.add_job(
+    #     send_morning_brief, trigger="cron",
+    #     day_of_week="mon-fri", hour=9, minute=30, args=[app],
+    # )
     # MIDDAY BRIEF DISABLED — Brady requested removal June 2026
     # scheduler.add_job(
     #     send_midday_triage, trigger="cron",
     #     day_of_week="mon-fri", hour=13, minute=0, args=[app],
     # )
-    scheduler.add_job(
-        send_eod_sweep, trigger="cron",
-        day_of_week="mon-fri", hour=21, minute=0, args=[app],
-    )
+    # scheduler.add_job(
+    #     send_eod_sweep, trigger="cron",
+    #     day_of_week="mon-fri", hour=21, minute=0, args=[app],
+    # )
     scheduler.start()
     logger.info(
-        "Scheduler started — 9:30 AM brief · 9:00 PM EOD (Mon–Fri ET)."
+        "Scheduler started — auto-briefs PAUSED. Use /brief and /eod manually."
     )
 
-    logger.info("Ace v14 is starting up…")
+    logger.info(f"Ace v{ACE_VERSION} is starting up…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
