@@ -1860,23 +1860,24 @@ async def _tts_speak(text: str, update: Update) -> bool:
         # Try preferred voice model first; fall back to tts-1/fable if rejected
         try:
             tts_response = client.audio.speech.create(
-                model="tts-1",
+                model="gpt-4o-mini-tts",
                 voice="onyx",    # onyx — deep, authoritative male
                 input=text,
                 response_format="opus",
                 speed=1.15,
+                instructions="Speak with calm authority and sharp confidence — like a highly capable executive assistant who always has the answer. Deliver information with directness and a slight sense of urgency, as if every word matters. Warm when the moment calls for it, but never casual. No filler, no hedging.",
             )
-            logger.info("TTS: tts-1/fable → %d bytes", len(tts_response.content))
+            logger.info("TTS: gpt-4o-mini-tts/onyx → %d bytes", len(tts_response.content))
         except Exception as tts_err:
-            logger.warning("Primary TTS failed (%s), falling back to gpt-4o-mini-tts/fable", tts_err)
+            logger.warning("Primary TTS failed (%s), falling back to tts-1/onyx", tts_err)
             tts_response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
+                model="tts-1",
                 voice="onyx",    # onyx fallback
                 input=text,
                 response_format="opus",
                 speed=1.15,
             )
-            logger.info("TTS fallback: gpt-4o-mini-tts/fable → %d bytes", len(tts_response.content))
+            logger.info("TTS fallback: tts-1/onyx → %d bytes", len(tts_response.content))
         audio_buf = io.BytesIO(tts_response.content)
         audio_buf.seek(0)
         audio_buf.name = "ace_response.ogg"
