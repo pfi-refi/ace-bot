@@ -172,7 +172,7 @@ REFERENCE_LISTS = {"Business cost - NO TOUCH", "To learn / Questions"}
 # Lists excluded from morning brief scan (reference + personal/goals clutter)
 MORNING_SKIP_LISTS = REFERENCE_LISTS | {"🏠 Personal", "🏆 Goals"}
 # Default list for tasks when context doesn't point elsewhere
-DEFAULT_TASK_LIST = "Admin List - back log"
+DEFAULT_TASK_LIST = "Brain Dump"
 
 # ── Google auth ───────────────────────────────────────────────────────────────
 
@@ -1303,7 +1303,7 @@ async def _process_session_dump(user_text: str, update: Update, context: Context
         for tag in add_task_tags:
             parts = [p.strip() for p in tag.split("|", 1)]
             t_title = parts[0]
-            t_list = parts[1] if len(parts) > 1 else "Admin List - back log"
+            t_list = parts[1] if len(parts) > 1 else "Brain Dump"
             success, actual_list, was_dup = add_task(t_title, t_list)
             if success:
                 if was_dup:
@@ -1685,7 +1685,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         "📅 CALENDAR DATA: Pulled LIVE on every message. Never tell Brady it's a snapshot or frozen. Always current.\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
-        "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to Admin List - back log)\n"
+        "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to Brain Dump)\n"
         "• [COMPLETE_TASK: partial title] — marks task done via fuzzy match\n"
         "• [SEND_EMAIL: to@email.com | Subject | Body] — sends email immediately\n"
         "• [DRAFT_EMAIL: to@email.com | Subject | Body] — creates Gmail draft\n"
@@ -1749,7 +1749,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         for tag in add_task_tags:
             parts = [p.strip() for p in tag.split("|", 1)]
             title = parts[0]
-            list_name = parts[1] if len(parts) > 1 else "Admin List - back log"
+            list_name = parts[1] if len(parts) > 1 else "Brain Dump"
             success, actual_list, was_dup = add_task(title, list_name)
             if success:
                 if was_dup:
