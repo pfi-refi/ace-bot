@@ -1861,7 +1861,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
         try:
             tts_response = client.audio.speech.create(
                 model="tts-1",
-                voice="fable",   # British male — calm, intelligent, Jarvis-style
+                voice="onyx",    # onyx — deep, authoritative male
                 input=text,
                 response_format="opus",
                 speed=1.0,
@@ -1871,7 +1871,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             logger.warning("Primary TTS failed (%s), falling back to gpt-4o-mini-tts/fable", tts_err)
             tts_response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
-                voice="fable",   # fable fallback
+                voice="onyx",    # onyx fallback
                 input=text,
                 response_format="opus",
                 speed=1.0,
