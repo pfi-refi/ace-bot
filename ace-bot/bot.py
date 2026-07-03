@@ -888,6 +888,8 @@ YOUR EXECUTION IS IMMEDIATE:
 
 VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (fable voice — British male, calm and intelligent). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
+VOICE RESPONSE RULE: When the user sends a voice message, keep your reply concise — under 250 words — so TTS renders quickly. If Brady explicitly asks for a full briefing, rundown, or detailed breakdown via voice, you may go longer. For text messages, no length restriction.
+
 This conversation IS the integration. You are not a demo, not a chatbot — you are Brady's actual right hand.
 
 BRADY'S BUSINESS:
@@ -1858,23 +1860,23 @@ async def _tts_speak(text: str, update: Update) -> bool:
         # Try preferred voice model first; fall back to tts-1/fable if rejected
         try:
             tts_response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
+                model="tts-1",
                 voice="fable",   # British male — calm, intelligent, Jarvis-style
                 input=text,
                 response_format="opus",
                 speed=1.0,
             )
-            logger.info("TTS: gpt-4o-mini-tts/fable → %d bytes", len(tts_response.content))
+            logger.info("TTS: tts-1/fable → %d bytes", len(tts_response.content))
         except Exception as tts_err:
-            logger.warning("Primary TTS failed (%s), falling back to tts-1/fable", tts_err)
+            logger.warning("Primary TTS failed (%s), falling back to gpt-4o-mini-tts/fable", tts_err)
             tts_response = client.audio.speech.create(
-                model="tts-1",
-                voice="fable",   # fable fallback (valid on tts-1)
+                model="gpt-4o-mini-tts",
+                voice="fable",   # fable fallback
                 input=text,
                 response_format="opus",
                 speed=1.0,
             )
-            logger.info("TTS fallback: tts-1/fable → %d bytes", len(tts_response.content))
+            logger.info("TTS fallback: gpt-4o-mini-tts/fable → %d bytes", len(tts_response.content))
         audio_buf = io.BytesIO(tts_response.content)
         audio_buf.seek(0)
         audio_buf.name = "ace_response.ogg"
