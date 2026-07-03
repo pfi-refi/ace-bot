@@ -1685,7 +1685,7 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         "📅 CALENDAR DATA: Pulled LIVE on every message. Never tell Brady it's a snapshot or frozen. Always current.\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
-        "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to 🎯 Today)\n"
+        "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to Admin List - back log)\n"
         "• [COMPLETE_TASK: partial title] — marks task done via fuzzy match\n"
         "• [SEND_EMAIL: to@email.com | Subject | Body] — sends email immediately\n"
         "• [DRAFT_EMAIL: to@email.com | Subject | Body] — creates Gmail draft\n"
