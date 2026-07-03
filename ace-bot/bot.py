@@ -1864,7 +1864,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
                 voice="onyx",    # onyx — deep, authoritative male
                 input=text,
                 response_format="opus",
-                speed=1.0,
+                speed=1.15,
             )
             logger.info("TTS: tts-1/fable → %d bytes", len(tts_response.content))
         except Exception as tts_err:
@@ -1874,7 +1874,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
                 voice="onyx",    # onyx fallback
                 input=text,
                 response_format="opus",
-                speed=1.0,
+                speed=1.15,
             )
             logger.info("TTS fallback: gpt-4o-mini-tts/fable → %d bytes", len(tts_response.content))
         audio_buf = io.BytesIO(tts_response.content)
