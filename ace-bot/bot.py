@@ -2341,19 +2341,14 @@ async def _transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return None
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _process_with_tools(user_text: str, update: Update,
+                              reply_as_voice: bool = False) -> None:
     """
-    Ace v18 — tool-use message handler.
-    Replaces tag-based parsing with Anthropic Tool Use for reliable action execution.
-    Voice messages still use handle_voice → _process_text (unchanged).
+    Ace v18 core tool-use loop — shared by text and voice handlers.
+
+    reply_as_voice=True → final response sent as TTS audio (onyx voice).
+    Tool confirmations always sent as text regardless of mode.
     """
-    if not _is_authorized(update):
-        return
-
-    user_text = (update.message.text or "").strip()
-    if not user_text:
-        return
-
     # Load memory context
     memories = read_memory()
     memory_context = ""
@@ -2388,7 +2383,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     import anthropic as _anthropic
     client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    # Load conversation history for multi-turn context (same Drive file as v17)
+    # Load conversation history for multi-turn context (same Drive file as before)
     conversation_history = read_conversation_history()
     messages = list(conversation_history)
     messages.append({"role": "user", "content": user_text})
@@ -2420,7 +2415,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         action_confirmations.append(result)
                         logger.info("Tool executed: %s → %s", block.name, result[:80])
 
-                # Send action confirmations to Brady immediately
+                # Tool confirmations always sent as text (operational info)
                 if action_confirmations:
                     await _send_split("\n".join(action_confirmations), update)
 
@@ -2440,8 +2435,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', final_text)
                 clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', final_text).strip()
 
+                # Send final response — voice or text
                 if clean_response:
-                    await _send_split(clean_response, update)
+                    if reply_as_voice:
+                        await _tts_speak(clean_response, update)
+                    else:
+                        await _send_split(clean_response, update)
 
                 # Save conversation history (preserves cross-session context)
                 updated_history = list(conversation_history)
@@ -2459,19 +2458,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 break
 
     except Exception as e:
-        logger.error("handle_message (tool use) error: %s", e)
+        logger.error("_process_with_tools error: %s", e)
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ace v18 — tool-use text message handler."""
+    if not _is_authorized(update):
+        return
+    user_text = (update.message.text or "").strip()
+    if not user_text:
+        return
+    await _process_with_tools(user_text, update, reply_as_voice=False)
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle voice messages \u2014 transcribe via Whisper, then process as text."""
+    """Handle voice messages \u2014 transcribe via Whisper, then process with tool-use loop."""
     if not _is_authorized(update):
         return
     transcript = await _transcribe_voice(update, context)
     if not transcript:
         return
     await update.message.reply_text(f"🎤 Heard: \"{transcript}\"")
-    await _process_text(transcript, update, context, reply_as_voice=True)
+    await _process_with_tools(transcript, update, reply_as_voice=True)
 
 
 # ── Scheduler jobs ─────────────────────────────────────────────────────────────
