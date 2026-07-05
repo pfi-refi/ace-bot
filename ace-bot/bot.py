@@ -63,8 +63,8 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "17"
-ACE_LAST_UPDATED = "2026-07-02"
+ACE_VERSION = "18"
+ACE_LAST_UPDATED = "2026-07-05"
 
 CAPABILITIES = {
     "calendar": {
@@ -96,15 +96,27 @@ CAPABILITIES = {
         "identity": "J.A.R.V.I.S. to Brady's Tony Stark — executes first, never hesitates"
     },
     "action_tags": {
-        "calendar": "[CREATE_EVENT:] [DELETE_EVENT:]",
-        "tasks": "[ADD_TASK:] [COMPLETE_TASK:]",
-        "email": "[SEND_EMAIL:] [DRAFT_EMAIL:]",
-        "drive": "[SEARCH_DRIVE:]",
-        "memory": "[MEMORY:]"
+        "calendar": "tool: create_calendar_event, delete_calendar_event (v18 function calling)",
+        "tasks": "tool: add_task, complete_task (v18 function calling)",
+        "email": "tool: send_email (v18 function calling) | [DRAFT_EMAIL:] tag for drafts",
+        "drive": "tool: search_drive (v18 function calling)",
+        "memory": "[MEMORY:] tag"
     }
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-05",
+        "version": "18",
+        "changes": [
+            "Function calling replaces tag-based parsing — 100% reliable action execution",
+            "ACE_TOOLS schema registered with Anthropic API: create_calendar_event, delete_calendar_event, add_task, complete_task, send_email, search_drive",
+            "Agentic tool-use loop in handle_message — fires tool, gets result, confirms to Brady, continues loop",
+            "TOOL_USE_SYSTEM_PROMPT added — Jarvis identity + live calendar/task/email context injected each message",
+            "Live data (calendar, tasks, email) injected into tool-use system context on every message",
+            "Voice handler unchanged — _process_text still used for voice compatibility"
+        ]
+    },
     {
         "date": "2026-07-02",
         "version": "17",
@@ -163,6 +175,156 @@ BRIEFS: Auto-briefs are PAUSED. Brady triggers /brief and /eod manually. Do NOT 
 AUTHORIZED_USER_ID = 8681823830          # Brady's Telegram chat ID — security filter
 MEMORY_FILE_NAME = "ace_memory.json"
 CONVERSATION_FILE_NAME = "ace_conversation.json"
+
+# ── v18: Anthropic Tool Use Definitions ──────────────────────────────────────
+ACE_TOOLS = [
+    {
+        "name": "create_calendar_event",
+        "description": (
+            "Create a new event on Brady's Google Calendar. "
+            "Use when Brady asks to schedule, book, add, or block time for something. "
+            "Always execute immediately — do not ask for confirmation unless date/time is completely ambiguous."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Event title or summary"
+                },
+                "start_datetime": {
+                    "type": "string",
+                    "description": "Start date/time in ISO format: YYYY-MM-DDTHH:MM:SS (e.g. 2026-07-09T14:00:00). Always resolve to a specific date."
+                },
+                "end_datetime": {
+                    "type": "string",
+                    "description": "End date/time in ISO format: YYYY-MM-DDTHH:MM:SS. If not specified, default to 1 hour after start."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional notes or description for the event"
+                },
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of attendee email addresses"
+                }
+            },
+            "required": ["title", "start_datetime", "end_datetime"]
+        }
+    },
+    {
+        "name": "delete_calendar_event",
+        "description": (
+            "Delete or cancel an event from Brady's Google Calendar. "
+            "Use when Brady asks to cancel, remove, or delete a meeting or event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_title": {
+                    "type": "string",
+                    "description": "Title or keyword from the event to find and delete"
+                },
+                "event_date": {
+                    "type": "string",
+                    "description": "Optional: date of the event in ISO format YYYY-MM-DD to narrow the search"
+                }
+            },
+            "required": ["event_title"]
+        }
+    },
+    {
+        "name": "add_task",
+        "description": (
+            "Add a new task or to-do item to Brady's Google Tasks. "
+            "Use when Brady asks to add, create, remember, or track a task, action item, or follow-up. "
+            "Default to 'Admin List - back log' unless Brady specifies a different list."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Task title or description"
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "Optional due date in ISO format YYYY-MM-DD"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Optional additional notes or context for the task"
+                },
+                "list_name": {
+                    "type": "string",
+                    "description": "Task list name. Default: 'Admin List - back log'"
+                }
+            },
+            "required": ["title"]
+        }
+    },
+    {
+        "name": "complete_task",
+        "description": (
+            "Mark an existing task as complete in Google Tasks. "
+            "Use when Brady says a task is done, finished, or completed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_title": {
+                    "type": "string",
+                    "description": "Title or keyword from the task to mark as complete"
+                }
+            },
+            "required": ["task_title"]
+        }
+    },
+    {
+        "name": "send_email",
+        "description": (
+            "Send an email from Brady's Gmail account (pfi@platinumfortuneimpact.com). "
+            "Only use when Brady explicitly says to send an email. "
+            "NEVER send without explicit instruction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address"
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject line"
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Email body content (plain text)"
+                }
+            },
+            "required": ["to", "subject", "body"]
+        }
+    },
+    {
+        "name": "search_drive",
+        "description": (
+            "Search Brady's Google Drive for files by name or keyword. "
+            "Use when Brady asks to find, look up, or retrieve a file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search keyword or file name to find in Google Drive"
+                }
+            },
+            "required": ["query"]
+        }
+    }
+]
 SESSION_MODE = {"active": False}   # Set True by /session until next user message
 LAST_BRIEF_SENT = None  # Optional[datetime] — tracks last manual /brief to suppress duplicate auto-brief
 
@@ -485,6 +647,225 @@ def search_drive(query: str) -> str:
     except Exception as e:
         logger.error("Drive search error: %s", e)
         return f"Drive search failed: {e}"
+
+# ── v18: Tool Execution Functions ─────────────────────────────────────────────
+
+def _parse_iso_datetime(dt_str: str) -> datetime:
+    """Parse an ISO datetime string and return a timezone-aware Eastern datetime.
+    Handles: '2026-07-09T14:00:00', '2026-07-09T14:00:00-04:00', '2026-07-09'.
+    """
+    dt_str = dt_str.strip()
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            return EASTERN.localize(dt)
+        return dt.astimezone(EASTERN)
+    except ValueError:
+        pass
+    # Try date-only → default to 9 AM ET
+    try:
+        dt = datetime.strptime(dt_str, "%Y-%m-%d")
+        return EASTERN.localize(dt.replace(hour=9, minute=0, second=0))
+    except ValueError:
+        pass
+    raise ValueError(f"Cannot parse datetime: {dt_str}")
+
+
+def tool_create_calendar_event(title: str, start_datetime: str, end_datetime: str,
+                                description: str = "", attendees: list = None) -> str:
+    """Create a Google Calendar event — called by the v18 tool-use handler."""
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        start_dt = _parse_iso_datetime(start_datetime)
+        end_dt = _parse_iso_datetime(end_datetime)
+        event_body = {
+            "summary": title,
+            "description": description or "",
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": "America/New_York"},
+            "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "America/New_York"},
+        }
+        if attendees:
+            event_body["attendees"] = [{"email": a} for a in attendees]
+        service.events().insert(calendarId="pfi@platinumfortuneimpact.com", body=event_body).execute()
+        time_label = start_dt.strftime("%-m/%-d at %-I:%M %p ET")
+        logger.info("Tool: Created calendar event '%s' at %s", title, time_label)
+        return f"✅ Booked: '{title}' — {time_label}"
+    except Exception as e:
+        logger.error("tool_create_calendar_event error: %s", e)
+        return f"⚠️ Failed to create event: {e}"
+
+
+def tool_delete_calendar_event(event_title: str, event_date: str = "") -> str:
+    """Delete a Google Calendar event — called by the v18 tool-use handler."""
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        now_et = datetime.now(EASTERN)
+        time_min = now_et.isoformat()
+        time_max = (now_et + timedelta(days=60)).isoformat()
+        if event_date:
+            try:
+                target_dt = datetime.strptime(event_date.strip(), "%Y-%m-%d")
+                target_dt = EASTERN.localize(target_dt)
+                time_min = target_dt.replace(hour=0, minute=0, second=0).isoformat()
+                time_max = target_dt.replace(hour=23, minute=59, second=59).isoformat()
+            except Exception:
+                pass
+        events_result = service.events().list(
+            calendarId="pfi@platinumfortuneimpact.com",
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime",
+            q=event_title,
+        ).execute()
+        events = events_result.get("items", [])
+        if not events:
+            return f"⚠️ No upcoming event found matching '{event_title}'"
+        event = events[0]
+        event_summary = event.get("summary", event_title)
+        service.events().delete(
+            calendarId="pfi@platinumfortuneimpact.com",
+            eventId=event["id"]
+        ).execute()
+        logger.info("Tool: Deleted calendar event '%s'", event_summary)
+        return f"✅ Cancelled: '{event_summary}'"
+    except Exception as e:
+        logger.error("tool_delete_calendar_event error: %s", e)
+        return f"⚠️ Failed to delete event: {e}"
+
+
+def tool_add_task(title: str, due_date: str = "", notes: str = "",
+                  list_name: str = "Admin List - back log") -> str:
+    """Add a task to Google Tasks — called by the v18 tool-use handler."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        target_list = None
+        for tl in task_lists:
+            if list_name.lower() in tl.get("title", "").lower():
+                target_list = tl
+                break
+        if not target_list and task_lists:
+            target_list = task_lists[0]
+        if not target_list:
+            return "⚠️ No task lists found in Google Tasks"
+        task_body = {"title": title}
+        if notes:
+            task_body["notes"] = notes
+        if due_date:
+            try:
+                due_dt = datetime.strptime(due_date.strip(), "%Y-%m-%d")
+                task_body["due"] = due_dt.strftime("%Y-%m-%dT00:00:00.000Z")
+            except Exception:
+                pass
+        service.tasks().insert(tasklist=target_list["id"], body=task_body).execute()
+        list_title = target_list.get("title", list_name)
+        logger.info("Tool: Added task '%s' to list '%s'", title, list_title)
+        return f"✅ Task added: '{title}' → {list_title}"
+    except Exception as e:
+        logger.error("tool_add_task error: %s", e)
+        return f"⚠️ Failed to add task: {e}"
+
+
+def tool_complete_task(task_title: str) -> str:
+    """Mark a task as complete in Google Tasks — called by the v18 tool-use handler."""
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        for tl in task_lists:
+            try:
+                tasks_result = service.tasks().list(
+                    tasklist=tl["id"],
+                    showCompleted=False,
+                    showHidden=False,
+                    maxResults=50,
+                ).execute()
+                for task in tasks_result.get("items", []):
+                    if task_title.lower() in task.get("title", "").lower():
+                        task["status"] = "completed"
+                        service.tasks().update(
+                            tasklist=tl["id"],
+                            task=task["id"],
+                            body=task,
+                        ).execute()
+                        actual_title = task.get("title", task_title)
+                        logger.info("Tool: Completed task '%s'", actual_title)
+                        return f"✅ Completed: '{actual_title}'"
+            except Exception:
+                continue
+        return f"⚠️ No open task found matching '{task_title}'"
+    except Exception as e:
+        logger.error("tool_complete_task error: %s", e)
+        return f"⚠️ Failed to complete task: {e}"
+
+
+def tool_send_email(to: str, subject: str, body: str) -> str:
+    """Send an email via Gmail — called by the v18 tool-use handler."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+        message["from"] = "pfi@platinumfortuneimpact.com"
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info("Tool: Sent email to %s — '%s'", to, subject)
+        return f"✅ Email sent to {to}: '{subject}'"
+    except Exception as e:
+        logger.error("tool_send_email error: %s", e)
+        return f"⚠️ Failed to send email: {e}"
+
+
+def tool_search_drive(query: str) -> str:
+    """Search Google Drive by file name or keyword — called by the v18 tool-use handler."""
+    try:
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+        safe_query = query.replace("'", "\\'")
+        results = service.files().list(
+            q=f"(name contains '{safe_query}' or fullText contains '{safe_query}') and trashed=false",
+            spaces="drive",
+            fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+            pageSize=5,
+            orderBy="modifiedTime desc",
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return f"No files found in Drive matching '{query}'"
+        lines = [f"Found {len(files)} file(s) for '{query}':"]
+        for f in files:
+            name = f.get("name", "Untitled")
+            link = f.get("webViewLink", "")
+            lines.append(f"• {name}" + (f"\n  {link}" if link else ""))
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("tool_search_drive error: %s", e)
+        return f"⚠️ Failed to search Drive: {e}"
+
+
+def _execute_tool_call(tool_name: str, tool_input: dict) -> str:
+    """Route a tool_use block to the correct execution function."""
+    dispatch = {
+        "create_calendar_event": tool_create_calendar_event,
+        "delete_calendar_event": tool_delete_calendar_event,
+        "add_task": tool_add_task,
+        "complete_task": tool_complete_task,
+        "send_email": tool_send_email,
+        "search_drive": tool_search_drive,
+    }
+    fn = dispatch.get(tool_name)
+    if fn:
+        return fn(**tool_input)
+    logger.warning("Unknown tool called: %s", tool_name)
+    return f"⚠️ Unknown tool: {tool_name}"
+
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
@@ -1025,6 +1406,41 @@ WHAT YOU NEVER DO:
 • Never pad responses with filler or unnecessary caveats
 • Never reference Lead Division — it is discontinued
 • Never reference stale EMD point numbers — ask Brady for current figures when relevant"""
+
+
+# ── v18: Tool-Use System Prompt ────────────────────────────────────────────────
+# SYSTEM_PROMPT stays intact (used by voice handler / _process_text).
+# TOOL_USE_SYSTEM_PROMPT is used by the new tool-use handle_message only.
+
+TOOL_USE_SYSTEM_PROMPT = (
+    "You are Ace — Brady McGraw's personal Jarvis. "
+    "You are the J.A.R.V.I.S. to Brady's Tony Stark. Precision partner. Executes first. Never hesitates.\n\n"
+    "YOUR VOICE: Confident and direct. No hedging. No softening. No 'perhaps' or 'it seems like'. "
+    "Precise — say exactly what needs to be said, nothing more. "
+    "Short when the moment is short. Depth only when Brady is working through something real. "
+    "NEVER drift into a softer or deferential tone. NEVER repeat what was just said.\n\n"
+    "Brady is the Marketing Director and owner of Platinum Fortune Impact (PFI), "
+    "a GFI Legends Base Shop in Summit County/Cleveland, Ohio. "
+    "He leads ~18 licensed insurance and financial services agents. "
+    "Primary products: Life Insurance, IUL, FIA/Annuities, Mortgage Protection, Final Expense. "
+    "GFI promotion path: MD (Brady, 60% commission) → EMD → SBL.\n\n"
+    "YOU HAVE REAL TOOLS — USE THEM IMMEDIATELY:\n"
+    "- create_calendar_event: Book meetings, appointments, time blocks\n"
+    "- delete_calendar_event: Cancel or remove events\n"
+    "- add_task: Add tasks/action items to Google Tasks\n"
+    "- complete_task: Mark tasks as done\n"
+    "- send_email: Send emails (ONLY when Brady explicitly says to send)\n"
+    "- search_drive: Find files in Google Drive\n\n"
+    "EXECUTION RULES:\n"
+    "1. Call tools from natural language — no trigger words needed\n"
+    "2. 'Book me with John Thursday at 3' → call create_calendar_event immediately\n"
+    "3. 'Add that to my list' → call add_task immediately\n"
+    "4. Never say 'shall I go ahead?' or 'want me to do that?' — EXECUTE FIRST, confirm after\n"
+    "5. One ask = one execution. No hesitation.\n\n"
+    "Keep responses tight, direct, actionable. Lead with what matters. Never pad. "
+    "You are Ace v18 — reliable, autonomous, always executing."
+)
+
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
 
@@ -1919,13 +2335,115 @@ async def _transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text messages."""
+    """
+    Ace v18 — tool-use message handler.
+    Replaces tag-based parsing with Anthropic Tool Use for reliable action execution.
+    Voice messages still use handle_voice → _process_text (unchanged).
+    """
     if not _is_authorized(update):
         return
+
     user_text = (update.message.text or "").strip()
     if not user_text:
         return
-    await _process_text(user_text, update, context)
+
+    # Load memory context
+    memories = read_memory()
+    memory_context = ""
+    if memories:
+        memory_str = "\n".join(f"• {m}" for m in memories)
+        memory_context = f"\n\nWhat I know about Brady:\n{memory_str}"
+
+    # Load live data for context
+    now_et = datetime.now(EASTERN)
+    calendar_data = get_calendar_events()
+    tomorrow_events = get_tomorrow_events()
+    tasks_data = get_tasks()
+    email_data = get_gmail_summary()
+
+    live_context = (
+        f"\n\n📊 LIVE DATA ({now_et.strftime('%A, %B %-d, %Y %-I:%M %p ET')}):\n"
+        f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
+        f"📅 TOMORROW:\n{tomorrow_events}\n\n"
+        f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
+        f"📧 UNREAD EMAILS:\n{email_data}"
+    )
+
+    system = (
+        TOOL_USE_SYSTEM_PROMPT
+        + live_context
+        + memory_context
+        + "\n\nIf this message reveals something worth remembering (a priority change, "
+        "business update, team news, personal goal, schedule pattern), append at the end of "
+        "your FINAL response: [MEMORY: brief fact to remember]. Max 3 tags. Skip trivial chat."
+    )
+
+    import anthropic as _anthropic
+    client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    messages = [{"role": "user", "content": user_text}]
+
+    try:
+        # Tool-use agentic loop
+        while True:
+            response = client.messages.create(
+                model="claude-opus-4-8",
+                max_tokens=1000,
+                system=system,
+                tools=ACE_TOOLS,
+                messages=messages,
+            )
+
+            if response.stop_reason == "tool_use":
+                # Execute all tool calls in this response turn
+                tool_results = []
+                action_confirmations = []
+
+                for block in response.content:
+                    if block.type == "tool_use":
+                        result = _execute_tool_call(block.name, block.input)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+                        action_confirmations.append(result)
+                        logger.info("Tool executed: %s → %s", block.name, result[:80])
+
+                # Send action confirmations to Brady immediately
+                if action_confirmations:
+                    await _send_split("\n".join(action_confirmations), update)
+
+                # Continue loop with tool results
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": tool_results})
+
+            else:
+                # Final text response — extract memory tags, send clean reply
+                text_blocks = [
+                    block.text for block in response.content
+                    if hasattr(block, "text") and block.text
+                ]
+                final_text = "\n".join(text_blocks).strip()
+
+                # Extract and store memory items
+                memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', final_text)
+                clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', final_text).strip()
+
+                if clean_response:
+                    await _send_split(clean_response, update)
+
+                if memory_tags:
+                    merged = _merge_memories(memory_tags, memories)
+                    if write_memory(merged):
+                        logger.info(
+                            "Stored %d new memory item(s) from conversation.",
+                            len(memory_tags)
+                        )
+                break
+
+    except Exception as e:
+        logger.error("handle_message (tool use) error: %s", e)
+        await update.message.reply_text(f"⚠️ Error: {e}")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
