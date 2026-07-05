@@ -1438,7 +1438,14 @@ TOOL_USE_SYSTEM_PROMPT = (
     "4. Never say 'shall I go ahead?' or 'want me to do that?' — EXECUTE FIRST, confirm after\n"
     "5. One ask = one execution. No hesitation.\n\n"
     "Keep responses tight, direct, actionable. Lead with what matters. Never pad. "
-    "You are Ace v18 — reliable, autonomous, always executing."
+    "You are Ace v18 — reliable, autonomous, always executing.\n\n"
+    "TIME OPTIMIZATION — apply proactively when Brady shares or asks about his schedule:\n"
+    "- Scan today's and tomorrow's calendar data for open windows (gaps between events)\n"
+    "- Flag time blocks that could be used for deep work, prospecting, or admin\n"
+    "- Spot conflicts, back-to-back meetings with no breaks, or tasks with no time assigned\n"
+    "- Suggest moving or consolidating low-priority blocks if a high-priority need arises\n"
+    "- When Brady says 'how does my day look' or similar, always include a quick optimization read\n"
+    "- Never bury the time insight — lead with it if it's the most actionable thing"
 )
 
 
@@ -2380,14 +2387,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     import anthropic as _anthropic
     client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    messages = [{"role": "user", "content": user_text}]
+
+    # Load conversation history for multi-turn context (same Drive file as v17)
+    conversation_history = read_conversation_history()
+    messages = list(conversation_history)
+    messages.append({"role": "user", "content": user_text})
 
     try:
         # Tool-use agentic loop
         while True:
             response = client.messages.create(
                 model="claude-opus-4-8",
-                max_tokens=1000,
+                max_tokens=1500,
                 system=system,
                 tools=ACE_TOOLS,
                 messages=messages,
@@ -2431,6 +2442,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 if clean_response:
                     await _send_split(clean_response, update)
+
+                # Save conversation history (preserves cross-session context)
+                updated_history = list(conversation_history)
+                updated_history.append({"role": "user", "content": user_text})
+                updated_history.append({"role": "assistant", "content": clean_response or final_text})
+                write_conversation_history(updated_history)
 
                 if memory_tags:
                     merged = _merge_memories(memory_tags, memories)
