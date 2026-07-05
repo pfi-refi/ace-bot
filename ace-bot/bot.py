@@ -63,7 +63,7 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18"
+ACE_VERSION = "18.3"
 ACE_LAST_UPDATED = "2026-07-05"
 
 CAPABILITIES = {
@@ -89,7 +89,7 @@ CAPABILITIES = {
         "model": "Claude Opus 4-8 for all reasoning and responses",
         "briefs": "Manual /brief and /eod commands — auto-briefs PAUSED as of July 2026",
         "memory": "Persistent memory via [MEMORY:] tags, read/write at EOD",
-        "history": "40-exchange conversation history on Google Drive — NEVER cleared by code"
+        "history": "80-exchange conversation history on Google Drive — NEVER cleared by code"
     },
     "scope": {
         "purpose": "Brady McGraw's complete life operating system — business (PFI) AND personal (health, finance, goals, relationships)",
@@ -105,6 +105,15 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-05",
+        "version": "18.3",
+        "changes": [
+            "Conversation history window doubled: 40 exchanges → 80 exchanges (160 messages stored)",
+            "Voice max_tokens bumped to 2500 (text stays 1500) — longer, more expansive voice replies",
+            "Voice-specific system guidance added: natural speech rhythm, no bullets, 200-400 word target",
+        ]
+    },
     {
         "date": "2026-07-05",
         "version": "18",
@@ -466,11 +475,11 @@ def read_conversation_history() -> list:
 
 
 def write_conversation_history(messages: list) -> bool:
-    """Save conversation history to ace_conversation.json on Drive (max 80 messages = 40 exchanges)."""
+    """Save conversation history to ace_conversation.json on Drive (max 160 messages = 80 exchanges)."""
     try:
-        # Keep last 80 messages (40 exchanges)
-        if len(messages) > 80:
-            messages = messages[-80:]
+        # Keep last 160 messages (80 exchanges)
+        if len(messages) > 160:
+            messages = messages[-160:]
         creds = get_google_creds()
         service = build("drive", "v3", credentials=creds)
         payload = json.dumps({"messages": messages}, indent=2).encode()
@@ -2371,10 +2380,21 @@ async def _process_with_tools(user_text: str, update: Update,
         f"📧 UNREAD EMAILS:\n{email_data}"
     )
 
+    voice_guidance = (
+        "\n\nVOICE MODE — Brady sent a voice message. Respond conversationally, as if talking. "
+        "Target 200-400 words. Use natural speech rhythm — short confident sentences, no bullet points "
+        "(they don't translate to audio). Deliver the key insight or action first, then context. "
+        "End with one clear takeaway or question to keep the conversation moving."
+    ) if reply_as_voice else (
+        "\n\nTEXT MODE — Keep response tight and direct. Lead with the action or answer. "
+        "Bullet points are fine when listing multiple items."
+    )
+
     system = (
         TOOL_USE_SYSTEM_PROMPT
         + live_context
         + memory_context
+        + voice_guidance
         + "\n\nIf this message reveals something worth remembering (a priority change, "
         "business update, team news, personal goal, schedule pattern), append at the end of "
         "your FINAL response: [MEMORY: brief fact to remember]. Max 3 tags. Skip trivial chat."
@@ -2393,7 +2413,7 @@ async def _process_with_tools(user_text: str, update: Update,
         while True:
             response = client.messages.create(
                 model="claude-opus-4-8",
-                max_tokens=1500,
+                max_tokens=2500 if reply_as_voice else 1500,
                 system=system,
                 tools=ACE_TOOLS,
                 messages=messages,
