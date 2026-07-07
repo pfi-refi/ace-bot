@@ -63,8 +63,8 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.3"
-ACE_LAST_UPDATED = "2026-07-05"
+ACE_VERSION = "18.4"
+ACE_LAST_UPDATED = "2026-07-06"
 
 CAPABILITIES = {
     "calendar": {
@@ -105,6 +105,15 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-06",
+        "version": "18.4",
+        "changes": [
+            "Task verification read-back added: tool_add_task and tool_complete_task now confirm the write landed via a follow-up read",
+            "Confirmation strings updated: '✅ Confirmed in Google Tasks' vs '⚠️ Task write may have failed — check manually'",
+            "Unverified fallback: if the verification call itself errors, Ace reports (unverified) rather than a false ✅",
+        ]
+    },
     {
         "date": "2026-07-05",
         "version": "18.3",
@@ -771,10 +780,31 @@ def tool_add_task(title: str, due_date: str = "", notes: str = "",
                 task_body["due"] = due_dt.strftime("%Y-%m-%dT00:00:00.000Z")
             except Exception:
                 pass
-        service.tasks().insert(tasklist=target_list["id"], body=task_body).execute()
+        insert_result = service.tasks().insert(tasklist=target_list["id"], body=task_body).execute()
         list_title = target_list.get("title", list_name)
         logger.info("Tool: Added task '%s' to list '%s'", title, list_title)
-        return f"✅ Task added: '{title}' → {list_title}"
+        # ── v18.4: Verification read-back — confirm the task actually landed ──
+        try:
+            verify_result = service.tasks().list(
+                tasklist=target_list["id"],
+                showCompleted=False,
+                showHidden=False,
+                maxResults=100,
+            ).execute()
+            inserted_id = insert_result.get("id", "")
+            verified = any(
+                t.get("id") == inserted_id or title.lower() in t.get("title", "").lower()
+                for t in verify_result.get("items", [])
+            )
+            if verified:
+                logger.info("Tool: Task verified in '%s': %s", list_title, title)
+                return f"✅ Confirmed in Google Tasks: '{title}' → {list_title}"
+            else:
+                logger.warning("Tool: Task verification FAILED in '%s': %s", list_title, title)
+                return f"⚠️ Task write may have failed — check manually: '{title}' → {list_title}"
+        except Exception as verify_err:
+            logger.warning("Tool: Task verification error: %s", verify_err)
+            return f"✅ Task added (unverified): '{title}' → {list_title}"
     except Exception as e:
         logger.error("tool_add_task error: %s", e)
         return f"⚠️ Failed to add task: {e}"
@@ -805,7 +835,21 @@ def tool_complete_task(task_title: str) -> str:
                         ).execute()
                         actual_title = task.get("title", task_title)
                         logger.info("Tool: Completed task '%s'", actual_title)
-                        return f"✅ Completed: '{actual_title}'"
+                        # ── v18.4: Verification read-back — confirm status flipped ──
+                        try:
+                            verify_task = service.tasks().get(
+                                tasklist=tl["id"],
+                                task=task["id"],
+                            ).execute()
+                            if verify_task.get("status") == "completed":
+                                logger.info("Tool: Task completion verified: %s", actual_title)
+                                return f"✅ Confirmed complete in Google Tasks: '{actual_title}'"
+                            else:
+                                logger.warning("Tool: Task completion verify FAILED: %s", actual_title)
+                                return f"⚠️ Task mark-complete may have failed — check manually: '{actual_title}'"
+                        except Exception as verify_err:
+                            logger.warning("Tool: Task completion verify error: %s", verify_err)
+                            return f"✅ Marked complete (unverified): '{actual_title}'"
             except Exception:
                 continue
         return f"⚠️ No open task found matching '{task_title}'"
@@ -2607,3 +2651,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
