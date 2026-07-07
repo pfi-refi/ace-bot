@@ -63,7 +63,7 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.4"
+ACE_VERSION = "18.5"
 ACE_LAST_UPDATED = "2026-07-06"
 
 CAPABILITIES = {
@@ -86,7 +86,7 @@ CAPABILITIES = {
         "stt": "Transcribe voice messages using OpenAI Whisper"
     },
     "intelligence": {
-        "model": "Claude Opus 4-8 for all reasoning and responses",
+        "model": "Claude Sonnet 4-5 for all reasoning and responses (Haiku for memory utility)",
         "briefs": "Manual /brief and /eod commands — auto-briefs PAUSED as of July 2026",
         "memory": "Persistent memory via [MEMORY:] tags, read/write at EOD",
         "history": "80-exchange conversation history on Google Drive — NEVER cleared by code"
@@ -105,6 +105,14 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-06",
+        "version": "18.5",
+        "changes": [
+            "Message consolidation: tool confirmations buffered and combined with final Claude response into a single Telegram message — no more split tool confirmation + follow-up",
+            "Model switch: claude-opus-4-8 → claude-sonnet-4-5 for main reasoning and tool-use loop (Haiku memory utility unchanged)",
+        ]
+    },
     {
         "date": "2026-07-06",
         "version": "18.4",
@@ -1509,7 +1517,7 @@ def _call_claude(messages: list, max_tokens: int = 700, system: str = None) -> s
     import anthropic
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
-        model="claude-opus-4-8",
+        model="claude-sonnet-4-5",
         max_tokens=max_tokens,
         system=system or get_system_prompt(),
         messages=messages,
@@ -2453,10 +2461,13 @@ async def _process_with_tools(user_text: str, update: Update,
     messages.append({"role": "user", "content": user_text})
 
     try:
+        # v18.5: Buffer tool confirmations — combined with final response for single-message UX
+        tool_confirmation_buffer = []
+
         # Tool-use agentic loop
         while True:
             response = client.messages.create(
-                model="claude-opus-4-8",
+                model="claude-sonnet-4-5",
                 max_tokens=2500 if reply_as_voice else 1500,
                 system=system,
                 tools=ACE_TOOLS,
@@ -2479,9 +2490,8 @@ async def _process_with_tools(user_text: str, update: Update,
                         action_confirmations.append(result)
                         logger.info("Tool executed: %s → %s", block.name, result[:80])
 
-                # Tool confirmations always sent as text (operational info)
-                if action_confirmations:
-                    await _send_split("\n".join(action_confirmations), update)
+                # v18.5: Buffer — send combined with final Claude response below
+                tool_confirmation_buffer.extend(action_confirmations)
 
                 # Continue loop with tool results
                 messages.append({"role": "assistant", "content": response.content})
@@ -2499,8 +2509,18 @@ async def _process_with_tools(user_text: str, update: Update,
                 memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', final_text)
                 clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', final_text).strip()
 
-                # Send final response — voice or text
-                if clean_response:
+                # v18.5: Consolidate tool confirmations + Claude response into one message.
+                # Voice mode: confirmations as text + TTS audio (format split is unavoidable).
+                if tool_confirmation_buffer and clean_response:
+                    if reply_as_voice:
+                        await _send_split("\n".join(tool_confirmation_buffer), update)
+                        await _tts_speak(clean_response, update)
+                    else:
+                        combined = "\n".join(tool_confirmation_buffer) + "\n\n" + clean_response
+                        await _send_split(combined, update)
+                elif tool_confirmation_buffer:
+                    await _send_split("\n".join(tool_confirmation_buffer), update)
+                elif clean_response:
                     if reply_as_voice:
                         await _tts_speak(clean_response, update)
                     else:
@@ -2651,4 +2671,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
