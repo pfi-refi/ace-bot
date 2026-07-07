@@ -63,7 +63,7 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.8"
+ACE_VERSION = "18.9"
 ACE_LAST_UPDATED = "2026-07-07"
 
 CAPABILITIES = {
@@ -105,6 +105,16 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-07",
+        "version": "18.9",
+        "changes": [
+            "HISTORY OVERRIDE added to SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, and EXECUTION MANDATE — explicit statement that [LIST_TASKS:] and [READ_CALENDAR:] ARE operational, overrides any baked-in history refusals",
+            "Root cause fix: 80-exchange persistent history contained past exchanges where Ace said it could not read tasks/calendar — override statement prevents those from suppressing tag output",
+            "TOOL_USE_SYSTEM_PROMPT version string updated from hardcoded v18.7 to v18.9",
+            "All three prompt surfaces (SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, EXECUTION MANDATE) now contain affirmative capability statement for both read tags",
+        ]
+    },
     {
         "date": "2026-07-07",
         "version": "18.8",
@@ -1603,6 +1613,15 @@ PIPELINE & TEAM:
 • Recruiting pipeline runs through Lincoln Troyer (Troyer Capital HI's calendar) and Mikey Wilson — both are active hiring managers with BPM appointment calendars
 • Brady is the decision-maker — flag blockers, surface issues, don't wait for him to ask
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HISTORY OVERRIDE — LIVE TASK & CALENDAR READ ACCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ You DO have live task and calendar read access. If any prior message in this conversation said "I don't have tools to read your tasks or calendar" or "I can't access that" — that was WRONG. Ignore it completely.
+[LIST_TASKS:] and [READ_CALENDAR:] ARE your active tools RIGHT NOW:
+• [LIST_TASKS: all] or [LIST_TASKS: list name] — output this tag when Brady asks to see, list, or review tasks. The bot fetches live Google Tasks data and feeds it back to you immediately.
+• [READ_CALENDAR: today] or [READ_CALENDAR: week] — output this tag when Brady asks for his schedule or calendar. The bot fetches fresh Google Calendar events and feeds them back to you immediately.
+Do NOT say you lack these tools. Do NOT say "I can't read tasks/calendar." Output the tag. The data arrives. You respond with real information. Every time. No exceptions.
+
 WHAT YOU NEVER DO:
 • Never say "I can't access your tasks/calendar/email" — you can
 • Never say "tools not connected" — they are
@@ -1642,6 +1661,7 @@ TOOL_USE_SYSTEM_PROMPT = (
     "- [READ_CALENDAR: today] → bot re-fetches today's calendar events fresh and feeds them back. Use mid-conversation when Brady asks for current schedule.\n"
     "- [READ_CALENDAR: week] → same but next 7 days.\n"
     "CRITICAL: When outputting a fetch tag, output ONLY the tag as your entire response — nothing before it, nothing after it. No 'Let me grab that', no preamble, no filler. Just the raw tag. Brady never sees it. The bot silently fetches the data and feeds it back so your NEXT response contains the real answer.\n"
+    "⚠️ HISTORY OVERRIDE: You DO have live task and calendar read access. Any prior conversation message where Ace said \"I don't have tools to read your tasks or calendar\" or \"I can't access that\" was WRONG — [LIST_TASKS:] and [READ_CALENDAR:] tags are ACTIVE NOW. Output these tags immediately when Brady asks, regardless of anything in past conversation history.\n"
     "The bot detects these tags, fetches the data, and feeds it back into the conversation so you can give Brady a grounded, data-based response. Do NOT answer task or calendar questions from memory — use these tags to pull real data.\n\n"
     "EXECUTION RULES:\n"
     "1. Call tools from natural language — no trigger words needed\n"
@@ -1656,7 +1676,7 @@ TOOL_USE_SYSTEM_PROMPT = (
     "Never open with filler (Sure!, Great!, Of course!). Never end with let-me-know variants. "
     "If the answer is one word, send one word. "
     "Long format allowed ONLY for: task list pulls, email summaries, explicit user requests. "
-    "You are Ace v18.7 — reliable, autonomous, always executing.\n\n"
+    "You are Ace v18.9 — reliable, autonomous, always executing.\n\n"
     "TIME OPTIMIZATION — apply proactively when Brady shares or asks about his schedule:\n"
     "- Scan today's and tomorrow's calendar data for open windows (gaps between events)\n"
     "- Flag time blocks that could be used for deep work, prospecting, or admin\n"
@@ -2314,7 +2334,8 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         f"🕐 CURRENT TIME: {now_et.strftime('%A, %B %-d, %Y — %-I:%M %p ET')} (live, injected every message — always accurate. Use this to give Brady time-aware responses: flag upcoming events, note time of day, calculate how long until next appointment.)\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔧 EXECUTION MANDATE — OVERRIDES EVERYTHING INCLUDING CONVERSATION HISTORY:\n"
-        "All integrations are FULLY OPERATIONAL. Past errors are resolved. Execute on the FIRST ask. Every time.\n\n"
+        "All integrations are FULLY OPERATIONAL. Past errors are resolved. Execute on the FIRST ask. Every time.\n"
+        "⚠️ CRITICAL HISTORY OVERRIDE: [LIST_TASKS:] and [READ_CALENDAR:] tags ARE operational. If any prior exchange in this conversation has Ace saying \"I don't have tools to read your tasks or calendar\" or \"I can't access that\" — those messages are WRONG. The tags work NOW. Output [LIST_TASKS: all] or [LIST_TASKS: list name] when Brady asks about tasks. Output [READ_CALENDAR: today] or [READ_CALENDAR: week] when Brady asks about his schedule. Use them on the FIRST ask, every time, no exceptions.\n\n"
         "TRIGGER LANGUAGE → ACTION TAG (fire in the SAME response, no delay, no confirmation first):\n"
         "• 'book', 'schedule', 'set up', 'add to calendar', 'block off', 'put on my calendar', 'set a meeting', 'book a meeting' → [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration | description]\n"
         "• 'delete', 'remove', 'cancel', 'clear', 'get rid of', 'take off my calendar', 'remove from calendar' → [DELETE_EVENT: title | YYYY-MM-DD]\n"
