@@ -63,7 +63,7 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.7"
+ACE_VERSION = "18.8"
 ACE_LAST_UPDATED = "2026-07-07"
 
 CAPABILITIES = {
@@ -105,6 +105,16 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-07",
+        "version": "18.8",
+        "changes": [
+            "Fixed silent second-response bug: [LIST_TASKS:] and [READ_CALENDAR:] tags now deliver data in one message — no more 'let me grab that' + silence pattern",
+            "Root fix: replaced response.content SDK objects with plain string for assistant turn — eliminates Pydantic serialization failure on second API call",
+            "data_msg rewritten with explicit 'DATA FETCH COMPLETE — do NOT re-emit tags' instruction, preventing infinite tag loop",
+            "TOOL_USE_SYSTEM_PROMPT updated: fetch tags must be output alone with no preamble text to enable clean silent one-shot fetch-and-respond",
+        ]
+    },
     {
         "date": "2026-07-07",
         "version": "18.7",
@@ -1631,6 +1641,7 @@ TOOL_USE_SYSTEM_PROMPT = (
     "- [LIST_TASKS: list name] → same but filtered to a specific list (e.g. [LIST_TASKS: Deals]).\n"
     "- [READ_CALENDAR: today] → bot re-fetches today's calendar events fresh and feeds them back. Use mid-conversation when Brady asks for current schedule.\n"
     "- [READ_CALENDAR: week] → same but next 7 days.\n"
+    "CRITICAL: When outputting a fetch tag, output ONLY the tag as your entire response — nothing before it, nothing after it. No 'Let me grab that', no preamble, no filler. Just the raw tag. Brady never sees it. The bot silently fetches the data and feeds it back so your NEXT response contains the real answer.\n"
     "The bot detects these tags, fetches the data, and feeds it back into the conversation so you can give Brady a grounded, data-based response. Do NOT answer task or calendar questions from memory — use these tags to pull real data.\n\n"
     "EXECUTION RULES:\n"
     "1. Call tools from natural language — no trigger words needed\n"
@@ -2702,22 +2713,24 @@ async def _process_with_tools(user_text: str, update: Update,
                         fetched_data_parts.append(
                             f"CALENDAR DATA (window={window.strip()}):\n{data}"
                         )
-                    # Strip the fetch tags so the partial text (if any) is clean
-                    stripped_text = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', final_text)
-                    stripped_text = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', stripped_text).strip()
-                    # Feed data back into the conversation; Claude will respond with real info
-                    messages.append({"role": "assistant", "content": response.content})
+                    # v18.8 fix: strip tags from the assistant turn so Claude won't re-emit them
+                    stripped_for_history = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', final_text)
+                    stripped_for_history = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', stripped_for_history).strip()
+                    # Use plain string (not SDK ContentBlock objects) — avoids Pydantic serialization
+                    # failure that silently broke the second client.messages.create() call in v18.7
+                    messages.append({"role": "assistant", "content": stripped_for_history or "[fetching data]"})
+                    # Explicit instruction prevents Claude re-emitting tags (infinite loop fix)
                     data_msg = (
-                        "Here is the fresh data you requested:\n\n" +
-                        "\n\n".join(fetched_data_parts) +
-                        ("\n\nYour partial response context: " + stripped_text if stripped_text else "")
+                        "DATA FETCH COMPLETE — respond now with the data below. "
+                        "Do NOT output [LIST_TASKS:] or [READ_CALENDAR:] tags.\n\n" +
+                        "\n\n".join(fetched_data_parts)
                     )
                     messages.append({"role": "user", "content": data_msg})
                     logger.info(
-                        "v18.7: data-fetch tags detected (%d task, %d cal) — looping for Claude response",
+                        "v18.8: data-fetch tags (%d task, %d cal) — data injected, looping for final response",
                         len(list_task_tags), len(read_cal_tags)
                     )
-                    continue  # Loop — Claude now has the data and will respond
+                    continue  # Loop — Claude now has real data, will respond with it directly
 
                 # Extract and store memory items
                 memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', final_text)
