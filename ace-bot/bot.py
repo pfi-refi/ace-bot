@@ -63,7 +63,7 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.9"
+ACE_VERSION = "18.10"
 ACE_LAST_UPDATED = "2026-07-07"
 
 CAPABILITIES = {
@@ -105,6 +105,14 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-07",
+        "version": "18.10",
+        "changes": [
+            "/reset_history command added — clears ace_conversation.json on Drive (empty JSON), memory files untouched",
+            "CommandHandler registered for reset_history; added to /start and /help command lists",
+        ]
+    },
     {
         "date": "2026-07-07",
         "version": "18.9",
@@ -1676,7 +1684,7 @@ TOOL_USE_SYSTEM_PROMPT = (
     "Never open with filler (Sure!, Great!, Of course!). Never end with let-me-know variants. "
     "If the answer is one word, send one word. "
     "Long format allowed ONLY for: task list pulls, email summaries, explicit user requests. "
-    "You are Ace v18.9 — reliable, autonomous, always executing.\n\n"
+    "You are Ace v18.10 — reliable, autonomous, always executing.\n\n"
     "TIME OPTIMIZATION — apply proactively when Brady shares or asks about his schedule:\n"
     "- Scan today's and tomorrow's calendar data for open windows (gaps between events)\n"
     "- Flag time blocks that could be used for deep work, prospecting, or admin\n"
@@ -2046,6 +2054,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /remember <fact> — teach me something to keep in mind\n"
         " /memory — see what I know about how you operate\n"
         " /clearhistory — reset our conversation history\n"
+        " /reset_history — clear conversation history (Drive)\n"
         " /session — Sunday brain dump (I categorize + schedule your week)\n"
         " /status — check that I'm running\n"
         " /help — show this message\n\n"
@@ -2068,6 +2077,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         " /memory — view my current memory\n"
         " /session — Sunday brain dump (drop everything, I sort + schedule the week)\n"
         " /clearhistory — wipe conversation history (fresh start)\n"
+        " /reset_history — clear saved conversation history on Drive\n"
         " /status — confirm the bot is alive\n"
         " /help — this message\n\n"
         "Or just text me — I'll respond, execute tasks, send emails, and remember what matters.\n\n"
@@ -2184,6 +2194,16 @@ async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     else:
         await update.message.reply_text("⚠️ Couldn't clear history — Drive may not be active.")
 
+
+
+async def cmd_reset_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear ace_conversation.json on Drive — memory files are NOT touched."""
+    if not _is_authorized(update):
+        return
+    if write_conversation_history([]):
+        await update.message.reply_text("History cleared. Starting fresh.")
+    else:
+        await update.message.reply_text("⚠️ Couldn't clear history — Drive may not be active.")
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Read Ace's error log from Ace Brain Google Sheet and analyze patterns."""
@@ -2884,6 +2904,7 @@ def main() -> None:
     app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("clearhistory", cmd_clear_history))
+    app.add_handler(CommandHandler("reset_history", cmd_reset_history))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("session", cmd_session))
