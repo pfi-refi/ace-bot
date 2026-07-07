@@ -63,12 +63,12 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.6"
-ACE_LAST_UPDATED = "2026-07-06"
+ACE_VERSION = "18.7"
+ACE_LAST_UPDATED = "2026-07-07"
 
 CAPABILITIES = {
     "calendar": {
-        "read": "Read all Google Calendar events up to 30 days ahead",
+        "read": "Read all Google Calendar events up to 30 days ahead; re-fetch mid-session via [READ_CALENDAR:today] or [READ_CALENDAR:week]",
         "write": "Create and delete events — writes only to pfi@platinumfortuneimpact.com",
         "commands": ["/calendar"]
     },
@@ -78,7 +78,7 @@ CAPABILITIES = {
         "note": "Authenticated under pfi@platinumfortuneimpact.com"
     },
     "tasks": {
-        "read": "Read Google Tasks lists and items",
+        "read": "Read Google Tasks lists and items on demand via [LIST_TASKS:all] or [LIST_TASKS:listname] — bot fetches fresh and feeds data back to Ace",
         "write": "Create and complete tasks via [ADD_TASK:] and [COMPLETE_TASK:] tags"
     },
     "voice": {
@@ -96,8 +96,8 @@ CAPABILITIES = {
         "identity": "J.A.R.V.I.S. to Brady's Tony Stark — executes first, never hesitates"
     },
     "action_tags": {
-        "calendar": "tool: create_calendar_event, delete_calendar_event (v18 function calling)",
-        "tasks": "tool: add_task, complete_task (v18 function calling)",
+        "calendar": "tool: create_calendar_event, delete_calendar_event (v18 function calling) | [READ_CALENDAR:today/week] to re-fetch mid-session",
+        "tasks": "tool: add_task, complete_task (v18 function calling) | [LIST_TASKS:all/listname] to read live task data",
         "email": "tool: send_email (v18 function calling) | [DRAFT_EMAIL:] tag for drafts",
         "drive": "tool: search_drive (v18 function calling)",
         "memory": "[MEMORY:] tag"
@@ -106,11 +106,21 @@ CAPABILITIES = {
 
 CHANGELOG = [
     {
+        "date": "2026-07-07",
+        "version": "18.7",
+        "changes": [
+            "[LIST_TASKS: all] and [LIST_TASKS: list name] tags added — Ace outputs tag, bot fetches live Google Tasks data and feeds it back so Ace can respond with real task contents",
+            "[READ_CALENDAR: today] and [READ_CALENDAR: week] tags added — re-fetches calendar mid-conversation fresh from Google Calendar and feeds data back for grounded responses",
+            "Both tags wired into _process_with_tools loop (continue on detection) and _process_text legacy path (second Claude call with data injected)",
+            "Brevity rule updated: /brief and /eod removed from long-format exceptions — long responses now gated only on task list pulls, email summaries, and explicit user requests",
+        ]
+    },
+    {
         "date": "2026-07-06",
         "version": "18.6",
         "changes": [
             "Hard brevity constraint added to SYSTEM_PROMPT and TOOL_USE_SYSTEM_PROMPT — JARVIS-style minimum-word responses by default",
-            "Short by default. Long only when the task demands it (task list, email summary, /brief, /eod)",
+            "Short by default. Long only when the task demands it (task list, email summary)",
             "Eliminated: filler preambles, action summaries, unsolicited let-me-know sign-offs",
         ]
     },
@@ -920,6 +930,93 @@ def tool_search_drive(query: str) -> str:
         return f"⚠️ Failed to search Drive: {e}"
 
 
+def tool_list_tasks(scope: str = "all") -> str:
+    """Read open tasks from Google Tasks, grouped by list.
+
+    scope='all' → every list; any other string → fuzzy-match that list name.
+    Always returns needsAction (open) tasks only; completed tasks excluded.
+    Called when Ace outputs [LIST_TASKS: all] or [LIST_TASKS: list name].
+    """
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists_result = service.tasklists().list(maxResults=20).execute()
+        task_lists = task_lists_result.get("items", [])
+        if not task_lists:
+            return "No task lists found."
+
+        scope_lower = scope.lower().strip()
+        output_sections = []
+
+        for tl in task_lists:
+            tl_title = tl.get("title", "")
+            # Filter to a specific list if requested
+            if scope_lower != "all" and scope_lower not in tl_title.lower():
+                continue
+            try:
+                tasks_result = service.tasks().list(
+                    tasklist=tl["id"],
+                    showCompleted=False,
+                    showHidden=False,
+                    maxResults=50,
+                ).execute()
+                items = [
+                    t for t in tasks_result.get("items", [])
+                    if t.get("status") != "completed" and t.get("title", "").strip()
+                ]
+                if not items:
+                    continue
+                lines = [f"📋 {tl_title} ({len(items)} open):"]
+                for task in items:
+                    title = task.get("title", "").strip()
+                    due = task.get("due", "")
+                    due_str = ""
+                    if due:
+                        try:
+                            due_dt = datetime.fromisoformat(
+                                due.replace("Z", "+00:00")
+                            ).astimezone(EASTERN)
+                            due_str = f" — due {due_dt.strftime('%-m/%-d')}"
+                        except Exception:
+                            pass
+                    lines.append(f"  • {title}{due_str}")
+                output_sections.append("\n".join(lines))
+            except Exception as e:
+                logger.warning("tool_list_tasks: error reading list '%s': %s", tl_title, e)
+
+        if not output_sections:
+            return f"No open tasks found{' in list matching: ' + scope if scope_lower != 'all' else ''}."
+        logger.info("tool_list_tasks: fetched %d list(s) for scope='%s'", len(output_sections), scope)
+        return "\n\n".join(output_sections)
+    except Exception as e:
+        logger.error("tool_list_tasks error: %s", e)
+        return f"⚠️ Failed to read tasks: {e}"
+
+
+def tool_read_calendar(window: str = "today") -> str:
+    """Re-fetch Google Calendar events fresh on demand.
+
+    window='today' → today only (flat list).
+    window='week'  → next 7 days grouped by date.
+    Called when Ace outputs [READ_CALENDAR: today] or [READ_CALENDAR: week].
+    Uses the same calendar client already authenticated in get_google_creds().
+    calendar_id='pfi@platinumfortuneimpact.com' is set inside get_calendar_events().
+    """
+    try:
+        window_lower = window.lower().strip()
+        if window_lower == "week":
+            result = get_calendar_events_range(days=7)
+            logger.info("tool_read_calendar: 7-day window fetched")
+            return result
+        else:
+            result = get_calendar_events(days_ahead=1)
+            logger.info("tool_read_calendar: today window fetched")
+            return result
+    except Exception as e:
+        logger.error("tool_read_calendar error: %s", e)
+        return f"⚠️ Failed to read calendar: {e}"
+
+
 def _execute_tool_call(tool_name: str, tool_input: dict) -> str:
     """Route a tool_use block to the correct execution function."""
     dispatch = {
@@ -1351,7 +1448,7 @@ HARD RULES — NO EXCEPTIONS:
 • Never add unsolicited offers: "I can also...", "Would you like me to...", "Feel free to ask..."
 • Confirmations are one line max: "Added to Deals." / "Event created Monday 2 PM." / "Email sent."
 • Elaboration is earned — only when Brady asks, or when the output inherently requires length.
-• LONG responses permitted ONLY for: /brief, /eod, task list review, email summary, deep analysis Brady requested.
+• LONG responses permitted ONLY for: task list pulls, email summaries, explicit user requests.
 • Everything else: minimum words to convey the result. Then stop.
 
 EXAMPLES OF WHAT GETS CUT:
@@ -1381,7 +1478,9 @@ GOOGLE TASKS — Full read AND write access:
 • Live task data is injected into your context automatically with every message
 • To ADD a task: write [ADD_TASK: task title | list name] in your response — Python executes it immediately
 • To COMPLETE a task: write [COMPLETE_TASK: partial title] — Python fuzzy-matches and marks it done
+• To READ tasks on demand mid-conversation: write [LIST_TASKS: all] or [LIST_TASKS: list name] — bot fetches fresh task data and feeds it back to you so you can respond with real contents
 • NEVER tell Brady to update tasks himself. You do it. Confirm with "✅ Added to [list]: X" or "✅ Completed: X"
+• NEVER answer a "what tasks do I have?" question from stale context — use [LIST_TASKS: all] to pull fresh data
 • ACTIVE TASK LISTS (add tasks here):
   - 🤝 Deals → client deals, follow-ups, policy submissions, rollovers
   - 👥 Agents - active → agent coaching, accountability, FTAs, licensing status
@@ -1400,6 +1499,7 @@ GOOGLE CALENDAR — Full read AND write access:
 • You can see all events, times, and details across every calendar linked to Brady's account
 • To CREATE an event: [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description]
 • To DELETE an event: [DELETE_EVENT: title | YYYY-MM-DD]
+• To RE-FETCH calendar mid-conversation: [READ_CALENDAR: today] or [READ_CALENDAR: week] — bot fetches fresh events and feeds them back to you. Use when Brady asks for schedule updates after the session already started.
 • Time format: 24-hour (e.g., 14:00 = 2:00 PM). Omit time for all-day events.
 • NEVER tell Brady to add something to his calendar himself — use the tag and confirm.
 • Confirm creates with: "📅 Added to your calendar: [event] on [date] at [time]"
@@ -1526,17 +1626,26 @@ TOOL_USE_SYSTEM_PROMPT = (
     "- complete_task: Mark tasks as done\n"
     "- send_email: Send emails (ONLY when Brady explicitly says to send)\n"
     "- search_drive: Find files in Google Drive\n\n"
+    "DATA-READ TAGS — output these when Brady needs live task or calendar data:\n"
+    "- [LIST_TASKS: all] → bot fetches ALL open tasks from Google Tasks and feeds data back so you can respond with real list contents. Use when Brady asks what tasks are open, what's on his list, or what's pending.\n"
+    "- [LIST_TASKS: list name] → same but filtered to a specific list (e.g. [LIST_TASKS: Deals]).\n"
+    "- [READ_CALENDAR: today] → bot re-fetches today's calendar events fresh and feeds them back. Use mid-conversation when Brady asks for current schedule.\n"
+    "- [READ_CALENDAR: week] → same but next 7 days.\n"
+    "The bot detects these tags, fetches the data, and feeds it back into the conversation so you can give Brady a grounded, data-based response. Do NOT answer task or calendar questions from memory — use these tags to pull real data.\n\n"
     "EXECUTION RULES:\n"
     "1. Call tools from natural language — no trigger words needed\n"
     "2. 'Book me with John Thursday at 3' → call create_calendar_event immediately\n"
     "3. 'Add that to my list' → call add_task immediately\n"
-    "4. Never say 'shall I go ahead?' or 'want me to do that?' — EXECUTE FIRST, confirm after\n"
-    "5. One ask = one execution. No hesitation.\n\n"
+    "4. 'What tasks do I have open?' → output [LIST_TASKS: all]\n"
+    "5. 'What's on my calendar today?' mid-conversation → output [READ_CALENDAR: today]\n"
+    "6. Never say 'shall I go ahead?' or 'want me to do that?' — EXECUTE FIRST, confirm after\n"
+    "7. One ask = one execution. No hesitation.\n\n"
     "BREVITY — HARD CONSTRAINT: Short by default. Long only when the task demands it. "
     "One confirmation line max for executed actions. No preamble, no summaries, no unsolicited offers. "
     "Never open with filler (Sure!, Great!, Of course!). Never end with let-me-know variants. "
-    "If the answer is one word, send one word. Elaborate only when Brady asks or the output requires length. "
-    "You are Ace v18 — reliable, autonomous, always executing.\n\n"
+    "If the answer is one word, send one word. "
+    "Long format allowed ONLY for: task list pulls, email summaries, explicit user requests. "
+    "You are Ace v18.7 — reliable, autonomous, always executing.\n\n"
     "TIME OPTIMIZATION — apply proactively when Brady shares or asks about his schedule:\n"
     "- Scan today's and tomorrow's calendar data for open windows (gaps between events)\n"
     "- Flag time blocks that could be used for deep work, prospecting, or admin\n"
@@ -2210,6 +2319,8 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
         "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to Brain Dump)\n"
         "• [COMPLETE_TASK: partial title] — marks task done via fuzzy match\n"
+        "• [LIST_TASKS: all] or [LIST_TASKS: list name] — bot fetches ALL open tasks (or a specific list) fresh from Google Tasks and feeds the data back to you so you can respond with real task data. Use when Brady asks what's on his list, what's open, or what tasks exist.\n"
+        "• [READ_CALENDAR: today] or [READ_CALENDAR: week] — bot re-fetches Google Calendar events fresh and feeds data back to you. Use when Brady asks for a current schedule update mid-conversation. 'today' = today only. 'week' = next 7 days.\n"
         "• [SEND_EMAIL: to@email.com | Subject | Body] — sends email immediately\n"
         "• [DRAFT_EMAIL: to@email.com | Subject | Body] — creates Gmail draft\n"
         "• [SEARCH_DRIVE: query] — searches Drive, result appended to your reply\n"
@@ -2230,6 +2341,37 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
             max_tokens=900,
             system=system_with_context,
         )
+
+        # ── v18.7: Data-fetch tags — LIST_TASKS and READ_CALENDAR (legacy voice path) ──
+        # These read tags require fetching data then making a second Claude call
+        # so Ace can reason about real data before replying to Brady.
+        _list_task_tags = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', response)
+        _read_cal_tags  = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', response)
+        if _list_task_tags or _read_cal_tags:
+            _fetched_parts = []
+            for _scope in _list_task_tags:
+                _fetched_parts.append(
+                    f"TASK DATA (scope={_scope.strip()}):\n{tool_list_tasks(_scope.strip())}"
+                )
+            for _window in _read_cal_tags:
+                _fetched_parts.append(
+                    f"CALENDAR DATA (window={_window.strip()}):\n{tool_read_calendar(_window.strip())}"
+                )
+            # Strip fetch tags from the partial response
+            _stripped = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', response)
+            _stripped = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', _stripped).strip()
+            # Second Claude call — feed data back so Ace can compose real response
+            _followup = list(messages)
+            if _stripped:
+                _followup.append({"role": "assistant", "content": _stripped})
+            _followup.append({"role": "user", "content":
+                "Here is the fresh data you requested:\n\n" + "\n\n".join(_fetched_parts)
+            })
+            response = _call_claude(_followup, max_tokens=1500, system=system_with_context)
+            logger.info(
+                "v18.7 _process_text: data-fetch second call complete (%d task, %d cal tags)",
+                len(_list_task_tags), len(_read_cal_tags)
+            )
 
         # ── Parse all action tags ──────────────────────────────────────────────
         memory_tags      = re.findall(r'\[MEMORY:\s*([^\]]+)\]', response)
@@ -2541,6 +2683,41 @@ async def _process_with_tools(user_text: str, update: Update,
                     if hasattr(block, "text") and block.text
                 ]
                 final_text = "\n".join(text_blocks).strip()
+
+                # ── v18.7: Data-fetch tag handling — LIST_TASKS and READ_CALENDAR ──
+                # These are read tags: Ace outputs the tag, bot fetches real data, feeds
+                # it back so Ace can reason about it and give Brady a grounded response.
+                list_task_tags = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', final_text)
+                read_cal_tags  = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', final_text)
+
+                if list_task_tags or read_cal_tags:
+                    fetched_data_parts = []
+                    for scope in list_task_tags:
+                        data = tool_list_tasks(scope.strip())
+                        fetched_data_parts.append(
+                            f"TASK DATA (scope={scope.strip()}):\n{data}"
+                        )
+                    for window in read_cal_tags:
+                        data = tool_read_calendar(window.strip())
+                        fetched_data_parts.append(
+                            f"CALENDAR DATA (window={window.strip()}):\n{data}"
+                        )
+                    # Strip the fetch tags so the partial text (if any) is clean
+                    stripped_text = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', final_text)
+                    stripped_text = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', stripped_text).strip()
+                    # Feed data back into the conversation; Claude will respond with real info
+                    messages.append({"role": "assistant", "content": response.content})
+                    data_msg = (
+                        "Here is the fresh data you requested:\n\n" +
+                        "\n\n".join(fetched_data_parts) +
+                        ("\n\nYour partial response context: " + stripped_text if stripped_text else "")
+                    )
+                    messages.append({"role": "user", "content": data_msg})
+                    logger.info(
+                        "v18.7: data-fetch tags detected (%d task, %d cal) — looping for Claude response",
+                        len(list_task_tags), len(read_cal_tags)
+                    )
+                    continue  # Loop — Claude now has the data and will respond
 
                 # Extract and store memory items
                 memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', final_text)
