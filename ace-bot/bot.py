@@ -1045,6 +1045,27 @@ def tool_read_calendar(window: str = "today") -> str:
         return f"⚠️ Failed to read calendar: {e}"
 
 
+def tool_read_email(scope: str = "recent") -> str:
+    """Fetch email data on demand for Ace.
+
+    scope='recent' → unread priority emails from the last 48 h (default).
+    scope='read'   → recently read emails from the last 48 h.
+    Called when Ace outputs [READ_EMAIL: recent] or [READ_EMAIL: read].
+    """
+    try:
+        scope_lower = scope.lower().strip()
+        if scope_lower == "read":
+            result = get_recent_read_emails()
+            logger.info("tool_read_email: read/48-h window fetched")
+        else:
+            result = get_gmail_summary()
+            logger.info("tool_read_email: unread/recent window fetched")
+        return result
+    except Exception as e:
+        logger.error("tool_read_email error: %s", e)
+        return f"⚠️ Failed to read emails: {e}"
+
+
 def _execute_tool_call(tool_name: str, tool_input: dict) -> str:
     """Route a tool_use block to the correct execution function."""
     dispatch = {
@@ -2395,11 +2416,13 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         )
 
         # ── v18.7: Data-fetch tags — LIST_TASKS and READ_CALENDAR (legacy voice path) ──
+        # v18.11: [READ_EMAIL:] wired in using the same pattern.
         # These read tags require fetching data then making a second Claude call
         # so Ace can reason about real data before replying to Brady.
-        _list_task_tags = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', response)
-        _read_cal_tags  = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', response)
-        if _list_task_tags or _read_cal_tags:
+        _list_task_tags  = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', response)
+        _read_cal_tags   = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', response)
+        _read_email_tags = re.findall(r'\[READ_EMAIL:\s*([^\]]+)\]', response)
+        if _list_task_tags or _read_cal_tags or _read_email_tags:
             _fetched_parts = []
             for _scope in _list_task_tags:
                 _fetched_parts.append(
@@ -2409,9 +2432,14 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
                 _fetched_parts.append(
                     f"CALENDAR DATA (window={_window.strip()}):\n{tool_read_calendar(_window.strip())}"
                 )
+            for _escope in _read_email_tags:
+                _fetched_parts.append(
+                    f"EMAIL DATA (scope={_escope.strip()}):\n{tool_read_email(_escope.strip())}"
+                )
             # Strip fetch tags from the partial response
             _stripped = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', response)
-            _stripped = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', _stripped).strip()
+            _stripped = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', _stripped)
+            _stripped = re.sub(r'\[READ_EMAIL:[^\]]+\]', '', _stripped).strip()
             # Second Claude call — feed data back so Ace can compose real response
             _followup = list(messages)
             if _stripped:
@@ -2421,8 +2449,8 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
             })
             response = _call_claude(_followup, max_tokens=1500, system=system_with_context)
             logger.info(
-                "v18.7 _process_text: data-fetch second call complete (%d task, %d cal tags)",
-                len(_list_task_tags), len(_read_cal_tags)
+                "v18.11 _process_text: data-fetch second call complete (%d task, %d cal, %d email tags)",
+                len(_list_task_tags), len(_read_cal_tags), len(_read_email_tags)
             )
 
         # ── Parse all action tags ──────────────────────────────────────────────
@@ -2737,12 +2765,14 @@ async def _process_with_tools(user_text: str, update: Update,
                 final_text = "\n".join(text_blocks).strip()
 
                 # ── v18.7: Data-fetch tag handling — LIST_TASKS and READ_CALENDAR ──
+                # v18.11: [READ_EMAIL:] wired in using the same pattern.
                 # These are read tags: Ace outputs the tag, bot fetches real data, feeds
                 # it back so Ace can reason about it and give Brady a grounded response.
-                list_task_tags = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', final_text)
-                read_cal_tags  = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', final_text)
+                list_task_tags  = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', final_text)
+                read_cal_tags   = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', final_text)
+                read_email_tags = re.findall(r'\[READ_EMAIL:\s*([^\]]+)\]', final_text)
 
-                if list_task_tags or read_cal_tags:
+                if list_task_tags or read_cal_tags or read_email_tags:
                     fetched_data_parts = []
                     for scope in list_task_tags:
                         data = tool_list_tasks(scope.strip())
@@ -2754,22 +2784,28 @@ async def _process_with_tools(user_text: str, update: Update,
                         fetched_data_parts.append(
                             f"CALENDAR DATA (window={window.strip()}):\n{data}"
                         )
+                    for escope in read_email_tags:
+                        data = tool_read_email(escope.strip())
+                        fetched_data_parts.append(
+                            f"EMAIL DATA (scope={escope.strip()}):\n{data}"
+                        )
                     # v18.8 fix: strip tags from the assistant turn so Claude won't re-emit them
                     stripped_for_history = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', final_text)
-                    stripped_for_history = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', stripped_for_history).strip()
+                    stripped_for_history = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', stripped_for_history)
+                    stripped_for_history = re.sub(r'\[READ_EMAIL:[^\]]+\]', '', stripped_for_history).strip()
                     # Use plain string (not SDK ContentBlock objects) — avoids Pydantic serialization
                     # failure that silently broke the second client.messages.create() call in v18.7
                     messages.append({"role": "assistant", "content": stripped_for_history or "[fetching data]"})
                     # Explicit instruction prevents Claude re-emitting tags (infinite loop fix)
                     data_msg = (
                         "DATA FETCH COMPLETE — respond now with the data below. "
-                        "Do NOT output [LIST_TASKS:] or [READ_CALENDAR:] tags.\n\n" +
+                        "Do NOT output [LIST_TASKS:], [READ_CALENDAR:], or [READ_EMAIL:] tags.\n\n" +
                         "\n\n".join(fetched_data_parts)
                     )
                     messages.append({"role": "user", "content": data_msg})
                     logger.info(
-                        "v18.8: data-fetch tags (%d task, %d cal) — data injected, looping for final response",
-                        len(list_task_tags), len(read_cal_tags)
+                        "v18.11: data-fetch tags (%d task, %d cal, %d email) — data injected, looping for final response",
+                        len(list_task_tags), len(read_cal_tags), len(read_email_tags)
                     )
                     continue  # Loop — Claude now has real data, will respond with it directly
 
