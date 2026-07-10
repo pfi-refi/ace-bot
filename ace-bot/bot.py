@@ -2670,6 +2670,8 @@ async def _process_with_tools(user_text: str, update: Update,
     Tool confirmations always sent as text regardless of mode.
     """
     # Load memory context
+    now_et = datetime.now(EASTERN)
+    date_str = now_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
     memories = read_memory()
     memory_context = ""
     if memories:
@@ -2677,7 +2679,6 @@ async def _process_with_tools(user_text: str, update: Update,
         memory_context = f"\n\nWhat I know about Brady:\n{memory_str}"
 
     # Load live data for context
-    now_et = datetime.now(EASTERN)
     calendar_data = get_calendar_events()
     tomorrow_events = get_tomorrow_events()
     tasks_data = get_tasks()
@@ -2703,6 +2704,7 @@ async def _process_with_tools(user_text: str, update: Update,
 
     system = (
         TOOL_USE_SYSTEM_PROMPT
+        + f"\n\nCurrent date and time: {date_str}"
         + live_context
         + memory_context
         + voice_guidance
