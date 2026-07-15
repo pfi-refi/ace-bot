@@ -2671,7 +2671,8 @@ async def _process_with_tools(user_text: str, update: Update,
     """
     # Load memory context
     now_et = datetime.now(EASTERN)
-    date_str = now_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
+    msg_time_et = update.message.date.astimezone(EASTERN)
+    date_str = msg_time_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
     memories = read_memory()
     memory_context = ""
     if memories:
