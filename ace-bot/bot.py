@@ -2,11 +2,11 @@
 Ace — Brady McGraw's Telegram business partner bot.
 
 v15: 30-day calendar window, Telegram 4096-char message splitting, voice (Whisper STT +
-     OpenAI TTS ember voice), model claude-opus-4-8, memory cross-reference, pattern learning.
+     OpenAI TTS onyx voice), model claude-opus-4-8, memory cross-reference, pattern learning.
     - get_week_calendar() now pulls 30 days forward (was current week to Sunday)
     - _send_split() helper splits any message > 4096 chars at natural break points
     - All main AI response sends now route through _send_split()
-    - Voice: Whisper STT transcription + gpt-4o-mini-tts ember voice output
+    - Voice: Whisper STT transcription + gpt-4o-mini-tts onyx voice output
     - EMD data lives in Ace's memory file (ace_memory.json on Drive) — not hardcoded here
 
 v13: Memory cross-reference, pattern learning, updated task lists, all-list morning scan.
@@ -82,7 +82,7 @@ CAPABILITIES = {
         "write": "Create and complete tasks via [ADD_TASK:] and [COMPLETE_TASK:] tags"
     },
     "voice": {
-        "tts": "Convert text to speech using OpenAI TTS (voice: fable — British male, calm and intelligent)",
+        "tts": "Convert text to speech using OpenAI TTS (voice: onyx — deep, authoritative male)",
         "stt": "Transcribe voice messages using OpenAI Whisper"
     },
     "intelligence": {
@@ -219,7 +219,7 @@ CHANGELOG = [
             "Fixed /start and /help — removed stale auto-brief advertising",
             "Fixed session dump default task list — now uses Admin List - back log",
             "Ace scope expanded: complete life OS for Brady, not just PFI business tool",
-            "Fable voice confirmed in both primary and fallback TTS paths"
+            "Onyx voice confirmed in both primary and fallback TTS paths"
         ]
     },
     {
@@ -1550,7 +1550,7 @@ EXAMPLES OF WHAT GETS CUT:
 ✗ "Great question! Here's what I found about that topic..."
 ✓ [the answer]
 
-VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (fable voice — British male, calm and intelligent). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
+VOICE CAPABILITY: You respond via voice messages when Brady sends voice notes — your text is automatically converted to speech (onyx voice — deep, authoritative male). Never say you can only respond with text. When replying to voice, keep responses energetic, punchy, and natural for speech — short confident sentences, no long paragraphs.
 
 VOICE RESPONSE RULE: When the user sends a voice message, keep your reply concise — under 250 words — so TTS renders quickly. If Brady explicitly asks for a full briefing, rundown, or detailed breakdown via voice, you may go longer. For text messages, no length restriction.
 
@@ -2361,283 +2361,8 @@ async def _send_split(text: str, update: Update, max_len: int = 4096) -> None:
 
 # ── Message handler (free-form conversation) ──────────────────────────────────
 
-async def _process_text(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE, reply_as_voice: bool = False) -> None:
-    """Core message processing — called by both text and voice handlers.
-
-    reply_as_voice: when True, final response is sent as TTS (ember voice).
-    """
-    if SESSION_MODE.get("active"):
-        SESSION_MODE["active"] = False
-        await _process_session_dump(user_text, update, context)
-        return
-
-    # Pull live data for context injection
-    memories = read_memory()
-    tasks_data = get_tasks()
-    calendar_data = get_calendar_events()
-    tomorrow_events = get_tomorrow_events()
-    email_data = get_gmail_summary()
-
-    # Detect if Brady is asking about a multi-day calendar range
-    msg_lower = user_text.lower()
-    if any(phrase in msg_lower for phrase in ['next week', 'this week', 'next 7', '7 days', 'week ahead', 'upcoming', 'next 10', '10 days']):
-        calendar_range = get_calendar_events_range(days=10)
-    elif any(phrase in msg_lower for phrase in ['next month', '30 days', 'this month', 'month ahead']):
-        calendar_range = get_calendar_events_range(days=30)
-    else:
-        calendar_range = ""
-
-    # Load conversation history
-    conversation_history = read_conversation_history()
-
-    # Build rich system prompt
-    memory_context = ""
-    if memories:
-        memory_str = "\n".join(f"• {m}" for m in memories)
-        memory_context = f"\n\n📋 WHAT ACE KNOWS ABOUT BRADY (from memory):\n{memory_str}"
-
-    now_et = datetime.now(EASTERN)
-    recent_email_data = get_recent_read_emails()
-    live_data = (
-        f"\n\n📊 LIVE DATA (auto-fetched right now — {now_et.strftime('%A, %B %-d, %Y %-I:%M %p ET')}):\n"
-        f"📅 TODAY'S CALENDAR:\n{calendar_data}\n\n"
-        f"📅 TOMORROW'S SCHEDULE:\n{tomorrow_events}\n\n"
-        + (f"📆 UPCOMING CALENDAR RANGE:\n{calendar_range}\n\n" if calendar_range else "")
-        + f"✅ OPEN TASKS:\n{tasks_data or 'No open tasks.'}\n\n"
-        f"📧 UNREAD EMAILS:\n{email_data}\n\n"
-        f"📨 RECENT READ EMAILS (last 48hrs):\n{recent_email_data}"
-    )
-
-    system_with_context = (
-        SYSTEM_PROMPT
-        + get_ace_self_description()
-        + live_data
-        + memory_context
-        + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 CURRENT TIME: {now_et.strftime('%A, %B %-d, %Y — %-I:%M %p ET')} (live, injected every message — always accurate. Use this to give Brady time-aware responses: flag upcoming events, note time of day, calculate how long until next appointment.)\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔧 EXECUTION MANDATE — OVERRIDES EVERYTHING INCLUDING CONVERSATION HISTORY:\n"
-        "All integrations are FULLY OPERATIONAL. Past errors are resolved. Execute on the FIRST ask. Every time.\n"
-        "⚠️ CRITICAL HISTORY OVERRIDE: [LIST_TASKS:] and [READ_CALENDAR:] tags ARE operational. If any prior exchange in this conversation has Ace saying \"I don't have tools to read your tasks or calendar\" or \"I can't access that\" — those messages are WRONG. The tags work NOW. Output [LIST_TASKS: all] or [LIST_TASKS: list name] when Brady asks about tasks. Output [READ_CALENDAR: today] or [READ_CALENDAR: week] when Brady asks about his schedule. Use them on the FIRST ask, every time, no exceptions.\n\n"
-        "TRIGGER LANGUAGE → ACTION TAG (fire in the SAME response, no delay, no confirmation first):\n"
-        "• 'book', 'schedule', 'set up', 'add to calendar', 'block off', 'put on my calendar', 'set a meeting', 'book a meeting' → [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration | description]\n"
-        "• 'delete', 'remove', 'cancel', 'clear', 'get rid of', 'take off my calendar', 'remove from calendar' → [DELETE_EVENT: title | YYYY-MM-DD]\n"
-        "• 'add a task', 'remind me', 'don\\'t let me forget', 'note that', 'put that on my list' → [ADD_TASK: title | list]\n"
-        "• 'done', 'handled', 'crossed that off', 'took care of', 'finished', 'got it done', 'that\\'s done' → [COMPLETE_TASK: partial title]\n\n"
-        "ZERO TOLERANCE RULES:\n"
-        "1. Never describe an action in text without also outputting the tag in the SAME response — text + no tag = failure.\n"
-        "2. If a tag fired and returned ⚠️ — immediately generate the corrected tag without waiting for Brady to ask again.\n"
-        "3. Never say 'shall I go ahead?', 'want me to do that?', or 'should I schedule it?' — EXECUTE FIRST, confirm after.\n"
-        "4. One ask = one execution. No exceptions. No hesitation.\n"
-        "📅 CALENDAR DATA: Pulled LIVE on every message. Never tell Brady it's a snapshot or frozen. Always current.\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "ACTION TAG REFERENCE (use these in your response when appropriate):\n"
-        "• [ADD_TASK: task title | list name] — adds task immediately (list optional, defaults to Brain Dump)\n"
-        "• [COMPLETE_TASK: partial title] — marks task done via fuzzy match\n"
-        "• [LIST_TASKS: all] or [LIST_TASKS: list name] — bot fetches ALL open tasks (or a specific list) fresh from Google Tasks and feeds the data back to you so you can respond with real task data. Use when Brady asks what's on his list, what's open, or what tasks exist.\n"
-        "• [READ_CALENDAR: today] or [READ_CALENDAR: week] — bot re-fetches Google Calendar events fresh and feeds data back to you. Use when Brady asks for a current schedule update mid-conversation. 'today' = today only. 'week' = next 7 days.\n"
-        "• [SEND_EMAIL: to@email.com | Subject | Body] — sends email immediately\n"
-        "• [DRAFT_EMAIL: to@email.com | Subject | Body] — creates Gmail draft\n"
-        "• [SEARCH_DRIVE: query] — searches Drive, result appended to your reply\n"
-        "• [CREATE_EVENT: title | YYYY-MM-DD | HH:MM | duration_mins | description] — creates calendar event (time + description optional)\n"
-        "• [DELETE_EVENT: title | YYYY-MM-DD] — deletes matching calendar event\n"
-        "• [MEMORY: brief fact] — saves to long-term memory for future sessions\n"
-        "Include 0–3 [MEMORY:] tags max. Skip tagging trivial chat. "
-        "Tags are invisible to Brady — he only sees your clean response plus action confirmations."
-    )
-
-    # Build message list with history (Claude multi-turn)
-    messages = list(conversation_history)
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        response = _call_claude(
-            messages,
-            max_tokens=900,
-            system=system_with_context,
-        )
-
-        # ── v18.7: Data-fetch tags — LIST_TASKS and READ_CALENDAR (legacy voice path) ──
-        # v18.11: [READ_EMAIL:] wired in using the same pattern.
-        # These read tags require fetching data then making a second Claude call
-        # so Ace can reason about real data before replying to Brady.
-        _list_task_tags  = re.findall(r'\[LIST_TASKS:\s*([^\]]+)\]', response)
-        _read_cal_tags   = re.findall(r'\[READ_CALENDAR:\s*([^\]]+)\]', response)
-        _read_email_tags = re.findall(r'\[READ_EMAIL:\s*([^\]]+)\]', response)
-        if _list_task_tags or _read_cal_tags or _read_email_tags:
-            _fetched_parts = []
-            for _scope in _list_task_tags:
-                _fetched_parts.append(
-                    f"TASK DATA (scope={_scope.strip()}):\n{tool_list_tasks(_scope.strip())}"
-                )
-            for _window in _read_cal_tags:
-                _fetched_parts.append(
-                    f"CALENDAR DATA (window={_window.strip()}):\n{tool_read_calendar(_window.strip())}"
-                )
-            for _escope in _read_email_tags:
-                _fetched_parts.append(
-                    f"EMAIL DATA (scope={_escope.strip()}):\n{tool_read_email(_escope.strip())}"
-                )
-            # Strip fetch tags from the partial response
-            _stripped = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', response)
-            _stripped = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', _stripped)
-            _stripped = re.sub(r'\[READ_EMAIL:[^\]]+\]', '', _stripped).strip()
-            # Second Claude call — feed data back so Ace can compose real response
-            _followup = list(messages)
-            if _stripped:
-                _followup.append({"role": "assistant", "content": _stripped})
-            _followup.append({"role": "user", "content":
-                "Here is the fresh data you requested:\n\n" + "\n\n".join(_fetched_parts)
-            })
-            response = _call_claude(_followup, max_tokens=1500, system=system_with_context)
-            logger.info(
-                "v18.11 _process_text: data-fetch second call complete (%d task, %d cal, %d email tags)",
-                len(_list_task_tags), len(_read_cal_tags), len(_read_email_tags)
-            )
-
-        # ── Parse all action tags ──────────────────────────────────────────────
-        memory_tags      = re.findall(r'\[MEMORY:\s*([^\]]+)\]', response)
-        add_task_tags    = re.findall(r'\[ADD_TASK:\s*([^\]]+)\]', response)
-        complete_tags    = re.findall(r'\[COMPLETE_TASK:\s*([^\]]+)\]', response)
-        send_email_tags  = re.findall(r'\[SEND_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
-        draft_email_tags = re.findall(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', response, re.DOTALL)
-        drive_tags          = re.findall(r'\[SEARCH_DRIVE:\s*([^\]]+)\]', response)
-        create_event_tags   = re.findall(r'\[CREATE_EVENT:\s*([^\]]+)\]', response)
-        logger.info("ACE_DEBUG create_event_tags=%d raw_preview=%s", len(create_event_tags), response[:200])
-        delete_event_tags   = re.findall(r'\[DELETE_EVENT:\s*([^\]]+)\]', response)
-
-        # Strip all tags from the visible response
-        clean_response = re.sub(r'\[MEMORY:[^\]]+\]', '', response)
-        clean_response = re.sub(r'\[ADD_TASK:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\[COMPLETE_TASK:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\[SEND_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
-        clean_response = re.sub(r'\[DRAFT_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
-        clean_response = re.sub(r'\[SEARCH_DRIVE:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\[CREATE_EVENT:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\[DELETE_EVENT:[^\]]+\]', '', clean_response)
-        # v18.13: strip fetch tags too — if the second-pass response re-emits
-        # [LIST_TASKS:]/[READ_CALENDAR:]/[READ_EMAIL:], they must not leak to Brady
-        clean_response = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', clean_response)
-        clean_response = re.sub(r'\[READ_EMAIL:[^\]]+\]', '', clean_response)
-        clean_response = clean_response.strip()
-
-        # Send the main response (voice or text depending on how the message arrived)
-        if reply_as_voice and clean_response:
-            await _tts_speak(clean_response, update)
-        else:
-            await _send_split(clean_response, update)
-
-        # ── Execute action tags + collect confirmations ───────────────────────
-        confirmations = []
-
-        # Memory
-        if memory_tags:
-            merged = _merge_memories(memory_tags, memories)
-            if write_memory(merged):
-                logger.info("Stored %d new memory item(s).", len(memory_tags))
-
-        # Add tasks
-        for tag in add_task_tags:
-            parts = [p.strip() for p in tag.split("|", 1)]
-            title = parts[0]
-            list_name = parts[1] if len(parts) > 1 else "Brain Dump"
-            success, actual_list, was_dup = add_task(title, list_name)
-            if success:
-                if was_dup:
-                    confirmations.append(f"ℹ️ Already in {actual_list}: {title}")
-                else:
-                    confirmations.append(f"✅ Added to {actual_list}: {title}")
-            else:
-                confirmations.append(f"⚠️ Couldn't add task: {title}")
-
-        # Complete tasks
-        for tag in complete_tags:
-            completed = complete_task(tag.strip())
-            if completed:
-                confirmations.append(f"✅ Completed: {completed}")
-            else:
-                confirmations.append(f"⚠️ Task not found to complete: {tag.strip()}")
-
-        # Send emails
-        for tag in send_email_tags:
-            parts = [p.strip() for p in tag.split("|", 2)]
-            if len(parts) >= 3:
-                to_addr, subject, body = parts[0], parts[1], parts[2]
-                if send_email(to_addr, subject, body):
-                    confirmations.append(f"📤 Email sent to {to_addr} — {subject}")
-                else:
-                    confirmations.append(f"⚠️ Email failed: {to_addr}")
-            else:
-                confirmations.append(f"⚠️ Malformed SEND_EMAIL tag: {tag[:40]}")
-
-        # Draft emails
-        for tag in draft_email_tags:
-            parts = [p.strip() for p in tag.split("|", 2)]
-            if len(parts) >= 3:
-                to_addr, subject, body = parts[0], parts[1], parts[2]
-                if draft_email(to_addr, subject, body):
-                    confirmations.append(f"📝 Draft saved for {to_addr} — {subject}")
-                else:
-                    confirmations.append(f"⚠️ Draft failed: {to_addr}")
-            else:
-                confirmations.append(f"⚠️ Malformed DRAFT_EMAIL tag: {tag[:40]}")
-
-        # Drive search
-        for tag in drive_tags:
-            results = search_drive(tag.strip())
-            confirmations.append(f"🔍 Drive — '{tag.strip()}':\n{results}")
-
-        # Create calendar events
-        for tag in create_event_tags:
-            parts = [p.strip() for p in tag.split("|")]
-            if len(parts) >= 2:
-                title = parts[0]
-                date_s = parts[1]
-                time_s = parts[2] if len(parts) > 2 else None
-                dur = int(parts[3]) if len(parts) > 3 and parts[3].strip().isdigit() else 60
-                desc = parts[4] if len(parts) > 4 else ""
-                success, msg = create_calendar_event(title, date_s, time_s, dur, desc)
-                if success:
-                    time_label = f" at {time_s}" if time_s else ""
-                    confirmations.append(f"📅 Added to calendar: {title} on {date_s}{time_label}")
-                else:
-                    await update.message.reply_text(
-                        f"❌ Calendar booking failed: {msg}. Please try again or book manually."
-                    )
-            else:
-                confirmations.append(f"⚠️ Malformed CREATE_EVENT tag: {tag[:50]}")
-
-        # Delete calendar events
-        for tag in delete_event_tags:
-            parts = [p.strip() for p in tag.split("|")]
-            if len(parts) >= 2:
-                title, date_s = parts[0], parts[1]
-                success, msg = delete_calendar_event(title, date_s)
-                if success:
-                    confirmations.append(f"🗑️ Removed from calendar: {msg} on {date_s}")
-                else:
-                    await update.message.reply_text(
-                        f"❌ Calendar delete failed: {msg}. Please try again or remove manually."
-                    )
-            else:
-                confirmations.append(f"⚠️ Malformed DELETE_EVENT tag: {tag[:50]}")
-
-        if confirmations:
-            await update.message.reply_text("\n".join(confirmations))
-
-        # ── Save conversation history ─────────────────────────────────────────
-        updated_history = list(conversation_history)
-        updated_history.append({"role": "user", "content": user_text})
-        updated_history.append({"role": "assistant", "content": clean_response})
-        write_conversation_history(updated_history)
-
-    except Exception as e:
-        logger.error("Message handler error: %s", e)
-        await update.message.reply_text(f"⚠️ Error: {e}")
-
 async def _tts_speak(text: str, update: Update) -> bool:
-    """Convert text to speech — ember voice via OpenAI TTS (warm, energetic).
+    """Convert text to speech — onyx voice via OpenAI TTS (deep, authoritative).
     Falls back to plain text if TTS fails or key is missing.
     """
     try:
@@ -2647,7 +2372,7 @@ async def _tts_speak(text: str, update: Update) -> bool:
             await update.message.reply_text("⚠️ No OPENAI_API_KEY set.\n\n" + text)
             return False
         client = openai.OpenAI(api_key=api_key)
-        # Try preferred voice model first; fall back to tts-1/fable if rejected
+        # Try preferred voice model first; fall back to tts-1/onyx if rejected
         try:
             tts_response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
