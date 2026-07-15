@@ -1166,6 +1166,55 @@ def _execute_tool_call(tool_name: str, tool_input: dict) -> str:
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
+def get_calendar_time_anchor() -> str:
+    """v18.17: Lightweight calendar-anchored time confirmation.
+
+    Fetches the next 3 events from now on the primary PFI calendar and returns
+    a one-line date/next-event anchor string for the system prompt. Silent
+    fail — returns "" on any error so message handling is never broken.
+    """
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        now_et = datetime.now(EASTERN)
+        today_label = now_et.strftime("%A, %B %-d, %Y")
+        events_result = service.events().list(
+            calendarId="pfi@platinumfortuneimpact.com",
+            timeMin=now_et.isoformat(),
+            maxResults=3,
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+        events = events_result.get("items", [])
+        if not events:
+            return f"Calendar confirms: {today_label}. No upcoming events today."
+        event = events[0]
+        summary = event.get("summary", "No title")
+        start = event.get("start", {})
+        start_dt_str = start.get("dateTime", start.get("date", ""))
+        if "T" in start_dt_str:
+            dt = datetime.fromisoformat(start_dt_str)
+            if dt.tzinfo:
+                dt = dt.astimezone(EASTERN)
+            if dt.date() == now_et.date():
+                time_label = dt.strftime("%-I:%M %p ET")
+            else:
+                time_label = dt.strftime("%-I:%M %p ET on %A, %B %-d")
+        else:
+            try:
+                dt_naive = datetime.strptime(start_dt_str, "%Y-%m-%d")
+                if dt_naive.date() == now_et.date():
+                    time_label = "all day today"
+                else:
+                    time_label = f"all day on {dt_naive.strftime('%A, %B %-d')}"
+            except Exception:
+                time_label = start_dt_str
+        return f"Calendar confirms: {today_label}. Next event: {summary} at {time_label}."
+    except Exception as e:
+        logger.warning("get_calendar_time_anchor error (silent fail): %s", e)
+        return ""
+
+
 def get_calendar_events(days_ahead: int = 1) -> str:
     """Pull calendar events from today through `days_ahead` days from ALL Google Calendars.
 
@@ -2505,6 +2554,8 @@ async def _process_with_tools(user_text: str, update: Update,
 
     # Load live data for context
     calendar_data = get_calendar_events()
+    # v18.17: calendar-anchored time confirmation (silent fail → empty string)
+    calendar_anchor = get_calendar_time_anchor()
     tomorrow_events = get_tomorrow_events()
     tasks_data = get_tasks()
     email_data = get_gmail_summary()
@@ -2530,6 +2581,7 @@ async def _process_with_tools(user_text: str, update: Update,
     system = (
         TOOL_USE_SYSTEM_PROMPT
         + f"\n\nCurrent date and time: {date_str} (live server clock — authoritative, trust this absolutely. Never reference a message timestamp as the current time.)"
+        + (f"\n{calendar_anchor}" if calendar_anchor else "")
         + live_context
         + memory_context
         + voice_guidance
