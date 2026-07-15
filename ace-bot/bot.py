@@ -610,6 +610,45 @@ def write_conversation_history(messages: list) -> bool:
         logger.warning("Conversation history write error: %s", e)
         return False
 
+
+def _scrub_time_from_history(messages: list) -> list:
+    """Strip stale time/date assertions from injected conversation history.
+
+    Removes lines from assistant messages that contain time/date claims so that
+    old wrong-time responses don't override the fresh system-prompt timestamp.
+    Patterns to strip (from assistant role messages only):
+    - Lines containing "Current date and time:"
+    - Lines containing "current time:" (case-insensitive)
+    - Lines containing "(based on your last message timestamp)"
+    - Lines containing "(based on your message timestamp)"
+    - Lines containing "let me recalibrate"
+    - Lines matching "Today is" followed by a date/time pattern
+    """
+    import re
+    scrub_patterns = [
+        r'(?i)current date and time[:\s]',
+        r'(?i)current time[:\s]',
+        r'(?i)\(based on your (last )?message timestamp\)',
+        r'(?i)let me recalibrate',
+        r'(?i)^today is \w+,',
+    ]
+
+    cleaned = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            lines = msg["content"].split("\n")
+            filtered = [
+                line for line in lines
+                if not any(re.search(pat, line) for pat in scrub_patterns)
+            ]
+            new_content = "\n".join(filtered).strip()
+            if new_content:
+                cleaned.append({**msg, "content": new_content})
+            # if the entire message was time-related and is now empty, skip it
+        else:
+            cleaned.append(msg)
+    return cleaned
+
 # ── Task Write Operations ──────────────────────────────────────────────────────
 
 def add_task(title: str, list_name: str = DEFAULT_TASK_LIST) -> tuple[bool, str, bool]:
@@ -2511,6 +2550,9 @@ async def _process_with_tools(user_text: str, update: Update,
 
     # Load conversation history for multi-turn context (same Drive file as before)
     conversation_history = read_conversation_history()
+    # v18.15: scrub stale time/date assertions so old wrong-time responses
+    # don't override the fresh timestamp injected in the system prompt
+    conversation_history = _scrub_time_from_history(conversation_history)
     messages = list(conversation_history)
     messages.append({"role": "user", "content": user_text})
 
