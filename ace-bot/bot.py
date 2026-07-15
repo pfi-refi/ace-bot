@@ -2491,17 +2491,11 @@ async def _process_with_tools(user_text: str, update: Update,
 
     # Load memory context
     now_et = datetime.now(EASTERN)
-    # ── v18.13 datetime fix ────────────────────────────────────────────────
-    # update.message.date is Telegram's message-RECEIPT timestamp (aware UTC in
-    # PTB v21). It goes stale when a polling backlog drains after a Railway
-    # redeploy — injecting it as "Current date and time" anchored Ace hours in
-    # the past. The live server clock is the authoritative "now"; the message
-    # timestamp is kept as separate context. Defensive: localize if ever naive.
-    raw_msg_date = update.message.date
-    if raw_msg_date is not None and raw_msg_date.tzinfo is None:
-        raw_msg_date = pytz.utc.localize(raw_msg_date)
-    msg_time_et = raw_msg_date.astimezone(EASTERN) if raw_msg_date else now_et
-    msg_sent_str = msg_time_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
+    # ── v18.16 datetime fix ────────────────────────────────────────────────
+    # update.message.date is Telegram's message-RECEIPT timestamp and can be
+    # stale (polling backlog after a Railway redeploy). It is no longer
+    # injected into the system prompt at all — the live server clock is the
+    # only time source.
     date_str = now_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
     memories = read_memory()
     memory_context = ""
@@ -2535,8 +2529,7 @@ async def _process_with_tools(user_text: str, update: Update,
 
     system = (
         TOOL_USE_SYSTEM_PROMPT
-        + f"\n\nCurrent date and time: {date_str} (live server clock — authoritative, trust this absolutely)"
-        + (f"\nBrady sent this message at: {msg_sent_str}" if msg_sent_str != date_str else "")
+        + f"\n\nCurrent date and time: {date_str} (live server clock — authoritative, trust this absolutely. Never reference a message timestamp as the current time.)"
         + live_context
         + memory_context
         + voice_guidance
