@@ -63,8 +63,8 @@ def get_system_prompt() -> str:
 # ============================================================
 # ACE SELF-AWARENESS SYSTEM — v17
 # ============================================================
-ACE_VERSION = "18.10"
-ACE_LAST_UPDATED = "2026-07-07"
+ACE_VERSION = "18.13"
+ACE_LAST_UPDATED = "2026-07-15"
 
 CAPABILITIES = {
     "calendar": {
@@ -105,6 +105,22 @@ CAPABILITIES = {
 }
 
 CHANGELOG = [
+    {
+        "date": "2026-07-15",
+        "version": "18.13",
+        "changes": [
+            "DATETIME FIX (root cause): 'Current date and time' in the tool-use path was derived from update.message.date — Telegram's message-receipt timestamp, which goes stale when a polling backlog drains after a Railway redeploy. Now derived from the live server clock (datetime.now(EASTERN)), same as get_system_prompt(). Message send-time kept as separate context line, with defensive UTC localization if the datetime ever arrives naive.",
+            "/session FIXED: SESSION_MODE was only consumed in _process_text (legacy path), but handle_message routes to _process_with_tools — brain dumps were never processed. SESSION_MODE check added to _process_with_tools.",
+            "Tag-leak fix: fetch tags ([LIST_TASKS:]/[READ_CALENDAR:]/[READ_EMAIL:]) re-emitted in a second-pass response are now stripped from the visible reply in _process_text.",
+            "Infinite-loop guard: _process_with_tools agentic loop capped at 8 iterations — prevents API burn + silence if Claude keeps re-emitting fetch tags.",
+            "Legacy action tags now handled in the tool-use path: [ADD_TASK:], [COMPLETE_TASK:], [CREATE_EVENT:], [DELETE_EVENT:], [SEND_EMAIL:], [DRAFT_EMAIL:], [SEARCH_DRIVE:] emitted by Claude (from old history patterns) are executed and stripped instead of leaking raw to Brady.",
+            "Memory hardening: _merge_memories wrapped in try/except with a safe local merge fallback (append + exact dedup, 60-item cap) so a Haiku API failure can no longer crash /remember, EOD, or message handling.",
+            "Stale-date prevention: memory merge prompt now includes today's date and instructs converting relative dates ('tomorrow', 'next week') to absolute dates before storing.",
+            "Empty-response fallback: _process_with_tools now sends a notice instead of silence when Claude returns no text and no tool ran.",
+            "/status no longer advertises the paused 9:30 AM / 9:00 PM auto-brief schedule.",
+            "TOOL_USE_SYSTEM_PROMPT version string now interpolates ACE_VERSION instead of hardcoded 'v18.10'; SYSTEM_PROMPT history note corrected 40 → 80 exchanges.",
+        ]
+    },
     {
         "date": "2026-07-07",
         "version": "18.10",
@@ -488,36 +504,62 @@ def write_memory(memories: list) -> bool:
 
 
 def _merge_memories(new_items: list, existing: list) -> list:
-    """Ask Claude to merge new facts into existing memory, deduplicating cleanly."""
+    """Ask Claude to merge new facts into existing memory, deduplicating cleanly.
+
+    v18.13: hardened — an API failure can no longer crash the caller (/remember,
+    EOD sweep, message handlers). On failure, falls back to a safe local merge
+    (append + exact dedup, 60-item cap). Merge prompt now carries today's date
+    so relative dates ('tomorrow', 'Friday') are stored as absolute dates and
+    never go stale in memory.
+    """
     if not new_items:
         return existing
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    existing_str = "\n".join(f"- {m}" for m in existing) or "(none yet)"
-    new_str = "\n".join(f"- {m}" for m in new_items)
-    prompt = (
-        "You maintain Ace's operational memory about Brady McGraw (PFI Marketing Director).\n\n"
-        f"EXISTING MEMORY:\n{existing_str}\n\n"
-        f"NEW ITEMS TO ADD:\n{new_str}\n\n"
-        "Merge the new items into the existing memory. Rules:\n"
-        "1. Remove exact or near-duplicate facts\n"
-        "2. If new info contradicts old, keep the newer version\n"
-        "3. Keep entries concise (one fact per line, ~15 words max)\n"
-        "4. Max 60 total entries — drop least relevant if over\n"
-        "5. Return ONLY the final merged list, one item per line, no bullets or numbering"
-    )
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
-    return merged
+    today_str = datetime.now(EASTERN).strftime("%A, %B %-d, %Y")
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        existing_str = "\n".join(f"- {m}" for m in existing) or "(none yet)"
+        new_str = "\n".join(f"- {m}" for m in new_items)
+        prompt = (
+            "You maintain Ace's operational memory about Brady McGraw (PFI Marketing Director).\n"
+            f"TODAY'S DATE: {today_str}\n\n"
+            f"EXISTING MEMORY:\n{existing_str}\n\n"
+            f"NEW ITEMS TO ADD:\n{new_str}\n\n"
+            "Merge the new items into the existing memory. Rules:\n"
+            "1. Remove exact or near-duplicate facts\n"
+            "2. If new info contradicts old, keep the newer version\n"
+            "3. Keep entries concise (one fact per line, ~15 words max)\n"
+            "4. Max 60 total entries — drop least relevant if over\n"
+            "5. Convert relative dates to absolute using TODAY'S DATE above — "
+            "'tomorrow' or 'Friday' must become an explicit date so it never goes stale\n"
+            "6. Return ONLY the final merged list, one item per line, no bullets or numbering, "
+            "no preamble, no commentary"
+        )
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        merged = [line.strip() for line in response.content[0].text.strip().split("\n") if line.strip()]
+        if merged:
+            return merged
+        logger.warning("_merge_memories: model returned empty merge — using local fallback")
+    except Exception as e:
+        logger.error("_merge_memories API error (%s) — using local fallback merge", e)
+    # Local fallback: append new items, drop exact duplicates, cap at 60
+    merged = list(existing)
+    seen = {m.strip().lower() for m in merged}
+    for item in new_items:
+        key = item.strip().lower()
+        if key and key not in seen:
+            merged.append(item.strip())
+            seen.add(key)
+    return merged[-60:]
 
 # ── Conversation History (Google Drive) ───────────────────────────────────────
 
 def read_conversation_history() -> list:
-    """Load last 40 exchanges from ace_conversation.json on Drive. Returns [] if unavailable."""
+    """Load last 80 exchanges from ace_conversation.json on Drive. Returns [] if unavailable."""
     try:
         creds = get_google_creds()
         service = build("drive", "v3", credentials=creds)
@@ -1565,7 +1607,7 @@ GOOGLE DRIVE — Full read + write:
 • [MEMORY: brief fact] — saves important info to ace_memory.json for future sessions
 
 PERSISTENT CONVERSATION MEMORY:
-• Your last 40 exchanges are saved to ace_conversation.json on Drive and loaded on every startup
+• Your last 80 exchanges are saved to ace_conversation.json on Drive and loaded on every startup
 • You have context of past conversations. Use it. Don't ask Brady to repeat himself.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1705,7 +1747,7 @@ TOOL_USE_SYSTEM_PROMPT = (
     "Never open with filler (Sure!, Great!, Of course!). Never end with let-me-know variants. "
     "If the answer is one word, send one word. "
     "Long format allowed ONLY for: task list pulls, email summaries, explicit user requests. "
-    "You are Ace v18.10 — reliable, autonomous, always executing.\n\n"
+    f"You are Ace v{ACE_VERSION} — reliable, autonomous, always executing.\n\n"
     "TIME OPTIMIZATION — apply proactively when Brady shares or asks about his schedule:\n"
     "- Scan today's and tomorrow's calendar data for open windows (gaps between events)\n"
     "- Flag time blocks that could be used for deep work, prospecting, or admin\n"
@@ -2270,7 +2312,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         f"✅ Ace v{ACE_VERSION} is running.\n"
         f"Time (ET): {now_et.strftime('%A %B %-d, %Y — %-I:%M %p')}\n"
-        f"Schedule: 9:30 AM brief · 9:00 PM EOD (Mon–Fri)\n"
+        f"Briefs: on demand via /brief and /eod (auto-briefs paused)\n"
         f"Memory: {memory_status}\n"
         f"Conversation history: {history_status}\n"
         f"Tasks: {tasks_status}"
@@ -2473,6 +2515,11 @@ async def _process_text(user_text: str, update: Update, context: ContextTypes.DE
         clean_response = re.sub(r'\[SEARCH_DRIVE:[^\]]+\]', '', clean_response)
         clean_response = re.sub(r'\[CREATE_EVENT:[^\]]+\]', '', clean_response)
         clean_response = re.sub(r'\[DELETE_EVENT:[^\]]+\]', '', clean_response)
+        # v18.13: strip fetch tags too — if the second-pass response re-emits
+        # [LIST_TASKS:]/[READ_CALENDAR:]/[READ_EMAIL:], they must not leak to Brady
+        clean_response = re.sub(r'\[LIST_TASKS:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[READ_CALENDAR:[^\]]+\]', '', clean_response)
+        clean_response = re.sub(r'\[READ_EMAIL:[^\]]+\]', '', clean_response)
         clean_response = clean_response.strip()
 
         # Send the main response (voice or text depending on how the message arrived)
@@ -2669,10 +2716,29 @@ async def _process_with_tools(user_text: str, update: Update,
     reply_as_voice=True → final response sent as TTS audio (onyx voice).
     Tool confirmations always sent as text regardless of mode.
     """
+    # ── v18.13: /session brain-dump routing ───────────────────────────────
+    # SESSION_MODE was previously only consumed in _process_text (legacy path),
+    # but handle_message/handle_voice route here — so /session dumps were never
+    # processed. Consume the flag here so /session works on the live path.
+    if SESSION_MODE.get("active"):
+        SESSION_MODE["active"] = False
+        await _process_session_dump(user_text, update, None)
+        return
+
     # Load memory context
     now_et = datetime.now(EASTERN)
-    msg_time_et = update.message.date.astimezone(EASTERN)
-    date_str = msg_time_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
+    # ── v18.13 datetime fix ────────────────────────────────────────────────
+    # update.message.date is Telegram's message-RECEIPT timestamp (aware UTC in
+    # PTB v21). It goes stale when a polling backlog drains after a Railway
+    # redeploy — injecting it as "Current date and time" anchored Ace hours in
+    # the past. The live server clock is the authoritative "now"; the message
+    # timestamp is kept as separate context. Defensive: localize if ever naive.
+    raw_msg_date = update.message.date
+    if raw_msg_date is not None and raw_msg_date.tzinfo is None:
+        raw_msg_date = pytz.utc.localize(raw_msg_date)
+    msg_time_et = raw_msg_date.astimezone(EASTERN) if raw_msg_date else now_et
+    msg_sent_str = msg_time_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
+    date_str = now_et.strftime("%A, %B %-d, %Y — %-I:%M %p ET")
     memories = read_memory()
     memory_context = ""
     if memories:
@@ -2705,7 +2771,8 @@ async def _process_with_tools(user_text: str, update: Update,
 
     system = (
         TOOL_USE_SYSTEM_PROMPT
-        + f"\n\nCurrent date and time: {date_str}"
+        + f"\n\nCurrent date and time: {date_str} (live server clock — authoritative, trust this absolutely)"
+        + (f"\nBrady sent this message at: {msg_sent_str}" if msg_sent_str != date_str else "")
         + live_context
         + memory_context
         + voice_guidance
@@ -2727,7 +2794,17 @@ async def _process_with_tools(user_text: str, update: Update,
         tool_confirmation_buffer = []
 
         # Tool-use agentic loop
+        # v18.13: iteration cap — if Claude keeps re-emitting fetch tags despite the
+        # "do NOT re-emit" instruction, break out instead of burning API calls forever
+        loop_count = 0
         while True:
+            loop_count += 1
+            if loop_count > 8:
+                logger.error("_process_with_tools: loop cap (8) hit — breaking out")
+                await update.message.reply_text(
+                    "⚠️ I got stuck in a data-fetch loop on that one — try rephrasing."
+                )
+                break
             response = client.messages.create(
                 model="claude-sonnet-4-5",
                 max_tokens=2500 if reply_as_voice else 1500,
@@ -2816,6 +2893,78 @@ async def _process_with_tools(user_text: str, update: Update,
                 memory_tags = re.findall(r'\[MEMORY:\s*(.+?)\]', final_text)
                 clean_response = re.sub(r'\n?\[MEMORY:[^\]]+\]', '', final_text).strip()
 
+                # ── v18.13: Legacy action-tag safety net ──────────────────────
+                # Conversation history from the tag-based era can prompt Claude to
+                # emit legacy tags instead of tool calls in this path. Execute and
+                # strip them so asks are never dropped and raw tags never leak.
+                legacy_add    = re.findall(r'\[ADD_TASK:\s*([^\]]+)\]', clean_response)
+                legacy_done   = re.findall(r'\[COMPLETE_TASK:\s*([^\]]+)\]', clean_response)
+                legacy_create = re.findall(r'\[CREATE_EVENT:\s*([^\]]+)\]', clean_response)
+                legacy_delete = re.findall(r'\[DELETE_EVENT:\s*([^\]]+)\]', clean_response)
+                legacy_send   = re.findall(r'\[SEND_EMAIL:\s*([^\]]+)\]', clean_response, re.DOTALL)
+                legacy_draft  = re.findall(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', clean_response, re.DOTALL)
+                legacy_drive  = re.findall(r'\[SEARCH_DRIVE:\s*([^\]]+)\]', clean_response)
+                if any([legacy_add, legacy_done, legacy_create, legacy_delete,
+                        legacy_send, legacy_draft, legacy_drive]):
+                    for tag in legacy_add:
+                        parts = [p.strip() for p in tag.split("|", 1)]
+                        ok, actual_list, was_dup = add_task(
+                            parts[0], parts[1] if len(parts) > 1 else DEFAULT_TASK_LIST)
+                        if ok:
+                            tool_confirmation_buffer.append(
+                                f"ℹ️ Already in {actual_list}: {parts[0]}" if was_dup
+                                else f"✅ Added to {actual_list}: {parts[0]}")
+                        else:
+                            tool_confirmation_buffer.append(f"⚠️ Couldn't add task: {parts[0]}")
+                    for tag in legacy_done:
+                        done_title = complete_task(tag.strip())
+                        tool_confirmation_buffer.append(
+                            f"✅ Completed: {done_title}" if done_title
+                            else f"⚠️ Task not found to complete: {tag.strip()}")
+                    for tag in legacy_create:
+                        parts = [p.strip() for p in tag.split("|")]
+                        if len(parts) >= 2:
+                            ok, msg = create_calendar_event(
+                                parts[0], parts[1],
+                                parts[2] if len(parts) > 2 else None,
+                                int(parts[3]) if len(parts) > 3 and parts[3].strip().isdigit() else 60,
+                                parts[4] if len(parts) > 4 else "")
+                            tool_confirmation_buffer.append(
+                                f"📅 Added to calendar: {parts[0]} on {parts[1]}" if ok
+                                else f"⚠️ Calendar booking failed: {msg}")
+                    for tag in legacy_delete:
+                        parts = [p.strip() for p in tag.split("|")]
+                        if len(parts) >= 2:
+                            ok, msg = delete_calendar_event(parts[0], parts[1])
+                            tool_confirmation_buffer.append(
+                                f"🗑️ Removed from calendar: {msg}" if ok
+                                else f"⚠️ Calendar delete failed: {msg}")
+                    for tag in legacy_send:
+                        parts = [p.strip() for p in tag.split("|", 2)]
+                        if len(parts) >= 3:
+                            tool_confirmation_buffer.append(
+                                f"📤 Email sent to {parts[0]} — {parts[1]}"
+                                if send_email(parts[0], parts[1], parts[2])
+                                else f"⚠️ Email failed: {parts[0]}")
+                    for tag in legacy_draft:
+                        parts = [p.strip() for p in tag.split("|", 2)]
+                        if len(parts) >= 3:
+                            tool_confirmation_buffer.append(
+                                f"📝 Draft saved for {parts[0]} — {parts[1]}"
+                                if draft_email(parts[0], parts[1], parts[2])
+                                else f"⚠️ Draft failed: {parts[0]}")
+                    for tag in legacy_drive:
+                        tool_confirmation_buffer.append(
+                            f"🔍 Drive — '{tag.strip()}':\n{search_drive(tag.strip())}")
+                    for pat in (r'\[ADD_TASK:[^\]]+\]', r'\[COMPLETE_TASK:[^\]]+\]',
+                                r'\[CREATE_EVENT:[^\]]+\]', r'\[DELETE_EVENT:[^\]]+\]',
+                                r'\[SEARCH_DRIVE:[^\]]+\]'):
+                        clean_response = re.sub(pat, '', clean_response)
+                    clean_response = re.sub(r'\[SEND_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
+                    clean_response = re.sub(r'\[DRAFT_EMAIL:[^\]]+\]', '', clean_response, flags=re.DOTALL)
+                    clean_response = clean_response.strip()
+                    logger.info("v18.13: legacy action tag(s) executed in tool-use path")
+
                 # v18.5: Consolidate tool confirmations + Claude response into one message.
                 # Voice mode: confirmations as text + TTS audio (format split is unavoidable).
                 if tool_confirmation_buffer and clean_response:
@@ -2832,6 +2981,12 @@ async def _process_with_tools(user_text: str, update: Update,
                         await _tts_speak(clean_response, update)
                     else:
                         await _send_split(clean_response, update)
+                else:
+                    # v18.13: never go silent — no text and no tool confirmations
+                    logger.warning("_process_with_tools: empty final response, sending fallback")
+                    await update.message.reply_text(
+                        "⚠️ I came back empty on that one — say it again?"
+                    )
 
                 # Save conversation history (preserves cross-session context)
                 updated_history = list(conversation_history)
