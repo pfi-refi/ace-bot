@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#000000"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#39FF14" stroke-width="4" opacity="0.5"/>
+  <circle cx="256" cy="256" r="110" fill="rgba(57,255,20,0.08)"/>
+  <text x="256" y="300" font-family="Courier New, monospace" font-size="150" font-weight="bold"
+        fill="#39FF14" text-anchor="middle" style="letter-spacing:6px">A</text>
+</svg>

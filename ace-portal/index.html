@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>ACE // PFI Command Center</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- Matrix rain + dark overlay -->
+<canvas id="matrix"></canvas>
+<div id="overlay"></div>
+
+<!-- Login gate (shown only if the portal requires a password) -->
+<div id="login" class="hidden">
+  <div class="box">
+    <div class="title">ACE</div>
+    <div class="sub">PFI Command Center</div>
+    <input id="login-input" type="password" placeholder="ACCESS CODE" autocomplete="current-password">
+    <button id="login-btn">AUTHENTICATE</button>
+    <div id="login-err" class="err"></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+
+  <!-- TOP BAR -->
+  <header id="topbar">
+    <div class="brand">ACE <span class="diamond">◈</span> PFI COMMAND CENTER</div>
+    <div id="clock-wrap">
+      <div id="clock">--:--<span class="sec">:--</span><span class="ampm">--</span></div>
+      <div id="topdate">&nbsp;</div>
+    </div>
+    <div class="status-chips">
+      <div class="chip" id="chip-link"><span class="dot"></span>ACE LINK</div>
+      <div class="chip" id="chip-sync"><span class="dot"></span>SYNCED</div>
+    </div>
+  </header>
+
+  <!-- MAIN GRID -->
+  <div id="main">
+
+    <!-- LEFT: SCHEDULE -->
+    <aside id="left" class="panel scroll">
+      <div>
+        <div class="section-header">TODAY</div>
+        <div id="today-list"><div class="loading">loading…</div></div>
+      </div>
+      <div>
+        <div class="section-header">UPCOMING</div>
+        <div id="upcoming-list"><div class="loading">loading…</div></div>
+      </div>
+    </aside>
+
+    <!-- CENTER: ACE -->
+    <section id="center" class="panel">
+      <div id="orb-stage">
+        <div id="orb-wrap">
+          <div id="orb-glow"></div>
+          <canvas id="orb-canvas" width="240" height="240"></canvas>
+        </div>
+        <div id="orb-label">ACE</div>
+        <div id="orb-state">[ IDLE ]</div>
+      </div>
+
+      <div id="chat">
+        <div id="messages" class="scroll"></div>
+
+        <div id="quick">
+          <button class="qa" data-msg="Give me my morning brief.">MORNING BRIEF</button>
+          <button class="qa" data-msg="What are my tasks — ranked by priority?">TASKS</button>
+          <button class="qa" data-msg="What's on my calendar today?">CALENDAR</button>
+          <button class="qa" id="qa-memory">MEMORY</button>
+        </div>
+
+        <div id="input-bar">
+          <input id="chat-input" type="text" placeholder="Message Ace…" autocomplete="off">
+          <button id="mic-btn" class="icon-btn" title="Voice input">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="2" width="6" height="12" rx="3"/>
+              <path d="M5 10a7 7 0 0 0 14 0"/>
+              <line x1="12" y1="19" x2="12" y2="22"/>
+            </svg>
+          </button>
+          <button id="send-btn" class="icon-btn" title="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: INTEL + TASKS -->
+    <aside id="right" class="panel scroll">
+      <div>
+        <div class="section-header">INTEL FEED</div>
+        <div id="intel-list" class="scroll">
+          <div class="empty-state">awaiting signal</div>
+        </div>
+      </div>
+      <div id="tasks-section">
+        <div class="section-header">TASKS</div>
+        <div id="tasks-list" class="scroll"><div class="loading">loading…</div></div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- BOTTOM STATUS BAR -->
+  <footer id="bottombar">
+    <div id="bb-version">ACE v18.17 // OPERATIONAL</div>
+    <div class="grp" id="bb-services">
+      <span class="svc" id="svc-calendar"><span class="d"></span>CALENDAR</span>
+      <span class="svc" id="svc-gmail"><span class="d"></span>GMAIL</span>
+      <span class="svc" id="svc-tasks"><span class="d"></span>TASKS</span>
+      <span class="svc" id="svc-drive"><span class="d"></span>DRIVE</span>
+    </div>
+    <div id="bb-weather">CLE ---°F</div>
+  </footer>
+
+</div>
+
+<!-- MEMORY modal -->
+<div id="modal" class="hidden">
+  <div class="box">
+    <div class="m-title">
+      <span>ACE MEMORY — SOURCE OF TRUTH</span>
+      <span class="m-close" id="modal-close">✕ CLOSE</span>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
