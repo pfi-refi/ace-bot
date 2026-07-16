@@ -14,12 +14,18 @@
   --lime-20: rgba(57, 255, 20, 0.2);
   --lime-15: rgba(57, 255, 20, 0.15);
   --cyan: rgba(0, 255, 150, 0.9);
-  --panel-bg: rgba(0, 10, 0, 0.92);
+  /* Body copy: pale green-white. Reads far better than saturated lime because
+     contrast comes from luminance, not hue. Lime stays for accents/headers. */
+  --text: #D8FFCE;
+  --text-dim: rgba(216, 255, 206, 0.75);
+  /* Near-neutral dark panels — a green tint behind green text is same-hue mud. */
+  --panel-bg: rgba(2, 8, 2, 0.94);
   --panel-border: 1px solid rgba(57, 255, 20, 0.4);
   --panel-glow: 0 0 22px rgba(57, 255, 20, 0.12), inset 0 0 24px rgba(57, 255, 20, 0.04);
   --divider: 1px solid rgba(57, 255, 20, 0.2);
-  --input-bg: rgba(0, 22, 0, 0.85);
-  --mono: 'Courier New', Courier, monospace;
+  --input-bg: rgba(4, 16, 4, 0.9);
+  /* Crisp modern monospace — Courier New is thin and mushy at small sizes. */
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, Monaco, Consolas, 'Courier New', monospace;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -28,9 +34,10 @@ html, body { height: 100%; overflow: hidden; }
 
 body {
   background: #000000;
-  color: var(--lime);
+  color: var(--text);
   font-family: var(--mono);
-  -webkit-font-smoothing: antialiased;
+  /* NOTE: deliberately not using -webkit-font-smoothing: antialiased — on
+     macOS it thins light-on-dark text, which is what made this mushy. */
 }
 
 /* ---------- Matrix rain canvas ---------- */
@@ -90,11 +97,12 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 15px;
-  letter-spacing: 3px;
-  font-weight: bold;
+  font-size: 16px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  color: var(--lime);
   text-transform: uppercase;
-  text-shadow: 0 0 12px rgba(57, 255, 20, 0.6);
+  text-shadow: 0 0 6px rgba(57, 255, 20, 0.55);
 }
 .brand .diamond { color: var(--lime); animation: flicker 3s infinite; }
 @keyframes flicker { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
@@ -102,24 +110,27 @@ body {
 #clock-wrap { text-align: center; }
 #clock {
   font-size: 22px;
-  letter-spacing: 2px;
-  text-shadow: 0 0 16px rgba(57, 255, 20, 0.5);
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--lime);
+  text-shadow: 0 0 6px rgba(57, 255, 20, 0.5);
 }
-#clock .sec { font-size: 14px; opacity: 0.55; }
-#clock .ampm { font-size: 13px; opacity: 0.75; margin-left: 4px; }
+#clock .sec { font-size: 14px; opacity: 0.8; }
+#clock .ampm { font-size: 13px; opacity: 0.95; margin-left: 4px; }
 #topdate {
   margin-top: 2px;
-  font-size: 10px;
-  letter-spacing: 2px;
-  color: var(--lime-70);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-dim);
   text-transform: uppercase;
 }
 
 .status-chips { display: flex; gap: 8px; }
 .chip {
   display: flex; align-items: center; gap: 6px;
-  font-size: 9px; letter-spacing: 1.5px;
-  color: var(--lime-90);
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px;
+  color: var(--lime);
   padding: 5px 10px;
   border: 1px solid var(--lime-40);
   border-radius: 3px;
@@ -138,21 +149,23 @@ body {
 #main {
   flex: 1;
   display: grid;
-  grid-template-columns: 220px 1fr 220px;
+  /* wider side columns so event/task names aren't truncated at readable sizes */
+  grid-template-columns: 265px 1fr 265px;
   gap: 10px;
   min-height: 0;
 }
 
 .section-header {
-  font-size: 11px;
-  letter-spacing: 3px;
+  font-size: 13px;
+  letter-spacing: 1.5px;
   color: var(--lime);
-  font-weight: bold;
+  font-weight: 700;
   text-transform: uppercase;
   padding-bottom: 8px;
   margin-bottom: 12px;
   border-bottom: 1px solid var(--lime-40);
-  text-shadow: 0 0 10px rgba(57, 255, 20, 0.55);
+  /* tight, low-spread glow: reads as crisp neon, not blur */
+  text-shadow: 0 0 4px rgba(57, 255, 20, 0.5);
 }
 .section-header::before { content: '['; margin-right: 5px; color: var(--lime-90); }
 .section-header::after { content: ' ]'; color: var(--lime-90); }
@@ -167,7 +180,7 @@ body {
 /* clean divider between TODAY and UPCOMING sections */
 #left > div + div { padding-top: 16px; border-top: var(--divider); }
 .event {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: flex-start; gap: 10px;
   padding: 8px 10px;
   margin-bottom: 6px;
   border-left: 2px solid var(--lime-60);
@@ -176,22 +189,26 @@ body {
 }
 .event:hover { background: rgba(57, 255, 20, 0.11); border-left-color: var(--lime); }
 .event.next { border: 1px solid var(--lime); border-left-width: 3px; box-shadow: 0 0 12px rgba(57,255,20,0.25); }
-.event-time { font-size: 11px; color: var(--lime); width: 62px; flex: none; }
+.event-time { font-size: 12px; font-weight: 700; color: var(--lime); width: 66px; flex: none; }
+/* wrap instead of truncating the name to "Inv…"; 3 lines leaves room for
+   longer titles even when the NEXT badge is taking inline width */
 .event-name {
-  font-size: 12px; color: var(--lime-90); flex: 1;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 13px; font-weight: 500; color: var(--text); flex: 1;
+  line-height: 1.4; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
 }
 .next-badge {
-  font-size: 8px; letter-spacing: 1px; color: #001400;
-  background: var(--lime); padding: 2px 6px; border-radius: 2px;
-  box-shadow: 0 0 10px var(--lime); flex: none; font-weight: bold;
+  font-size: 9px; letter-spacing: 0.5px; color: #001400;
+  background: var(--lime); padding: 3px 6px; border-radius: 2px;
+  box-shadow: 0 0 10px var(--lime); flex: none; font-weight: 700;
 }
-.day-label { font-size: 10px; color: var(--lime-60); width: 30px; flex: none; text-align: center; }
+.day-label { font-size: 11px; font-weight: 700; color: var(--lime); width: 32px; flex: none; text-align: center; }
 .empty-state {
-  font-size: 11px; color: var(--lime-60); letter-spacing: 2px;
+  font-size: 12px; color: var(--text-dim); letter-spacing: 1px;
   text-align: center; padding: 18px 0; text-transform: uppercase;
 }
-.loading { font-size: 10px; color: var(--lime-60); letter-spacing: 2px; text-transform: uppercase; }
+.loading { font-size: 12px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; }
 
 /* ---------- Center panel ---------- */
 #center { display: flex; flex-direction: column; min-height: 0; padding: 18px; }
@@ -228,9 +245,9 @@ body {
 }
 #orb-state {
   margin-top: 6px;
-  font-size: 11px; letter-spacing: 3px; color: var(--lime-90);
+  font-size: 12px; font-weight: 700; letter-spacing: 2px; color: var(--lime);
   text-transform: uppercase; transition: color 300ms ease;
-  text-shadow: 0 0 8px rgba(57,255,20,0.4);
+  text-shadow: 0 0 4px rgba(57,255,20,0.5);
 }
 #orb-state.listening { color: var(--lime); text-shadow: 0 0 10px var(--lime); }
 #orb-state.speaking { color: var(--lime); text-shadow: 0 0 14px var(--lime); }
@@ -265,27 +282,32 @@ body {
 }
 .msg {
   max-width: 84%;
-  font-size: 14px; line-height: 1.55;
-  padding: 10px 13px; border-radius: 6px;
+  font-size: 15px; line-height: 1.6; font-weight: 500;
+  letter-spacing: 0.2px;
+  padding: 11px 14px; border-radius: 6px;
   word-wrap: break-word; white-space: pre-wrap;
 }
 .msg.ace {
   align-self: flex-start;
-  color: var(--lime);
-  background: rgba(57, 255, 20, 0.1);
+  color: var(--text);
+  background: rgba(6, 18, 6, 0.9);
   border: 1px solid var(--lime-40);
   border-left: 3px solid var(--lime);
 }
 .msg.user {
   align-self: flex-end;
   text-align: left;
-  color: var(--lime-90);
-  background: rgba(0, 46, 0, 0.82);
+  color: var(--text);
+  background: rgba(14, 30, 12, 0.92);
   border: 1px solid var(--lime-40);
   border-right: 3px solid var(--lime-60);
 }
-.msg .sender { font-size: 9px; letter-spacing: 2px; color: var(--lime); font-weight: bold; margin-bottom: 4px; text-shadow: 0 0 8px rgba(57,255,20,0.5); }
-.msg .ts { font-size: 8px; color: var(--lime-60); margin-top: 5px; letter-spacing: 1px; }
+.msg .sender {
+  font-size: 11px; letter-spacing: 1.5px; color: var(--lime);
+  font-weight: 700; margin-bottom: 5px;
+  text-shadow: 0 0 4px rgba(57,255,20,0.5);
+}
+.msg .ts { font-size: 10px; color: var(--text-dim); margin-top: 6px; letter-spacing: 0.5px; }
 .msg .confirm { color: var(--lime); font-size: 12px; }
 .msg .cursor { display: inline-block; width: 7px; background: var(--lime); animation: blink 1s step-end infinite; margin-left: 1px; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -303,11 +325,11 @@ body {
 #quick { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
 .qa {
   font-family: var(--mono);
-  font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
-  color: var(--lime-90);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;
+  color: var(--lime);
   background: rgba(57, 255, 20, 0.06);
   border: 1px solid var(--lime-40);
-  padding: 6px 14px; border-radius: 999px; cursor: pointer;
+  padding: 7px 15px; border-radius: 999px; cursor: pointer;
   transition: all 160ms ease;
 }
 .qa:hover {
@@ -329,9 +351,10 @@ body {
 #input-bar:focus-within { border-color: var(--lime); box-shadow: 0 0 14px rgba(57,255,20,0.25); }
 #chat-input {
   flex: 1; background: transparent; border: none; outline: none;
-  color: var(--lime); font-family: var(--mono); font-size: 14px; padding: 6px;
+  color: var(--text); font-family: var(--mono); font-size: 15px;
+  font-weight: 500; padding: 6px;
 }
-#chat-input::placeholder { color: var(--lime-60); }
+#chat-input::placeholder { color: var(--text-dim); }
 .icon-btn {
   width: 38px; height: 38px; flex: none;
   display: flex; align-items: center; justify-content: center;
@@ -347,27 +370,30 @@ body {
 
 /* ---------- Right panel: intel + tasks ---------- */
 #right { display: flex; flex-direction: column; gap: 16px; overflow-y: auto; min-height: 0; }
-#intel-list { display: flex; flex-direction: column; gap: 6px; max-height: 42%; overflow-y: auto; }
+/* Fixed px cap, not a %: the parent is auto-height, so a percentage max-height
+   collapsed this box and clipped intel items mid-sentence. */
+#intel-list { display: flex; flex-direction: column; gap: 6px; max-height: 230px; overflow-y: auto; flex: 0 1 auto; }
 .intel-item {
-  font-size: 11px; line-height: 1.4; color: var(--lime-90);
-  padding: 7px 9px; border-left: 2px solid var(--lime-60);
-  background: rgba(57, 255, 20, 0.05);
+  font-size: 12.5px; line-height: 1.5; font-weight: 500; color: var(--text);
+  padding: 8px 10px; border-left: 2px solid var(--lime);
+  background: rgba(6, 18, 6, 0.85);
 }
-.intel-item .it-ts { display: block; font-size: 8px; color: var(--lime-60); margin-bottom: 3px; letter-spacing: 1px; }
+.intel-item .it-ts { display: block; font-size: 10px; font-weight: 700; color: var(--lime); margin-bottom: 4px; letter-spacing: 0.5px; }
 #tasks-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #tasks-list { overflow-y: auto; }
 .task {
-  display: flex; align-items: flex-start; gap: 8px;
-  padding: 6px 4px; font-size: 11px; color: var(--lime-90);
-  border-bottom: 1px solid var(--lime-15);
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 8px 4px; font-size: 12.5px; line-height: 1.45;
+  font-weight: 500; color: var(--text);
+  border-bottom: 1px solid var(--lime-20);
 }
 .task .box {
-  width: 12px; height: 12px; flex: none; margin-top: 1px;
-  border: 1px solid var(--lime-60); border-radius: 2px;
+  width: 13px; height: 13px; flex: none; margin-top: 2px;
+  border: 1px solid var(--lime); border-radius: 2px;
 }
 .task .t-body { flex: 1; }
-.task .t-list { display: block; font-size: 8px; color: var(--lime-60); letter-spacing: 1px; margin-top: 2px; }
-.task .t-due { color: var(--lime); font-size: 9px; }
+.task .t-list { display: block; font-size: 10px; color: var(--text-dim); letter-spacing: 0.5px; margin-top: 3px; }
+.task .t-due { color: var(--lime); font-size: 10px; font-weight: 700; }
 
 /* ---------- Bottom status bar ---------- */
 #bottombar {
@@ -380,7 +406,7 @@ body {
   box-shadow: var(--panel-glow);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  font-size: 10px; letter-spacing: 1.5px; color: var(--lime-90);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--lime);
   text-transform: uppercase;
 }
 #bottombar .grp { display: flex; align-items: center; gap: 14px; }
@@ -388,7 +414,7 @@ body {
 .svc .d { width: 6px; height: 6px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 8px var(--lime); }
 .svc.off { color: var(--lime-40); }
 .svc.off .d { background: var(--lime-40); box-shadow: none; }
-#bb-version { color: var(--lime); text-shadow: 0 0 8px rgba(57,255,20,0.4); }
+#bb-version { color: var(--lime); text-shadow: 0 0 4px rgba(57,255,20,0.45); }
 
 /* ---------- Login overlay ---------- */
 #login {
@@ -436,8 +462,8 @@ body {
 }
 #modal .m-close { cursor: pointer; color: var(--lime-70); }
 #modal .m-item {
-  font-size: 12px; line-height: 1.5; color: var(--lime-70);
-  padding: 7px 0; border-bottom: 1px solid rgba(57,255,20,0.08);
+  font-size: 13px; line-height: 1.55; font-weight: 500; color: var(--text);
+  padding: 8px 0; border-bottom: 1px solid var(--lime-20);
 }
 #modal .m-item::before { content: '▸ '; color: var(--lime); }
 
