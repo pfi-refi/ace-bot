@@ -1,6 +1,6 @@
 /* ============================================================
    ACE PORTAL — frontend controller
-   Matrix rain · particle orb · streaming chat · voice · panels
+   Matrix rain · holographic space orb · streaming chat · voice · panels
    ============================================================ */
 (function () {
   'use strict';
@@ -51,7 +51,10 @@
   })();
 
   /* ============================================================
-     PARTICLE ORB (neural network swarm) — per spec config
+     HOLOGRAPHIC SPACE ORB
+     A glowing 3D-projection sphere: starfield, radial core, tilted
+     orbital rings with satellites, holographic scanlines, and data
+     pulses. States: IDLE / LISTENING / SPEAKING drive speed & glow.
      ============================================================ */
   var orb = (function () {
     var canvas = $('orb-canvas');
@@ -59,81 +62,173 @@
     var W = canvas.width, H = canvas.height;
     var cx = W / 2, cy = H / 2;
 
-    var NUM_PARTICLES = 150;
-    var MAX_DIST = 60;
-    // Spring/jitter tuned so the swarm fills the orb as a neural network rather
-    // than collapsing to a point (the spec's literal constants over-damp).
-    var SPRING_K = 0.0035;
-    var ORB_RADIUS = 110;
-    var JITTER_IDLE = 2.0;
-    var JITTER_ACTIVE = 3.0;
+    var SPHERE_R = 84;             // core sphere radius
+    var CLIP_R = 118;              // keep every layer inside the orb boundary
+    var glowEl = $('orb-glow');
+    var stateName = 'idle';
 
-    var damping = 0.90;            // eased toward a target per state
-    var dampingTarget = 0.90;
-    var particles = [];
-    for (var i = 0; i < NUM_PARTICLES; i++) {
-      var a = Math.random() * Math.PI * 2;
-      var r = Math.random() * ORB_RADIUS;
-      particles.push({
-        x: Math.cos(a) * r, y: Math.sin(a) * r,
-        vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2,
-        size: 1.2 + Math.random() * 1.8,
+    // Eased per-state parameters (targets on the right, current on the left).
+    var speed = 1, speedTarget = 1;         // ring / satellite speed multiplier
+    var core = 0, coreTarget = 0;           // extra brightness on the core
+    var rim = 0, rimTarget = 0;             // extra brightness on the rim
+    var pulseInterval = 3.0;                // seconds between data pulses
+    var lastPulse = 0;
+
+    // ---- Layer 1: starfield (pale green-white drifting stars) ----
+    var STARS = 60, stars = [];
+    for (var i = 0; i < STARS; i++) {
+      var sa = Math.random() * Math.PI * 2;
+      var sr = Math.random() * CLIP_R;
+      stars.push({
+        x: Math.cos(sa) * sr, y: Math.sin(sa) * sr,
+        vx: (Math.random() - 0.5) * 0.12, vy: (Math.random() - 0.5) * 0.12,
+        size: 0.5 + Math.random() * 1.3,
+        tw: Math.random() * Math.PI * 2,          // twinkle phase
+        tws: 0.6 + Math.random() * 1.4,           // twinkle speed
       });
     }
 
-    var stateName = 'idle';
-    var glowEl = $('orb-glow');
+    // ---- Layer 3: three tilted orbital rings ----
+    // tilt = fixed ellipse orientation; spin = satellite orbit rate.
+    var rings = [
+      { rx: 100, ryf: 0.30, tilt: 0,               period: 5, dir:  1, orient: 0.05, sats: 3 },
+      { rx: 94,  ryf: 0.34, tilt: Math.PI / 3,      period: 7, dir: -1, orient: 0.04, sats: 2 },
+      { rx: 108, ryf: 0.26, tilt: 2 * Math.PI / 3,  period: 9, dir:  1, orient: 0.03, sats: 2 },
+    ];
+
+    // ---- Layer 5: expanding data pulses ----
+    var pulses = [];   // { r, alpha }
 
     function setState(s) {
       stateName = s;
-      if (s === 'speaking') { dampingTarget = 0.93; glowEl.style.opacity = '1'; glowEl.style.transform = 'scale(1.1)'; }
-      else if (s === 'listening') { dampingTarget = 0.92; glowEl.style.opacity = '0.85'; glowEl.style.transform = 'scale(1.05)'; }
-      else { dampingTarget = 0.90; glowEl.style.opacity = '0.65'; glowEl.style.transform = 'scale(1)'; }
+      if (s === 'speaking') {
+        speedTarget = 2.6; coreTarget = 1; rimTarget = 1; pulseInterval = 0.7;
+        glowEl.style.opacity = '1';    glowEl.style.transform = 'scale(1.12)';
+      } else if (s === 'listening') {
+        speedTarget = 2.0; coreTarget = 0.6; rimTarget = 0.7; pulseInterval = 1.0;
+        glowEl.style.opacity = '0.9';  glowEl.style.transform = 'scale(1.06)';
+      } else {
+        speedTarget = 1.0; coreTarget = 0; rimTarget = 0; pulseInterval = 3.0;
+        glowEl.style.opacity = '0.65'; glowEl.style.transform = 'scale(1)';
+      }
     }
 
-    function frame() {
-      damping += (dampingTarget - damping) * 0.05;
-      ctx.clearRect(0, 0, W, H);
-      var jitter = stateName === 'idle' ? JITTER_IDLE : JITTER_ACTIVE;
+    function drawSphere() {
+      // radial gradient core
+      var g = ctx.createRadialGradient(cx, cy, 2, cx, cy, SPHERE_R);
+      g.addColorStop(0,   'rgba(57, 255, 20, ' + (0.15 + core * 0.25).toFixed(3) + ')');
+      g.addColorStop(0.6, 'rgba(57, 255, 20, ' + (0.08 + core * 0.14).toFixed(3) + ')');
+      g.addColorStop(1,   'rgba(0, 255, 150, ' + (0.25 + core * 0.15).toFixed(3) + ')');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, cy, SPHERE_R, 0, Math.PI * 2);
+      ctx.fill();
+      // glowing rim
+      ctx.save();
+      ctx.shadowColor = 'rgba(57, 255, 20, 0.9)';
+      ctx.shadowBlur = 12 + rim * 14;
+      ctx.strokeStyle = 'rgba(57, 255, 20, ' + (0.6 + rim * 0.4).toFixed(3) + ')';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, SPHERE_R, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
-      for (var i = 0; i < particles.length; i++) {
-        var p = particles[i];
-        var fx = -SPRING_K * p.x, fy = -SPRING_K * p.y;
-        p.vx += fx; p.vy += fy;
-        p.vx *= damping; p.vy *= damping;
-        p.vx += (Math.random() - 0.5) * jitter;
-        p.vy += (Math.random() - 0.5) * jitter;
-        var dist = Math.sqrt(p.x * p.x + p.y * p.y);
-        if (dist > ORB_RADIUS) {
-          var push = (dist - ORB_RADIUS) * 0.05;
-          p.vx -= (p.x / dist) * push; p.vy -= (p.y / dist) * push;
-        }
-        p.x += p.vx; p.y += p.vy;
-      }
-
-      // connection lines
-      ctx.lineWidth = 1;
-      for (var a2 = 0; a2 < particles.length; a2++) {
-        for (var b = a2 + 1; b < particles.length; b++) {
-          var dx = particles[a2].x - particles[b].x;
-          var dy = particles[a2].y - particles[b].y;
-          var d = Math.sqrt(dx * dx + dy * dy);
-          if (d < MAX_DIST) {
-            ctx.strokeStyle = 'rgba(57,255,20,' + ((1 - d / MAX_DIST) * 0.35).toFixed(3) + ')';
-            ctx.beginPath();
-            ctx.moveTo(cx + particles[a2].x, cy + particles[a2].y);
-            ctx.lineTo(cx + particles[b].x, cy + particles[b].y);
-            ctx.stroke();
-          }
-        }
-      }
-      // dots
-      ctx.fillStyle = 'rgba(57,255,20,0.8)';
-      for (var k = 0; k < particles.length; k++) {
+    function drawStars(time) {
+      for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        s.x += s.vx; s.y += s.vy;
+        var d = Math.sqrt(s.x * s.x + s.y * s.y);
+        if (d > CLIP_R) { s.vx = -s.vx; s.vy = -s.vy; s.x += s.vx * 2; s.y += s.vy * 2; }
+        var tw = 0.35 + 0.4 * (0.5 + 0.5 * Math.sin(time * s.tws + s.tw));
+        ctx.fillStyle = 'rgba(200, 255, 220, ' + tw.toFixed(3) + ')';
         ctx.beginPath();
-        ctx.arc(cx + particles[k].x, cy + particles[k].y, particles[k].size, 0, Math.PI * 2);
+        ctx.arc(cx + s.x, cy + s.y, s.size, 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+
+    function drawRings(time) {
+      for (var i = 0; i < rings.length; i++) {
+        var r = rings[i];
+        var orient = r.tilt + time * r.orient * r.dir * speed;
+        var spin = time * (Math.PI * 2 / r.period) * r.dir * speed;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(orient);
+        // the ring
+        ctx.strokeStyle = 'rgba(57, 255, 20, ' + (0.35 + rim * 0.2).toFixed(3) + ')';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, r.rx, r.rx * r.ryf, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        // satellites travelling along it
+        ctx.save();
+        ctx.shadowColor = 'rgba(57, 255, 20, 0.9)';
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = 'rgba(160, 255, 140, 0.95)';
+        for (var k = 0; k < r.sats; k++) {
+          var a = spin + (k / r.sats) * Math.PI * 2;
+          var sx = Math.cos(a) * r.rx;
+          var sy = Math.sin(a) * r.rx * r.ryf;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 2.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+        ctx.restore();
+      }
+    }
+
+    function drawScanlines(time) {
+      var offset = (time * 14) % 4;
+      ctx.strokeStyle = 'rgba(57, 255, 20, 0.03)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (var y = offset; y < H; y += 4) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+      }
+      ctx.stroke();
+    }
+
+    function drawPulses(time, dt) {
+      if (time - lastPulse >= pulseInterval) {
+        lastPulse = time;
+        pulses.push({ r: SPHERE_R * 0.5, alpha: 0.4 });
+      }
+      for (var i = pulses.length - 1; i >= 0; i--) {
+        var p = pulses[i];
+        p.r += 42 * dt;
+        p.alpha = 0.4 * (1 - (p.r - SPHERE_R * 0.5) / (CLIP_R - SPHERE_R * 0.5));
+        if (p.alpha <= 0.01 || p.r >= CLIP_R) { pulses.splice(i, 1); continue; }
+        ctx.strokeStyle = 'rgba(57, 255, 20, ' + p.alpha.toFixed(3) + ')';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(cx, cy, p.r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    var last = (typeof performance !== 'undefined' ? performance.now() : 0);
+    function frame(now) {
+      var t = now / 1000;
+      var dt = Math.min(0.05, (now - last) / 1000) || 0.016;
+      last = now;
+
+      // ease state params
+      speed += (speedTarget - speed) * 0.05;
+      core  += (coreTarget  - core)  * 0.06;
+      rim   += (rimTarget   - rim)   * 0.06;
+
+      ctx.clearRect(0, 0, W, H);
+      drawStars(t);        // Layer 1
+      drawSphere();        // Layer 2
+      drawRings(t);        // Layer 3
+      drawScanlines(t);    // Layer 4
+      drawPulses(t, dt);   // Layer 5
+
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
