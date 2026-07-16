@@ -559,7 +559,10 @@ def _merge_memories(new_items: list, existing: list) -> list:
 # ── Conversation History (Google Drive) ───────────────────────────────────────
 
 def read_conversation_history() -> list:
-    """Load last 80 exchanges from ace_conversation.json on Drive. Returns [] if unavailable."""
+    """Load conversation history from ace_conversation.json on Drive. Returns [] if unavailable.
+
+    Returns whatever the file holds — the read caps nothing; only the write trims.
+    """
     try:
         creds = get_google_creds()
         service = build("drive", "v3", credentials=creds)

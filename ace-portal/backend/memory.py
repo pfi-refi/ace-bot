@@ -122,7 +122,10 @@ def merge_memories(new_items: list, existing: list) -> list:
 
 # ── Conversation History (Google Drive) — shared with Telegram bot ───────────────
 def read_conversation_history() -> list:
-    """Load last 40 exchanges from ace_conversation.json on Drive. [] if unavailable."""
+    """Load conversation history from ace_conversation.json on Drive. [] if unavailable.
+
+    Returns whatever the file holds — the read caps nothing; only the write trims.
+    """
     try:
         creds = get_google_creds()
         service = build("drive", "v3", credentials=creds)
@@ -144,14 +147,19 @@ def read_conversation_history() -> list:
 
 
 def write_conversation_history(messages: list) -> bool:
-    """Save conversation history to ace_conversation.json on Drive (max 80 msgs).
+    """Save conversation history to ace_conversation.json on Drive (max 160 msgs).
 
-    Update-in-place only; never deletes the file. Trims to the last 80 messages
-    (40 exchanges) to match the Telegram bot so both interfaces stay in sync.
+    Update-in-place only; never deletes the file. Trims to the last 160 messages
+    (80 exchanges) to match the Telegram bot's own cap in bot.py.
+
+    The cap MUST stay >= the bot's. This file is shared, and whichever process
+    writes last imposes its cap on the other. This trimmed to 80 while the bot
+    kept 160, so every portal turn silently destroyed the oldest half of the
+    bot's history. Do not lower it.
     """
     try:
-        if len(messages) > 80:
-            messages = messages[-80:]
+        if len(messages) > 160:
+            messages = messages[-160:]
         creds = get_google_creds()
         service = build("drive", "v3", credentials=creds)
         payload = json.dumps({"messages": messages}, indent=2).encode()
