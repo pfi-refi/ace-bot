@@ -16,6 +16,7 @@ All secrets stay server-side. Business data is read live from Ace's memory —
 nothing about PFI is hardcoded here.
 """
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -39,6 +40,7 @@ from pydantic import BaseModel
 from .ace_chat import stream_reply
 from .calendar_api import get_events_structured
 from .memory import merge_memories, read_memory, write_memory
+from .revisions import get_revision, list_revisions
 from .tasks_api import get_tasks_structured
 from .weather import get_weather
 
@@ -168,6 +170,20 @@ async def memory_post(req: MemoryReq):
 @app.get("/weather", dependencies=[Depends(require_auth)])
 async def weather():
     return await get_weather()
+
+
+# ── TEMPORARY: conversation-history recovery (read-only) ─────────────────────────
+# Inspects Drive revision history of ace_conversation.json to recover messages
+# lost to the 80-vs-160 trim bug. Read-only — no restore path. Remove once
+# recovery is done or written off. See backend/revisions.py.
+@app.get("/admin/revisions", dependencies=[Depends(require_auth)])
+async def admin_revisions():
+    return await asyncio.to_thread(list_revisions)
+
+
+@app.get("/admin/revisions/{revision_id}", dependencies=[Depends(require_auth)])
+async def admin_revision(revision_id: str):
+    return await asyncio.to_thread(get_revision, revision_id)
 
 
 @app.post("/chat", dependencies=[Depends(require_auth)])
