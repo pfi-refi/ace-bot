@@ -160,6 +160,44 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    # ── UI tools — executed by the harness (chat.py), not here. These are what
+    # make Ace an assistant instead of a dashboard: HE decides what appears. ──
+    {
+        "name": "display_card",
+        "description": (
+            "Materialize a visual card on Brady's screen. Use whenever you talk about "
+            "his schedule, tasks, weather, or memory — and after any action that "
+            "changes them — so he sees the data, not just hears it. The screen is "
+            "yours to populate; there are no menus."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "panel": {
+                    "type": "string",
+                    "enum": ["calendar", "tasks", "weather", "memory"],
+                    "description": "Which card to display",
+                },
+            },
+            "required": ["panel"],
+        },
+    },
+    {
+        "name": "open_url",
+        "description": (
+            "Open a link on Brady's screen (a Drive file, doc, or site). Use when he "
+            "asks to open, show, or pull up something that lives at a URL — e.g. right "
+            "after search_drive returns a file link."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to open"},
+                "label": {"type": "string", "description": "Short human label for the link"},
+            },
+            "required": ["url"],
+        },
+    },
     {
         "name": "save_memory",
         "description": (
@@ -189,7 +227,12 @@ TOOL_LABELS = {
     "draft_email": "DRAFTING EMAIL",
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
+    "display_card": "PROJECTING",
+    "open_url": "OPENING",
 }
+
+# Tools the harness (chat.py) executes itself — they touch the UI, not Google.
+UI_TOOLS = {"display_card", "open_url"}
 
 
 def _parse_iso(dt_str: str):

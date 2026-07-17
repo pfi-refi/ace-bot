@@ -72,8 +72,22 @@ def _password() -> str:
     return os.environ.get("ACE2_PASSWORD", "").strip()
 
 
+def _allow_open() -> bool:
+    # Local-dev escape hatch ONLY. Never set on Railway.
+    return os.environ.get("ACE2_ALLOW_OPEN", "").strip() == "1"
+
+
+def locked() -> bool:
+    """No password configured -> the service is LOCKED, not open.
+
+    Ace can send email and edit the calendar; an unset env var must never mean
+    'public'. Brady unlocks by setting ACE2_PASSWORD in Railway.
+    """
+    return not _password() and not _allow_open()
+
+
 def auth_enabled() -> bool:
-    return bool(_password())
+    return bool(_password()) or locked()
 
 
 def _secret() -> bytes:
@@ -97,6 +111,8 @@ def issue_token() -> str:
 
 
 def token_valid(token: str) -> bool:
+    if locked():
+        return False
     if not auth_enabled():
         return True
     if not token or "." not in token:
@@ -134,11 +150,14 @@ async def health():
         "version": VERSION,
         "uptime_seconds": int(time.time() - START_TIME),
         "auth_required": auth_enabled(),
+        "locked": locked(),
     }
 
 
 @app.post("/auth")
 async def auth(req: AuthReq):
+    if locked():
+        raise HTTPException(status_code=503, detail="Locked — set ACE2_PASSWORD in Railway to unlock")
     if not auth_enabled():
         return {"ok": True, "token": "", "auth_required": False}
     if not hmac.compare_digest((req.password or "").strip(), _password()):
@@ -313,7 +332,9 @@ async def history_view(months: int = 3):
 def _llm_authorized(authorization: str) -> bool:
     want = os.environ.get("ACE2_LLM_KEY", "").strip()
     if not want:
-        return True  # unset → open (dev only; set it before pointing ElevenLabs here)
+        # Unset -> LOCKED (this endpoint drives Ace's real tools, incl. email).
+        # Local dev can opt out with ACE2_ALLOW_OPEN=1.
+        return _allow_open()
     token = authorization[7:] if authorization.startswith("Bearer ") else authorization
     return hmac.compare_digest(token.strip(), want)
 

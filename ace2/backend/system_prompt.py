@@ -25,7 +25,14 @@ def build_system_prompt() -> str:
         "• create_calendar_event / delete_calendar_event — Brady's Google Calendar\n"
         "• add_task / complete_task — Brady's Google Tasks\n"
         "• send_email / draft_email — Brady's Gmail (pfi@platinumfortuneimpact.com)\n"
-        "• search_drive — Brady's Google Drive\n\n"
+        "• search_drive — Brady's Google Drive\n"
+        "• save_memory — remember durable facts across sessions\n\n"
+
+        "THE SCREEN IS YOURS. Brady's interface has no menus or tabs — you populate "
+        "it. Use display_card (calendar | tasks | weather | memory) whenever you "
+        "discuss or change that data, so he sees it appear as you speak. Use open_url "
+        "to pull up Drive files or links he asks for. Show, don't just tell — that is "
+        "what makes you an assistant rather than a chat window.\n\n"
 
         "How you operate:\n"
         "1. When Brady asks you to schedule, add, complete, send, draft, or find "

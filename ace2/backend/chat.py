@@ -35,8 +35,13 @@ import pytz
 from anthropic import AsyncAnthropic
 
 from . import brain, history, tools
-from .integrations.calendar_api import get_calendar_events, get_tomorrow_events
-from .integrations.tasks_api import get_tasks
+from .integrations.calendar_api import (
+    get_calendar_events,
+    get_events_structured,
+    get_tomorrow_events,
+)
+from .integrations.tasks_api import get_tasks, get_tasks_structured
+from .integrations.weather import get_weather
 from .system_prompt import build_system_prompt
 
 logger = logging.getLogger("ace2.chat")
@@ -107,6 +112,40 @@ async def _load_messages(user_text: str, prior=None) -> list:
     return msgs
 
 
+async def _card_payload(panel: str):
+    """Structured data for a display_card call. Concurrent, graceful."""
+    if panel == "calendar":
+        return {"events": await asyncio.to_thread(get_events_structured, 7)}
+    if panel == "tasks":
+        return {"tasks": await asyncio.to_thread(get_tasks_structured)}
+    if panel == "weather":
+        return await get_weather()
+    if panel == "memory":
+        return {"memories": await asyncio.to_thread(brain.read_memory)}
+    return {}
+
+
+async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
+    """Execute a UI tool: the 'action' is an event the frontend materializes."""
+    if name == "display_card":
+        panel = (tool_input.get("panel") or "").strip().lower()
+        try:
+            data = await _card_payload(panel)
+            await emit("card", {"panel": panel, "data": data})
+            return f"Displayed the {panel} card on screen."
+        except Exception as e:
+            logger.error("display_card(%s): %s", panel, e)
+            return f"⚠️ Could not display {panel}: {e}"
+    if name == "open_url":
+        url = (tool_input.get("url") or "").strip()
+        label = (tool_input.get("label") or url).strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return "⚠️ open_url needs an http(s) URL."
+        await emit("open", {"url": url, "label": label})
+        return f"Opened on screen: {label}"
+    return f"⚠️ Unknown UI tool: {name}"
+
+
 async def stream_turn(user_text: str, emit, prior=None):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
@@ -161,10 +200,14 @@ async def stream_turn(user_text: str, emit, prior=None):
                     continue
                 label = tools.TOOL_LABELS.get(block.name, block.name.upper())
                 await emit("tool", {"name": block.name, "label": label, "status": "running"})
-                result = await asyncio.to_thread(tools.execute, block.name, dict(block.input))
+                if block.name in tools.UI_TOOLS:
+                    result = await _run_ui_tool(block.name, dict(block.input), emit)
+                else:
+                    result = await asyncio.to_thread(tools.execute, block.name, dict(block.input))
                 await emit("tool", {"name": block.name, "label": label, "status": "done"})
-                await emit("confirmation", {"text": result})
-                confirmations.append(result)
+                if block.name not in tools.UI_TOOLS:
+                    await emit("confirmation", {"text": result})
+                    confirmations.append(result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
