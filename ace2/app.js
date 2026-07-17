@@ -11,7 +11,7 @@
     token: localStorage.getItem('ace2_token') || '',
     authRequired: true,
     ws: null, wsReady: false, busy: false,
-    micActive: false, recognition: null,
+    micActive: false, recognition: null, handsFree: false,
     voiceOut: localStorage.getItem('ace2_voice') !== 'off',
     reconnectDelay: 1000,
   };
@@ -257,7 +257,7 @@
       case 'final': if (streamMsg) finalizeStream(streamMsg, msg.text); break;
       case 'error': removeTyping(); discardEmptyStream(); addAceMessage(msg.text); break;
       case 'done': discardEmptyStream(); streamMsg = null; activeTool = null; state.busy = false;
-        if (!ttsPlaying) setOrbState(state.micActive ? 'listening' : 'idle'); break;
+        if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
     }
   }
 
@@ -379,25 +379,46 @@
   /* ============================================================ STATUS */
   function setLink(on) { $('link-dot').classList.toggle('off', !on); }
 
-  /* ============================================================ VOICE */
+  /* ============================================================ VOICE
+     Hands-free conversation: one click on the mic opens the loop — Ace
+     listens, you speak (auto-sends), he answers aloud, the mic reopens.
+     Recognition pauses while his voice plays so he doesn't hear himself.
+     Click the mic again to close the loop. */
   var audioCtx = null, ttsAudio = null, ttsQueue = [], ttsPlaying = false;
   function setupRecognition() {
     var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
     var rec = new SR(); rec.continuous = false; rec.interimResults = false; rec.lang = 'en-US';
-    rec.onresult = function (e) { var tr = e.results[0][0].transcript; $('chat-input').value = tr; stopMic(); sendMessage(tr); };
-    rec.onend = function () { if (state.micActive) stopMic(); };
-    rec.onerror = function () { stopMic(); };
+    rec.onresult = function (e) {
+      var tr = e.results[0][0].transcript; $('chat-input').value = '';
+      if (!state.handsFree) stopMic();
+      sendMessage(tr);
+    };
+    rec.onend = function () {
+      // In hands-free, keep listening unless Ace is thinking or speaking —
+      // those paths resume the mic themselves when they finish.
+      if (state.handsFree && state.micActive && !state.busy && !ttsPlaying) {
+        setTimeout(function () { try { rec.start(); } catch (e) {} }, 250);
+      } else if (!state.handsFree && state.micActive) { stopMic(); }
+    };
+    rec.onerror = function (e) { if (!state.handsFree || e.error === 'not-allowed') stopMic(); };
     return rec;
   }
   function startMic() {
     if (!state.recognition) state.recognition = setupRecognition();
-    if (!state.recognition) { addAceMessage('Voice input is not supported in this browser.'); return; }
-    state.micActive = true; $('mic-btn').classList.add('active'); setOrbState('listening');
+    if (!state.recognition) { addAceMessage('Voice input is not supported in this browser.'); state.handsFree = false; return; }
+    state.micActive = true; $('mic-btn').classList.add('active');
+    if (!ttsPlaying) setOrbState('listening');
     try { state.recognition.start(); } catch (e) {}
   }
   function stopMic() { state.micActive = false; $('mic-btn').classList.remove('active'); if (!state.busy && !ttsPlaying) setOrbState('idle'); try { state.recognition && state.recognition.stop(); } catch (e) {} }
-  $('mic-btn').addEventListener('click', function () { state.micActive ? stopMic() : startMic(); });
+  function maybeResumeMic() {
+    if (state.handsFree && !state.busy && !ttsPlaying && document.visibilityState === 'visible') startMic();
+  }
+  $('mic-btn').addEventListener('click', function () {
+    if (state.handsFree || state.micActive) { state.handsFree = false; stopMic(); }
+    else { state.handsFree = true; startMic(); }
+  });
 
   $('voice-toggle').addEventListener('click', function () {
     state.voiceOut = !state.voiceOut; localStorage.setItem('ace2_voice', state.voiceOut ? 'on' : 'off');
@@ -408,8 +429,15 @@
 
   function speak(text) { if (!state.voiceOut || !text) return; ttsQueue.push(text); if (!ttsPlaying) playNextTts(); }
   function playNextTts() {
-    if (!ttsQueue.length) { ttsPlaying = false; if (!state.busy) setOrbState(state.micActive ? 'listening' : 'idle'); return; }
+    if (!ttsQueue.length) {
+      ttsPlaying = false;
+      if (!state.busy) setOrbState(state.micActive ? 'listening' : 'idle');
+      maybeResumeMic();   // hands-free: his turn is over — open yours
+      return;
+    }
     ttsPlaying = true;
+    // Pause the ear while he speaks, so he doesn't transcribe himself.
+    try { state.recognition && state.recognition.stop(); } catch (e) {}
     var text = ttsQueue.shift();
     fetch(API + '/tts', { method: 'POST', headers: headers(), body: JSON.stringify({ text: text }) })
       .then(function (r) { if (!r.ok || r.status === 204) throw 'fallback'; return r.blob(); })

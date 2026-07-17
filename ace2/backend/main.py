@@ -49,7 +49,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import chat, history, voice
-from .brain import google_ready, read_memory, read_recovered_history, read_shared_conversation
+from .brain import (
+    google_ready,
+    read_memory,
+    read_recovered_history,
+    read_shared_conversation,
+    sanitize_for_api,
+)
 from .integrations.calendar_api import get_events_structured
 from .integrations.tasks_api import get_tasks_structured
 from .integrations.weather import get_weather
@@ -256,6 +262,11 @@ async def ws_chat(websocket: WebSocket):
     async def emit(event_type, payload):
         await websocket.send_json({"type": event_type, **payload})
 
+    # Per-connection conversation: seeded once from the shared Telegram window
+    # (read-only continuity), then grows with THIS session's turns — so Ace
+    # remembers the conversation he's actually in, turn to turn.
+    convo = None
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -263,8 +274,15 @@ async def ws_chat(websocket: WebSocket):
             if not text:
                 await emit("error", {"text": "Empty message"})
                 continue
+            if convo is None:
+                shared = await asyncio.to_thread(read_shared_conversation)
+                convo = sanitize_for_api(shared)
+            convo.append({"role": "user", "content": text})
             await emit("start", {})
-            await chat.stream_turn(text, emit)
+            reply = await chat.stream_turn(text, emit, prior=convo)
+            if reply:
+                convo.append({"role": "assistant", "content": reply})
+            del convo[:-160]   # cap the window
             await emit("done", {})
     except WebSocketDisconnect:
         logger.info("WS disconnected.")

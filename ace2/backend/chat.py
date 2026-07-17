@@ -149,12 +149,17 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
 async def stream_turn(user_text: str, emit, prior=None):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
-    prior: optional prior conversation (voice adapter passes ElevenLabs' messages).
+    prior: the conversation so far. The WS handler passes its per-connection
+    transcript (shared Telegram window + this session's turns) so Ace actually
+    remembers the conversation he's in; the voice adapter passes ElevenLabs'
+    messages. None = fall back to the shared window only (HTTP one-shots).
+
+    Returns the reply text so the caller can append it to its transcript.
     """
     user_text = (user_text or "").strip()
     if not user_text:
         await emit("error", {"text": "Empty message"})
-        return
+        return ""
 
     try:
         system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + await _live_context()
@@ -162,7 +167,7 @@ async def stream_turn(user_text: str, emit, prior=None):
     except Exception as e:
         logger.error("context build failed: %s", e)
         await emit("error", {"text": f"⚠️ Couldn't reach your data: {e}"})
-        return
+        return ""
 
     client = _anthropic()
     full_reply = []
@@ -230,6 +235,9 @@ async def stream_turn(user_text: str, emit, prior=None):
         except Exception as e:
             logger.warning("history persist skipped: %s", e)
 
+        return reply
+
     except Exception as e:
         logger.error("stream_turn error: %s", e)
         await emit("error", {"text": f"⚠️ {e}"})
+        return ""
