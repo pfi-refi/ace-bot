@@ -28,6 +28,10 @@ import os
 import re
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
+from typing import Optional  # NOT `bytes | None` — bot.py has no pinned Python
+                             # version, and PEP 604 unions in annotations raise
+                             # TypeError at import on <3.10. Keep this file
+                             # 3.9-compatible; it is the daily driver.
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -2492,7 +2496,7 @@ def _eleven_settings() -> dict:
         return dict(_ELEVEN_DEFAULT_SETTINGS)
 
 
-async def _elevenlabs_tts(text: str) -> bytes | None:
+async def _elevenlabs_tts(text: str) -> Optional[bytes]:
     """Render text with ElevenLabs. Returns opus bytes, or None to fall back.
 
     opus_48000_64 is requested because Telegram voice notes require OGG/Opus —
@@ -2533,7 +2537,7 @@ async def _elevenlabs_tts(text: str) -> bytes | None:
         return None
 
 
-def _openai_tts(text: str) -> bytes | None:
+def _openai_tts(text: str) -> Optional[bytes]:
     """Fallback voice: OpenAI gpt-4o-mini-tts onyx, with tts-1 as a second net.
 
     `instructions` is OpenAI-specific — it is what gave Ace its Jarvis tone before
