@@ -49,7 +49,7 @@ logger = logging.getLogger("ace2.chat")
 EASTERN = pytz.timezone("America/New_York")
 MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
-MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "2000"))  # headroom for adaptive thinking
+MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
 
 _client = None
@@ -193,6 +193,15 @@ async def stream_turn(user_text: str, emit, prior=None):
 
             if turn_text:
                 full_reply.append("".join(turn_text))
+
+            if final.stop_reason == "max_tokens":
+                # Ran out of room (likely deep in thinking) before finishing —
+                # never silently claim success or drop a pending tool call.
+                logger.warning("turn hit max_tokens (%s); reply so far %d chars",
+                               MAX_TOKENS, sum(len(t) for t in full_reply))
+                if not "".join(full_reply).strip():
+                    full_reply.append("I got a bit tangled working that through — ask me again, and I'll keep it tighter.")
+                break
 
             if final.stop_reason != "tool_use":
                 break

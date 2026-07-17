@@ -466,7 +466,7 @@
     ttsAudio.play().catch(done);
   }
   function browserSpeak(text) {
-    if (!window.speechSynthesis) { ttsPlaying = false; return; }
+    if (!window.speechSynthesis) { ttsPlaying = false; playNextTts(); return; }  // drain/resume, don't deadlock
     try {
       setOrbState('speaking');
       var u = new SpeechSynthesisUtterance(text); u.rate = 1.06; u.pitch = 1;

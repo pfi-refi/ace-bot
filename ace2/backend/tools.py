@@ -270,7 +270,9 @@ def _do_create_calendar_event(title, start_datetime, end_datetime="", descriptio
                 mins = int((e - s).total_seconds() // 60)
                 if mins > 0:
                     duration = mins
-            except ValueError:
+            except (ValueError, TypeError):
+                # TypeError guards a mixed aware/naive start/end — just fall back
+                # to the 60-min default instead of failing the whole event.
                 pass
         ok, info = create_calendar_event(
             title=title, date_str=date_str, time_str=time_str,

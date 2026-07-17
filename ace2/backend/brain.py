@@ -195,14 +195,31 @@ def read_recovered_history() -> list:
 
 
 def sanitize_for_api(messages: list) -> list:
-    """Strip every record down to the only two keys the Anthropic API accepts.
+    """Strip records to {role, content} AND make them API-legal.
 
     Defence in depth: shared files are written by another service and archives
-    carry extra metadata. Never hand a raw record to the API.
+    carry extra metadata. Beyond stripping keys, the Anthropic API has two hard
+    rules that the shared Telegram window can violate depending on its exact
+    state at read time — and would 400 the whole turn:
+      • the first message must be role "user"  → drop leading assistant turns
+      • roles must alternate                     → collapse consecutive same-role
+    Enforcing both here means every caller feeds the API a legal transcript.
     """
-    out = []
+    cleaned = []
     for m in messages:
         role, content = m.get("role"), m.get("content")
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
-            out.append({"role": role, "content": content})
+            cleaned.append({"role": role, "content": content})
+
+    # Drop any leading assistant messages so the list begins with a user turn.
+    while cleaned and cleaned[0]["role"] == "assistant":
+        cleaned.pop(0)
+
+    # Collapse consecutive same-role messages (merge their text).
+    out = []
+    for m in cleaned:
+        if out and out[-1]["role"] == m["role"]:
+            out[-1]["content"] += "\n\n" + m["content"]
+        else:
+            out.append(dict(m))
     return out
