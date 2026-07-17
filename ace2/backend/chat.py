@@ -39,7 +39,7 @@ from .integrations.calendar_api import (
     get_events_structured,
     get_tomorrow_events,
 )
-from .integrations.tasks_api import get_tasks, get_tasks_structured
+from .integrations.tasks_api import get_gmail_summary, get_tasks, get_tasks_structured
 from .integrations.weather import get_weather
 from .system_prompt import build_system_prompt
 
@@ -112,12 +112,14 @@ def _anthropic() -> AsyncAnthropic:
 
 async def _live_context() -> str:
     """Fetch memory + today/tomorrow calendar + tasks + data bank concurrently."""
-    memory, today_events, tomorrow, tasks, bank = await asyncio.gather(
+    memory, today_events, tomorrow, tasks, bank, inbox, wx = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
         asyncio.to_thread(get_events_structured, 1),
         asyncio.to_thread(get_tomorrow_events),
         asyncio.to_thread(get_tasks),
         asyncio.to_thread(daybank.read_items, True),
+        asyncio.to_thread(get_gmail_summary),
+        get_weather(),
         return_exceptions=True,
     )
 
@@ -138,6 +140,12 @@ async def _live_context() -> str:
         "TODAY'S SCHEDULE (relative to the current time above):",
         today_sched,
         "",
+        "UNREAD PRIORITY INBOX (last 2 days — scan it; flag anything that needs a reply):",
+        ok(inbox, "(unavailable)"),
+        "",
+        "WEATHER RIGHT NOW (factor it into his day when it matters):",
+        _format_weather(ok(wx, {})),
+        "",
         "TOMORROW:",
         ok(tomorrow, "(unavailable)") or "(nothing tomorrow)",
         "",
@@ -149,6 +157,24 @@ async def _live_context() -> str:
         bank_str,
     ]
     return "\n".join(parts)
+
+
+def _format_weather(w) -> str:
+    if not isinstance(w, dict) or not w.get("ok"):
+        return "(unavailable)"
+    lead = []
+    if w.get("temp") is not None:
+        lead.append(f"{w['temp']}°")
+    if w.get("description"):
+        lead.append(w["description"])
+    hl = []
+    if w.get("high") is not None:
+        hl.append(f"H{w['high']}°")
+    if w.get("low") is not None:
+        hl.append(f"L{w['low']}°")
+    tail = f" ({'/'.join(hl)})" if hl else ""
+    loc = f" — {w['location']}" if w.get("location") else ""
+    return (" ".join(lead) + tail + loc) or "(unavailable)"
 
 
 def _format_daybank(items: list) -> str:
