@@ -19,6 +19,7 @@ v13: Memory cross-reference, pattern learning, updated task lists, all-list morn
     - OpenAI API key now in Railway env (OPENAI_API_KEY) for future voice support
 """
 
+import asyncio
 import base64
 import io
 import json
@@ -2452,20 +2453,100 @@ async def _send_split(text: str, update: Update, max_len: int = 4096) -> None:
 
 # ── Message handler (free-form conversation) ──────────────────────────────────
 
-async def _tts_speak(text: str, update: Update) -> bool:
-    """Convert text to speech — onyx voice via OpenAI TTS (deep, authoritative).
-    Falls back to plain text if TTS fails or key is missing.
+# ── Voice (TTS) ───────────────────────────────────────────────────────────────
+# ElevenLabs is primary; OpenAI onyx is the fallback. Ace 2.0 will call
+# ElevenLabs with the SAME env vars, so both interfaces are literally one voice.
+#
+# ELEVENLABS_VOICE_ID is the identity — the single value that makes Telegram and
+# the portal sound like the same Ace. Change it in both services or neither.
+#
+# ELEVENLABS_MODEL_ID must ALSO match across services: the same voice rendered by
+# a different model is subtly a different voice. flash_v2_5 is ~75ms and is what
+# ElevenLabs recommends for real-time conversational use, which is what the
+# portal's streaming orb will want; multilingual_v2 is richer but slower.
+#
+# Note there is no ElevenLabs equivalent of OpenAI's `instructions` tone prompt
+# (see _openai_tts below) — with ElevenLabs the character must live in the voice
+# itself plus these settings.
+_ELEVEN_DEFAULT_MODEL = "eleven_flash_v2_5"
+_ELEVEN_DEFAULT_SETTINGS = {
+    "stability": 0.5,
+    "similarity_boost": 0.75,
+    "style": 0.3,
+    "use_speaker_boost": True,
+    "speed": 1.15,  # matches the long-standing OpenAI TTS speed
+}
+
+
+def _eleven_settings() -> dict:
+    """Voice settings, overridable via ELEVENLABS_VOICE_SETTINGS (JSON)."""
+    raw = os.environ.get("ELEVENLABS_VOICE_SETTINGS", "").strip()
+    if not raw:
+        return dict(_ELEVEN_DEFAULT_SETTINGS)
+    try:
+        merged = dict(_ELEVEN_DEFAULT_SETTINGS)
+        merged.update(json.loads(raw))
+        return merged
+    except Exception as e:
+        logger.warning("Bad ELEVENLABS_VOICE_SETTINGS (%s) — using defaults", e)
+        return dict(_ELEVEN_DEFAULT_SETTINGS)
+
+
+async def _elevenlabs_tts(text: str) -> bytes | None:
+    """Render text with ElevenLabs. Returns opus bytes, or None to fall back.
+
+    opus_48000_64 is requested because Telegram voice notes require OGG/Opus —
+    mp3 would demote the reply to a music-file attachment instead of a voice note.
     """
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+    if not api_key or not voice_id:
+        return None  # not configured — fall back silently
+    model_id = os.environ.get("ELEVENLABS_MODEL_ID", _ELEVEN_DEFAULT_MODEL).strip()
+    try:
+        import httpx
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                url,
+                params={"output_format": "opus_48000_64"},
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                json={
+                    "text": text,
+                    "model_id": model_id,
+                    "voice_settings": _eleven_settings(),
+                },
+            )
+        if resp.status_code != 200:
+            # Body carries the real reason (bad voice_id, quota, bad model).
+            logger.warning(
+                "ElevenLabs %s: %s — falling back to OpenAI onyx",
+                resp.status_code, resp.text[:300],
+            )
+            return None
+        logger.info(
+            "TTS: elevenlabs/%s voice=%s → %d bytes", model_id, voice_id[:8], len(resp.content)
+        )
+        return resp.content
+    except Exception as e:
+        logger.warning("ElevenLabs TTS error (%s) — falling back to OpenAI onyx", e)
+        return None
+
+
+def _openai_tts(text: str) -> bytes | None:
+    """Fallback voice: OpenAI gpt-4o-mini-tts onyx, with tts-1 as a second net.
+
+    `instructions` is OpenAI-specific — it is what gave Ace its Jarvis tone before
+    ElevenLabs. Kept intact so the fallback still sounds like Ace.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return None
     try:
         import openai
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            await update.message.reply_text("⚠️ No OPENAI_API_KEY set.\n\n" + text)
-            return False
         client = openai.OpenAI(api_key=api_key)
-        # Try preferred voice model first; fall back to tts-1/onyx if rejected
         try:
-            tts_response = client.audio.speech.create(
+            r = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice="onyx",    # onyx — deep, authoritative male
                 input=text,
@@ -2473,18 +2554,40 @@ async def _tts_speak(text: str, update: Update) -> bool:
                 speed=1.15,
                 instructions="Speak with calm authority and sharp confidence — like a highly capable executive assistant who always has the answer. Deliver information with directness and a slight sense of urgency, as if every word matters. Warm when the moment calls for it, but never casual. No filler, no hedging.",
             )
-            logger.info("TTS: gpt-4o-mini-tts/onyx → %d bytes", len(tts_response.content))
+            logger.info("TTS: gpt-4o-mini-tts/onyx → %d bytes", len(r.content))
         except Exception as tts_err:
             logger.warning("Primary TTS failed (%s), falling back to tts-1/onyx", tts_err)
-            tts_response = client.audio.speech.create(
+            r = client.audio.speech.create(
                 model="tts-1",
                 voice="onyx",    # onyx fallback
                 input=text,
                 response_format="opus",
                 speed=1.15,
             )
-            logger.info("TTS fallback: tts-1/onyx → %d bytes", len(tts_response.content))
-        audio_buf = io.BytesIO(tts_response.content)
+            logger.info("TTS fallback: tts-1/onyx → %d bytes", len(r.content))
+        return r.content
+    except Exception as e:
+        logger.error("OpenAI TTS error: %s", e)
+        return None
+
+
+async def _tts_speak(text: str, update: Update) -> bool:
+    """Speak a reply as a Telegram voice note.
+
+    Chain: ElevenLabs → OpenAI onyx → plain text. The reply is never lost: a
+    misconfigured voice id, an ElevenLabs outage, or a blown quota degrades the
+    voice, never the message.
+    """
+    try:
+        audio = await _elevenlabs_tts(text)
+        if audio is None:
+            audio = await asyncio.to_thread(_openai_tts, text)
+        if audio is None:
+            await update.message.reply_text(
+                "⚠️ Voice unavailable (no TTS provider configured).\n\n" + text
+            )
+            return False
+        audio_buf = io.BytesIO(audio)
         audio_buf.seek(0)
         audio_buf.name = "ace_response.ogg"
         await update.message.reply_voice(audio_buf)

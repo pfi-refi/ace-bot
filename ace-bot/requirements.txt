@@ -7,3 +7,4 @@ google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 google-api-python-client>=2.130.0
 openai>=1.0.0
+httpx>=0.27.0        # ElevenLabs TTS; ships with python-telegram-bot but declared explicitly
