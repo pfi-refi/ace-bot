@@ -180,6 +180,49 @@
     else el.textContent = '[ IDLE ]';
   }
 
+  /* ============================================================ DAY / UP-NEXT */
+  var todayEvents = [], todayLoaded = false;
+  function fmtClock(d) { var h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12; return h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap; }
+  // Split today's events into done / now / next / later, computed against `now` (a Date).
+  function daySplit(events, now) {
+    var timed = [], allday = [];
+    (events || []).forEach(function (e) {
+      if (e.all_day) { allday.push(e); return; }
+      var s = new Date(e.iso); if (isNaN(s)) return;
+      timed.push({ s: s, e: e });
+    });
+    timed.sort(function (a, b) { return a.s - b.s; });
+    var past = [], up = [];
+    timed.forEach(function (t) { (t.s <= now ? past : up).push(t); });
+    var nowItem = null, done = past.slice();
+    if (past.length && (now - past[past.length - 1].s) <= 90 * 60000) { nowItem = past[past.length - 1]; done = past.slice(0, -1); }
+    return { done: done, now: nowItem, next: up[0] || null, later: up.slice(1), allday: allday };
+  }
+  function renderUpNext() {
+    var box = $('upnext'); if (!box || !todayLoaded) return;
+    function sep() { var x = document.createElement('span'); x.className = 'un-sep'; x.textContent = '·'; return x; }
+    function span(cls, txt) { var s = document.createElement('span'); s.className = cls; s.textContent = txt; return s; }
+    var now = new Date(), sp = daySplit(todayEvents, now);
+    box.textContent = '';
+    box.appendChild(span('un-now', 'NOW ' + fmtClock(now)));
+    if (sp.now) { box.appendChild(sep()); box.appendChild(span('un-next', '▸ ' + (sp.now.e.title || ''))); }
+    if (sp.next) {
+      box.appendChild(sep());
+      box.appendChild(span('un-next', 'NEXT ' + sp.next.e.time + ' — ' + (sp.next.e.title || '')));
+      if (sp.later[0]) box.appendChild(span('un-then', '  then ' + sp.later[0].e.time + ' ' + (sp.later[0].e.title || '')));
+    } else if (!sp.now) {
+      box.appendChild(sep());
+      box.appendChild(span('un-then', todayEvents.length ? 'clear the rest of today' : 'nothing on the calendar today'));
+    }
+    box.classList.remove('hidden');
+  }
+  function loadToday() {
+    fetch(API + '/calendar?days=1', { headers: headers() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { todayEvents = (d && d.events) || []; todayLoaded = true; renderUpNext(); })
+      .catch(function () {});
+  }
+
   /* ============================================================ CLOCK */
   (function () {
     var days = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
@@ -187,6 +230,7 @@
       var d = new Date(), h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12;
       var mm = (d.getMinutes() < 10 ? '0' : '') + d.getMinutes();
       $('clock').innerHTML = days[d.getDay()] + ' · <b>' + h12 + ':' + mm + '</b> ' + ap;
+      renderUpNext();
     }
     tick(); setInterval(tick, 15000);
   })();
@@ -225,6 +269,7 @@
   function startApp() {
     $('app').classList.remove('hidden');
     connectWS();
+    loadToday();
     greeting();
   }
   function greeting() {
@@ -251,7 +296,7 @@
       case 'start': removeTyping(); setOrbState('speaking'); streamMsg = beginAceStream(); break;
       case 'delta': if (!streamMsg) streamMsg = beginAceStream(); appendToStream(streamMsg, msg.text); break;
       case 'tool': renderTool(msg); break;
-      case 'card': materializeCard(msg.panel, msg.data); break;
+      case 'card': materializeCard(msg.panel, msg.data, msg.where); break;
       case 'open': openLink(msg.url, msg.label); break;
       case 'confirmation': renderConfirm(msg.text); break;
       case 'final': if (streamMsg) finalizeStream(streamMsg, msg.text); break;
@@ -296,8 +341,12 @@
   function removeTyping() { if (typingEl && typingEl.parentNode) typingEl.parentNode.removeChild(typingEl); typingEl = null; }
 
   /* ============================================================ CARDS — Ace's projections */
-  var cardsEl = $('cards');
-  function cardShell(title) {
+  // Default screen side per card; Ace can override with a `where` on display_card.
+  var CARD_SLOTS = { timeline: 'left', daybank: 'right', calendar: 'left', tasks: 'left',
+                     weather: 'right', memory: 'right' };
+  function slotEl(where) { return (where === 'left') ? $('cards-left') : $('cards'); }
+  function cardShell(title, where) {
+    var host = slotEl(where);
     var card = document.createElement('div'); card.className = 'card';
     var head = document.createElement('div'); head.className = 'card-head';
     head.appendChild(document.createTextNode(title));
@@ -306,19 +355,20 @@
     head.appendChild(x);
     var body = document.createElement('div'); body.className = 'card-body';
     card.appendChild(head); card.appendChild(body);
-    // replace an existing card of the same panel; cap the stack at 4
-    var old = cardsEl.querySelector('.card[data-panel="' + title + '"]'); if (old) old.remove();
+    // one card per panel across BOTH slots (so re-placing moves it); cap each slot at 4
+    var dup = document.querySelector('.card[data-panel="' + title + '"]'); if (dup) dup.remove();
     card.setAttribute('data-panel', title);
-    cardsEl.insertBefore(card, cardsEl.firstChild);
-    while (cardsEl.children.length > 4) cardsEl.removeChild(cardsEl.lastChild);
+    host.insertBefore(card, host.firstChild);
+    while (host.children.length > 4) host.removeChild(host.lastChild);
     return body;
   }
   function empty(body, note) { var d = document.createElement('div'); d.className = 'empty-note'; d.textContent = note; body.appendChild(d); }
 
-  function materializeCard(panel, data) {
+  function materializeCard(panel, data, where) {
     data = data || {};
+    var slot = where || CARD_SLOTS[panel] || 'right';
     if (panel === 'calendar') {
-      var body = cardShell('CALENDAR');
+      var body = cardShell('CALENDAR', slot);
       var events = data.events || [];
       if (!events.length) return empty(body, 'All clear.');
       events.slice(0, 10).forEach(function (e) {
@@ -329,7 +379,7 @@
         row.appendChild(day); row.appendChild(tm); row.appendChild(nm); body.appendChild(row);
       });
     } else if (panel === 'tasks') {
-      var body2 = cardShell('TASKS');
+      var body2 = cardShell('TASKS', slot);
       var tasks = data.tasks || [];
       if (!tasks.length) return empty(body2, 'Inbox zero.');
       tasks.slice(0, 12).forEach(function (t) {
@@ -341,7 +391,7 @@
         bd.appendChild(meta); row.appendChild(box); row.appendChild(bd); body2.appendChild(row);
       });
     } else if (panel === 'weather') {
-      var body3 = cardShell('WEATHER');
+      var body3 = cardShell('WEATHER', slot);
       var w = data;
       if (!w.ok) return empty(body3, (w.condition || 'Unavailable'));
       var G = { '01': '☀', '02': '⛅', '03': '☁', '04': '☁', '09': '☂', '10': '☂', '11': '⚡', '13': '❄', '50': '≡' };
@@ -358,11 +408,59 @@
           cl.appendChild(s); cl.appendChild(b); grid.appendChild(cl); });
       wx.appendChild(grid); body3.appendChild(wx);
     } else if (panel === 'memory') {
-      var body4 = cardShell('MEMORY');
+      var body4 = cardShell('MEMORY', slot);
       var mems = data.memories || [];
       if (!mems.length) return empty(body4, 'Memory empty.');
       mems.slice(0, 15).forEach(function (m) { var d = document.createElement('div'); d.className = 'c-mem'; d.textContent = (typeof m === 'string') ? m : JSON.stringify(m); body4.appendChild(d); });
+    } else if (panel === 'timeline') {
+      // Fresh today data → also refresh the always-visible up-next strip.
+      todayEvents = data.events || []; todayLoaded = true; renderUpNext();
+      var body5 = cardShell('TODAY', slot);
+      if (!todayEvents.length) return empty(body5, 'Nothing on the calendar today.');
+      var sp = daySplit(todayEvents, new Date()), placedNow = false;
+      function tlRow(item, cls, mark) {
+        var row = document.createElement('div'); row.className = 'tl-row ' + cls;
+        var mk = document.createElement('span'); mk.className = 'tl-mark'; mk.textContent = mark || '';
+        var tm = document.createElement('span'); tm.className = 'tl-time'; tm.textContent = item.e.time || '';
+        var nm = document.createElement('span'); nm.className = 'tl-title'; nm.textContent = item.e.title || '';
+        row.appendChild(mk); row.appendChild(tm); row.appendChild(nm); body5.appendChild(row);
+      }
+      function nowLine() {
+        var d = document.createElement('div'); d.className = 'tl-nowline';
+        var s = document.createElement('span'); s.textContent = 'NOW ' + fmtClock(new Date());
+        d.appendChild(s); body5.appendChild(d); placedNow = true;
+      }
+      sp.done.forEach(function (it) { tlRow(it, 'tl-past', '✓'); });
+      if (sp.now) { nowLine(); tlRow(sp.now, 'tl-now', '▸'); }
+      if (!placedNow) nowLine();
+      if (sp.next) tlRow(sp.next, 'tl-next', '→');
+      sp.later.forEach(function (it) { tlRow(it, 'tl-later', '•'); });
+      sp.allday.forEach(function (e) { tlRow({ e: { time: 'All day', title: e.title } }, 'tl-allday', '•'); });
+    } else if (panel === 'daybank') {
+      var body6 = cardShell('DATA BANK', slot);
+      var items = data.items || [];
+      if (!items.length) return empty(body6, 'Nothing captured yet.');
+      items.forEach(function (it) {
+        var row = document.createElement('div'); row.className = 'db-item' + (it.status === 'done' ? ' db-done' : '');
+        var box = document.createElement('button'); box.className = 'db-box' + (it.status === 'done' ? ' done' : '');
+        box.title = it.status === 'done' ? 'Reopen' : 'Mark done'; box.textContent = it.status === 'done' ? '✓' : '';
+        box.addEventListener('click', function () { toggleBankItem(it.id, it.status === 'done' ? 'open' : 'done'); });
+        var mid = document.createElement('div'); mid.className = 'db-mid';
+        var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
+        var meta = document.createElement('div'); meta.className = 'db-meta';
+        meta.appendChild(tag('db-kind', it.kind || 'note'));
+        if (it.due) meta.appendChild(tag('db-due', '⏱ ' + it.due));
+        mid.appendChild(txt); mid.appendChild(meta);
+        row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
+      });
+      function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
     }
+  }
+  function toggleBankItem(id, status) {
+    fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d && d.items) materializeCard('daybank', { items: d.items }); })
+      .catch(function () {});
   }
 
   function openLink(url, label) {

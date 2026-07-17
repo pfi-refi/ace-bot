@@ -48,7 +48,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import chat, history, voice
+from . import chat, daybank, history, voice
 from .brain import (
     google_ready,
     read_memory,
@@ -199,6 +199,27 @@ async def memory():
 @app.get("/weather", dependencies=[Depends(require_auth)])
 async def weather():
     return await get_weather()  # already async (httpx)
+
+
+@app.get("/daybank", dependencies=[Depends(require_auth)])
+async def daybank_read():
+    return {"items": await asyncio.to_thread(daybank.read_items, True)}
+
+
+class DaybankUpdateReq(BaseModel):
+    id: str = ""
+    status: str = ""  # "open" | "done"
+
+
+@app.post("/daybank/update", dependencies=[Depends(require_auth)])
+async def daybank_update(req: DaybankUpdateReq):
+    """Toggle an item from the HUD checkbox. Mutates Ace's OWN private data-bank
+    file only — never the shared conversation file. Same mutation Ace makes via the
+    update_item tool, exposed directly so a checkbox is instant, not a chat round-trip."""
+    status = req.status if req.status in ("open", "done") else None
+    ok, _msg = await asyncio.to_thread(daybank.update_item, req.id, status)
+    items = await asyncio.to_thread(daybank.read_items, True)
+    return {"ok": ok, "items": items}
 
 
 @app.get("/bootstrap", dependencies=[Depends(require_auth)])

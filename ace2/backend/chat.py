@@ -29,14 +29,13 @@ Design decisions carried in from the portal's scars:
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 from anthropic import AsyncAnthropic
 
-from . import brain, history, tools
+from . import brain, daybank, history, tools
 from .integrations.calendar_api import (
-    get_calendar_events,
     get_events_structured,
     get_tomorrow_events,
 )
@@ -51,8 +50,57 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
+NOW_WINDOW_MIN = 90  # an event that started within this many minutes reads as "in progress"
 
 _client = None
+
+
+def _format_today_schedule(events: list, now: datetime) -> str:
+    """Split today's structured events into done / now / next / later for the model.
+
+    `events` are get_events_structured() dicts (each has an Eastern-aware `iso` and a
+    formatted `time`). Rendering the day relative to `now` is what lets Ace reason in
+    "what's already happened vs. what's next" terms instead of seeing a flat list.
+    """
+    timed, all_day = [], []
+    for e in events:
+        if e.get("all_day"):
+            all_day.append(e)
+            continue
+        try:
+            start = datetime.fromisoformat(e["iso"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        timed.append((start, e))
+    timed.sort(key=lambda x: x[0])
+
+    past = [(s, e) for s, e in timed if s <= now]
+    upcoming = [(s, e) for s, e in timed if s > now]
+
+    # The most-recent already-started event counts as "in progress" if it began
+    # within the window (structured events carry no end time, so this approximates).
+    now_item, done = None, list(past)
+    if past and (now - past[-1][0]) <= timedelta(minutes=NOW_WINDOW_MIN):
+        now_item, done = past[-1], past[:-1]
+
+    lines = []
+    if done:
+        lines.append("Already done earlier today:")
+        lines += [f"  ✓ {e['time']} — {e['title']}" for _, e in done]
+    if now_item:
+        lines.append("Happening now (started recently):")
+        lines.append(f"  ▸ {now_item[1]['time']} — {now_item[1]['title']}")
+    if upcoming:
+        lines.append("NEXT UP:")
+        lines.append(f"  → {upcoming[0][1]['time']} — {upcoming[0][1]['title']}")
+        if len(upcoming) > 1:
+            lines.append("Later today:")
+            lines += [f"  • {e['time']} — {e['title']}" for _, e in upcoming[1:]]
+    if all_day:
+        lines.append("All day:")
+        lines += [f"  • {e['title']}" for e in all_day]
+
+    return "\n".join(lines) if lines else "(nothing on the calendar today)"
 
 
 def _anthropic() -> AsyncAnthropic:
@@ -63,12 +111,13 @@ def _anthropic() -> AsyncAnthropic:
 
 
 async def _live_context() -> str:
-    """Fetch memory + today/tomorrow calendar + tasks concurrently, format once."""
-    memory, today, tomorrow, tasks = await asyncio.gather(
+    """Fetch memory + today/tomorrow calendar + tasks + data bank concurrently."""
+    memory, today_events, tomorrow, tasks, bank = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
-        asyncio.to_thread(get_calendar_events, 1),
+        asyncio.to_thread(get_events_structured, 1),
         asyncio.to_thread(get_tomorrow_events),
         asyncio.to_thread(get_tasks),
+        asyncio.to_thread(daybank.read_items, True),
         return_exceptions=True,
     )
 
@@ -78,22 +127,43 @@ async def _live_context() -> str:
     now = datetime.now(EASTERN)
     mem_list = ok(memory, [])
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
+    today_sched = _format_today_schedule(ok(today_events, []), now)
+    bank_str = _format_daybank(ok(bank, []))
     parts = [
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
         "",
-        "TODAY'S CALENDAR:",
-        ok(today, "(unavailable)") or "(nothing today)",
+        "TODAY'S SCHEDULE (relative to the current time above):",
+        today_sched,
         "",
         "TOMORROW:",
         ok(tomorrow, "(unavailable)") or "(nothing tomorrow)",
         "",
         "OPEN TASKS:",
         ok(tasks, "(unavailable)") or "(inbox zero)",
+        "",
+        "DATA BANK (what you're already tracking for Brady — his to-dos/commitments/"
+        "notes; each has an id you pass to update_item to complete it):",
+        bank_str,
     ]
     return "\n".join(parts)
+
+
+def _format_daybank(items: list) -> str:
+    """Render the data bank for Ace's context: open items first, then today's done."""
+    if not items:
+        return "(nothing captured yet)"
+    open_items = [it for it in items if it.get("status") == "open"]
+    done_today = [it for it in items if it.get("status") == "done"]
+    lines = []
+    for it in open_items:
+        due = f" (due {it['due']})" if it.get("due") else ""
+        lines.append(f"- [{it.get('id','?')}] {it.get('kind','note')}: {it.get('text','')}{due}")
+    for it in done_today:
+        lines.append(f"- [{it.get('id','?')}] ✓ done: {it.get('text','')}")
+    return "\n".join(lines)
 
 
 async def _load_messages(user_text: str, prior=None) -> list:
@@ -116,12 +186,17 @@ async def _card_payload(panel: str):
     """Structured data for a display_card call. Concurrent, graceful."""
     if panel == "calendar":
         return {"events": await asyncio.to_thread(get_events_structured, 7)}
+    if panel == "timeline":
+        # Today only; the frontend computes the NOW line against the live clock.
+        return {"events": await asyncio.to_thread(get_events_structured, 1)}
     if panel == "tasks":
         return {"tasks": await asyncio.to_thread(get_tasks_structured)}
     if panel == "weather":
         return await get_weather()
     if panel == "memory":
         return {"memories": await asyncio.to_thread(brain.read_memory)}
+    if panel == "daybank":
+        return {"items": await asyncio.to_thread(daybank.read_items, True)}
     return {}
 
 
@@ -129,9 +204,11 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
     """Execute a UI tool: the 'action' is an event the frontend materializes."""
     if name == "display_card":
         panel = (tool_input.get("panel") or "").strip().lower()
+        where = (tool_input.get("where") or "").strip().lower()
+        where = where if where in ("left", "right") else None
         try:
             data = await _card_payload(panel)
-            await emit("card", {"panel": panel, "data": data})
+            await emit("card", {"panel": panel, "data": data, "where": where})
             return f"Displayed the {panel} card on screen."
         except Exception as e:
             logger.error("display_card(%s): %s", panel, e)

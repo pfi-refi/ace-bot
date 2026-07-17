@@ -23,7 +23,7 @@ caller (chat.py). Do not call these straight from the event loop.
 import logging
 from datetime import datetime, timedelta
 
-from . import brain
+from . import brain, daybank
 from .integrations.calendar_api import create_calendar_event, delete_calendar_event
 from .integrations.google_client import EASTERN
 from .integrations.tasks_api import (
@@ -175,8 +175,24 @@ TOOLS = [
             "properties": {
                 "panel": {
                     "type": "string",
-                    "enum": ["calendar", "tasks", "weather", "memory"],
-                    "description": "Which card to display",
+                    "enum": ["calendar", "tasks", "weather", "memory", "timeline", "daybank"],
+                    "description": (
+                        "Which card to display. Use 'timeline' for today's schedule "
+                        "laid out against the current time (a live NOW line with what's "
+                        "done, now, and next) — prefer it over 'calendar' when Brady "
+                        "asks about today or what's next. Use 'daybank' to show his data "
+                        "bank (captured to-dos, commitments, notes) — show it after you "
+                        "capture something, or when he asks what he's got open."
+                    ),
+                },
+                "where": {
+                    "type": "string",
+                    "enum": ["left", "right"],
+                    "description": (
+                        "Optional: which side of the screen to place the card. Use it when "
+                        "Brady asks (e.g. 'put my timeline on the left'), or to keep two "
+                        "cards side by side. Defaults to a sensible side per card."
+                    ),
                 },
             },
             "required": ["panel"],
@@ -215,6 +231,48 @@ TOOLS = [
             "required": ["fact"],
         },
     },
+    {
+        "name": "capture_item",
+        "description": (
+            "Capture something into Brady's DATA BANK — his running second brain and "
+            "to-do surface. Do this ON YOUR OWN, without being asked, whenever something "
+            "worth not forgetting surfaces in conversation: a commitment he made, a "
+            "follow-up, a 'don't forget to…', a loose task, or a note. This is how you "
+            "manage his to-dos so he doesn't have to live in Google Tasks — capture it "
+            "here, and he'll see it on screen. (For a hard-dated appointment, also create "
+            "a calendar event; for a note-to-self, just capture it.) One item per call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["note", "todo", "commitment", "followup"],
+                    "description": "What kind of item this is",
+                },
+                "text": {"type": "string", "description": "The item, phrased tightly (~one line)"},
+                "due": {"type": "string", "description": "Optional due date/time in plain words (e.g. 'today 5pm', 'Fri')"},
+            },
+            "required": ["kind", "text"],
+        },
+    },
+    {
+        "name": "update_item",
+        "description": (
+            "Update a DATA BANK item: mark it done (status='done') when Brady says he "
+            "finished it or you complete it for him, reopen it, or edit its text. Use the "
+            "item's id from the data bank."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The data bank item id"},
+                "status": {"type": "string", "enum": ["open", "done"], "description": "New status"},
+                "text": {"type": "string", "description": "Optional new text"},
+            },
+            "required": ["id"],
+        },
+    },
 ]
 
 # Short present-tense labels for the WS `tool` event (the orb shows "◈ CREATING EVENT…")
@@ -227,6 +285,8 @@ TOOL_LABELS = {
     "draft_email": "DRAFTING EMAIL",
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
+    "capture_item": "CAPTURING",
+    "update_item": "UPDATING BANK",
     "display_card": "PROJECTING",
     "open_url": "OPENING",
 }
@@ -352,6 +412,22 @@ def _do_save_memory(fact, **_):
         return f"⚠️ Save memory failed: {e}"
 
 
+def _do_capture_item(kind="note", text="", due=None, **_):
+    ok, res = daybank.add_item(kind, text, due=due)
+    if ok:
+        tail = f" (due {due})" if due else ""
+        return f"◆ Captured to your data bank: {res['text']}{tail}"
+    return f"⚠️ Could not capture: {res}"
+
+
+def _do_update_item(id="", status=None, text=None, **_):
+    ok, res = daybank.update_item(id, status=status, text=text)
+    if ok:
+        verb = "Completed" if status == "done" else ("Reopened" if status == "open" else "Updated")
+        return f"◆ {verb}: {res}"
+    return f"⚠️ Could not update item: {res}"
+
+
 _DISPATCH = {
     "create_calendar_event": _do_create_calendar_event,
     "delete_calendar_event": _do_delete_calendar_event,
@@ -361,6 +437,8 @@ _DISPATCH = {
     "draft_email": _do_draft_email,
     "search_drive": _do_search_drive,
     "save_memory": _do_save_memory,
+    "capture_item": _do_capture_item,
+    "update_item": _do_update_item,
 }
 
 
