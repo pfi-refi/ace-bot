@@ -17,10 +17,12 @@ only once we can see what is actually there and what it would cost.
 Delete this module once recovery is done or written off.
 """
 
+import io
 import json
 import logging
 
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 from .google_client import CONVERSATION_FILE_NAME, get_google_creds
 
@@ -81,6 +83,95 @@ def list_revisions(name: str = CONVERSATION_FILE_NAME) -> dict:
         return out
     except Exception as e:
         logger.error("Revision list error: %s", e)
+        out["error"] = str(e)
+        return out
+
+
+
+# Output target for recovery. Hardcoded, and deliberately NOT
+# CONVERSATION_FILE_NAME: the live rolling window is read-only to this module,
+# and recover_all() must be structurally incapable of writing to it.
+RECOVERED_FILE_NAME = "ace_history_recovered.json"
+
+
+def recover_all(name: str = CONVERSATION_FILE_NAME) -> dict:
+    """Union every readable revision into one recovered history file on Drive.
+
+    ace_conversation.json is a rolling window: once full, each new exchange
+    pushes the oldest pair out. So each revision holds a DIFFERENT slice of the
+    stream, and the union across revisions recovers far more than any single
+    snapshot -- including messages destroyed by /clear and /reset, which write
+    an empty list (bot.py cmd_clear_history / cmd_reset_history).
+
+    Dedupes on (role, content), keeping first-appearance order and walking
+    revisions oldest-first, so the result reads chronologically.
+
+    Writes ONLY to RECOVERED_FILE_NAME, creating or updating in place. Never
+    deletes. Never touches the source file.
+    """
+    out = {"ok": False, "scanned": 0, "readable": 0, "recovered": 0, "error": ""}
+    try:
+        creds = get_google_creds()
+        service = build("drive", "v3", credentials=creds)
+        file_id = _find_file_id(service, name)
+        if not file_id:
+            out["error"] = "source file not found on Drive"
+            return out
+
+        revs = service.revisions().list(
+            fileId=file_id, fields="revisions(id, modifiedTime)"
+        ).execute().get("revisions", [])
+        revs.sort(key=lambda r: r.get("modifiedTime") or "")
+        out["scanned"] = len(revs)
+
+        seen, merged = set(), []
+        for r in revs:
+            try:
+                raw = service.revisions().get_media(
+                    fileId=file_id, revisionId=r.get("id")
+                ).execute()
+                msgs = json.loads(raw).get("messages", [])
+            except Exception:
+                continue  # revisions Drive won't hand back (403) are simply skipped
+            out["readable"] += 1
+            for m in msgs:
+                key = (m.get("role"), m.get("content"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append({"role": m.get("role"), "content": m.get("content")})
+
+        payload = json.dumps({
+            "recovered_from": name,
+            "revisions_scanned": out["scanned"],
+            "revisions_readable": out["readable"],
+            "message_count": len(merged),
+            "note": (
+                "Union of all readable Drive revisions, deduped on (role, content), "
+                "oldest-first. Superset of the live rolling window. Read-only archive "
+                "-- not an API-shaped conversation file."
+            ),
+            "messages": merged,
+        }, indent=2).encode()
+
+        media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json")
+        existing = service.files().list(
+            q=f"name='{RECOVERED_FILE_NAME}' and trashed=false",
+            spaces="drive", fields="files(id)",
+        ).execute().get("files", [])
+        if existing:
+            service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+        else:
+            service.files().create(
+                body={"name": RECOVERED_FILE_NAME}, media_body=media, fields="id"
+            ).execute()
+
+        out["recovered"] = len(merged)
+        out["ok"] = True
+        logger.info("Recovered %d unique messages into %s", len(merged), RECOVERED_FILE_NAME)
+        return out
+    except Exception as e:
+        logger.error("Recovery error: %s", e)
         out["error"] = str(e)
         return out
 

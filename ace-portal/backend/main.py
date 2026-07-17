@@ -40,7 +40,7 @@ from pydantic import BaseModel
 from .ace_chat import stream_reply
 from .calendar_api import get_events_structured
 from .memory import merge_memories, read_memory, write_memory
-from .revisions import get_revision, list_revisions
+from .revisions import get_revision, list_revisions, recover_all
 from .tasks_api import get_tasks_structured
 from .weather import get_weather
 
@@ -184,6 +184,15 @@ async def admin_revisions():
 @app.get("/admin/revisions/{revision_id}", dependencies=[Depends(require_auth)])
 async def admin_revision(revision_id: str):
     return await asyncio.to_thread(get_revision, revision_id)
+
+
+@app.post("/admin/recover", dependencies=[Depends(require_auth)])
+async def admin_recover():
+    """Union all readable revisions into ace_history_recovered.json on Drive.
+
+    Writes a NEW file only; ace_conversation.json is never modified.
+    """
+    return await asyncio.to_thread(recover_all)
 
 
 @app.post("/chat", dependencies=[Depends(require_auth)])
