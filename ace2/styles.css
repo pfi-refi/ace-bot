@@ -45,7 +45,7 @@
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
 
   --r-md: 10px; --r-lg: 16px; --r-pill: 999px;
-  --orb-size: clamp(150px, 30vh, 320px);
+  --orb-size: clamp(230px, 46vh, 480px);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -62,7 +62,10 @@ body { background: radial-gradient(120% 90% at 50% 0%, #041012 0%, var(--bg) 45%
 /* ---------- Corner chrome (no bars) ---------- */
 #app { position: relative; z-index: 2; height: 100dvh; display: grid;
   grid-template-rows: auto minmax(0,1fr) auto auto; gap: 12px;
-  padding: 18px 22px calc(16px + env(safe-area-inset-bottom)); }
+  padding: 18px 22px calc(16px + env(safe-area-inset-bottom));
+  transition: padding-right .34s cubic-bezier(.4,.9,.3,1); }
+/* When the chat window is open, slide all content left of it so nothing's covered. */
+#app.chat-open { padding-right: calc(22px + min(420px, 92vw)); }
 
 #chrome { display: flex; align-items: center; justify-content: space-between; }
 .wordmark { font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: 4px; color: var(--aurora); text-shadow: 0 0 6px var(--aurora-40); }
@@ -74,28 +77,53 @@ body { background: radial-gradient(120% 90% at 50% 0%, #041012 0%, var(--bg) 45%
 #link-dot.off { background: rgba(233,255,244,.25); box-shadow: none; }
 
 /* ---------- The stage ---------- */
-#stage { position: relative; min-height: 0; display: grid;
-  grid-template-rows: auto auto minmax(0,1fr); gap: 8px; justify-items: center; }
+/* The stage is now the orb, and only the orb — the star of the screen. */
+#stage { position: relative; min-height: 0; display: grid; place-items: center; }
 
-/* Always-visible "what's next" strip under the orb — the day at a glance. */
-#upnext { font-family: var(--mono); font-size: 11.5px; letter-spacing: .6px; line-height: 1.5;
-  color: var(--text-dim); text-align: center; max-width: min(680px, 92vw);
-  padding: 5px 14px; border: 1px solid rgba(69,255,166,.16); border-radius: var(--r-pill);
-  background: var(--aurora-12); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Up-next moved into the top chrome — a slim glanceable readout, not a center bar. */
+#upnext { font-family: var(--mono); font-size: 11px; letter-spacing: .4px;
+  color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 44vw; padding: 4px 12px; border: 1px solid rgba(69,255,166,.14);
+  border-radius: var(--r-pill); background: rgba(69,255,166,.05); }
 #upnext.hidden { display: none; }
 #upnext .un-now  { color: var(--aurora); font-weight: 700; text-shadow: 0 0 6px var(--aurora-40); animation: unpulse 3.4s ease-in-out infinite; }
 @keyframes unpulse { 0%,100% { text-shadow: 0 0 5px var(--aurora-40); } 50% { text-shadow: 0 0 11px var(--aurora-60); } }
 #upnext .un-next { color: var(--text); font-weight: 700; }
-#upnext .un-sep  { color: var(--aurora-40); margin: 0 8px; }
+#upnext .un-sep  { color: var(--aurora-40); margin: 0 7px; }
 #upnext .un-then { color: var(--text-dim); }
 
 #orb-wrap { position: relative; width: var(--orb-size); height: var(--orb-size); display: grid; place-items: center; }
-#orb-canvas { width: 100%; height: 100%; border-radius: 50%; }
+#orb-canvas { width: 100%; height: 100%; border-radius: 50%;
+  filter: drop-shadow(0 0 30px rgba(69,255,166,.32)) drop-shadow(0 0 72px rgba(69,255,166,.15)); }
 #orb-state { position: absolute; bottom: -2px; left: 50%; transform: translateX(-50%);
   font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 3px;
   color: var(--text-dim); text-transform: uppercase; white-space: nowrap; transition: color .3s, text-shadow .3s; }
 #orb-state.listening, #orb-state.speaking { color: var(--aurora); text-shadow: 0 0 8px var(--aurora-40); }
+
+/* ---------- Conversation side window (toggle on/off from the chrome) ---------- */
+#chat-panel { position: fixed; top: 0; right: 0; height: 100dvh; width: min(420px, 92vw);
+  z-index: 40; display: flex; flex-direction: column;
+  background: linear-gradient(165deg, rgba(9,22,20,.94), rgba(3,10,11,.97));
+  border-left: 1px solid var(--aurora-25); box-shadow: -24px 0 70px rgba(0,0,0,.55);
+  backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
+  transform: translateX(103%); transition: transform .34s cubic-bezier(.4,.9,.3,1);
+  padding: 16px 14px calc(16px + env(safe-area-inset-bottom)); }
+#chat-panel.open { transform: translateX(0); }
+#chat-head { display: flex; align-items: center; justify-content: space-between; flex: none;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 3px; color: var(--aurora);
+  padding: 2px 4px 12px; border-bottom: 1px solid rgba(69,255,166,.14); margin-bottom: 6px;
+  text-shadow: 0 0 6px var(--aurora-40); }
+#chat-head button { background: none; border: none; color: var(--text-dim); font-size: 15px; cursor: pointer; line-height: 1; padding: 0 4px; }
+#chat-head button:hover { color: var(--aurora); }
+#chat-panel #messages { width: 100%; flex: 1 1 auto; }
+
+/* Chat toggle in the chrome — glows when there's an unread reply while closed. */
+#chat-toggle { width: 34px; height: 34px; }
+#chat-toggle.active { color: var(--aurora); border-color: var(--aurora-60); }
+#chat-toggle.has-new { color: var(--aurora); animation: chatpulse 1.6s ease-in-out infinite; }
+@keyframes chatpulse {
+  0%,100% { box-shadow: 0 0 0 1px var(--aurora-40), 0 0 6px var(--aurora-40); }
+  50%     { box-shadow: 0 0 0 1px var(--aurora-60), 0 0 16px var(--aurora-60); } }
 
 /* Transcript floats — translucent column, no box-in-box */
 #messages { width: min(720px, 92vw); min-height: 0; overflow-y: auto;
@@ -260,12 +288,12 @@ body { background: radial-gradient(120% 90% at 50% 0%, #041012 0%, var(--bg) 45%
 
 /* ---------- Responsive / a11y ---------- */
 @media (max-width: 760px) {
-  /* Flex column on mobile: order:-1 floats cards to the top, messages flexes to
-     fill — robust no matter how many card slots are currently non-empty. */
-  #stage { display: flex; flex-direction: column; gap: 8px; }
-  #messages { flex: 1 1 auto; width: 100%; }
+  /* Flex column on mobile: order:-1 floats cards above the orb; the orb stays big. */
+  #stage { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
   .card-slot { position: static; width: 100%; max-height: 34vh; order: -1; }
-  :root { --orb-size: clamp(120px, 22vh, 200px); }
-  #upnext { white-space: normal; }
+  :root { --orb-size: clamp(180px, 34vh, 320px); }
+  #upnext { display: none; }          /* top bar is tight on phones — read it in the chat window */
+  #chat-panel { width: 100vw; }
+  #app.chat-open { padding-right: 22px; }   /* panel is a full-screen overlay on mobile — don't shift */
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

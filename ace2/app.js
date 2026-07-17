@@ -71,8 +71,8 @@
      States ease; setAmplitude() lets Ace's voice surge the whole galaxy. */
   var orb = (function () {
     var canvas = $('orb-canvas'), ctx = canvas.getContext('2d');
-    ctx.scale(2, 2);
     var W = 240, cx = 120, cy = 120, R = 112;
+    ctx.scale(canvas.width / W, canvas.height / W);   // logical 240 coords → any backing size (now 640, crisp when large)
     var speed = 1, speedT = 1, glow = 0, glowT = 0, amp = 0;
     var last = performance.now();
 
@@ -180,6 +180,23 @@
     else el.textContent = '[ IDLE ]';
   }
 
+  /* ============================================================ CHAT PANEL (toggle) */
+  var chatOpen = localStorage.getItem('ace2_chat') === 'on';
+  function applyChatState() {
+    var panel = $('chat-panel'), btn = $('chat-toggle');
+    $('app').classList.toggle('chat-open', chatOpen);   // shifts content left of the panel (desktop)
+    if (chatOpen) {
+      panel.classList.add('open'); btn.classList.add('active'); btn.classList.remove('has-new');
+      btn.setAttribute('aria-pressed', 'true'); scrollBottom();
+    } else {
+      panel.classList.remove('open'); btn.classList.remove('active'); btn.setAttribute('aria-pressed', 'false');
+    }
+  }
+  function setChat(open) { chatOpen = open; localStorage.setItem('ace2_chat', open ? 'on' : 'off'); applyChatState(); }
+  function markUnread() { if (!chatOpen) $('chat-toggle').classList.add('has-new'); }   // glow the toggle when a reply lands while closed
+  $('chat-toggle').addEventListener('click', function () { setChat(!chatOpen); });
+  $('chat-close').addEventListener('click', function () { setChat(false); });
+
   /* ============================================================ DAY / UP-NEXT */
   var todayEvents = [], todayLoaded = false;
   function fmtClock(d) { var h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12; return h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap; }
@@ -268,6 +285,7 @@
 
   function startApp() {
     $('app').classList.remove('hidden');
+    applyChatState();
     connectWS();
     loadToday();
     greeting();
@@ -326,11 +344,11 @@
   function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
   function nowLabel() { var d = new Date(), h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12; return h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap; }
   function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); messagesEl.appendChild(m); scrollBottom(); }
-  function addAceMessage(t) { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; m.appendChild(document.createTextNode(t)); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); m.appendChild(ts); messagesEl.appendChild(m); scrollBottom(); return m; }
+  function addAceMessage(t) { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; m.appendChild(document.createTextNode(t)); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); m.appendChild(ts); messagesEl.appendChild(m); scrollBottom(); markUnread(); return m; }
   function beginAceStream() { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; var b = document.createElement('span'); m.appendChild(b); var c = document.createElement('span'); c.className = 'cursor'; c.textContent = ' '; m.appendChild(c); messagesEl.appendChild(m); scrollBottom(); return { el: m, body: b, cursor: c, text: '' }; }
   function appendToStream(s, t) { s.text += t; s.body.textContent = s.text; scrollBottom(); }
   function discardEmptyStream() { if (streamMsg && !streamMsg.text && streamMsg.el.parentNode) { streamMsg.el.parentNode.removeChild(streamMsg.el); streamMsg = null; } }
-  function finalizeStream(s, txt) { s.body.textContent = txt || s.text; if (s.cursor.parentNode) s.cursor.parentNode.removeChild(s.cursor); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); s.el.appendChild(ts); speak(txt || s.text); scrollBottom(); }
+  function finalizeStream(s, txt) { s.body.textContent = txt || s.text; if (s.cursor.parentNode) s.cursor.parentNode.removeChild(s.cursor); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); s.el.appendChild(ts); speak(txt || s.text); scrollBottom(); markUnread(); }
   function renderTool(msg) {
     if (msg.status === 'running') { activeTool = document.createElement('div'); activeTool.className = 'tool-pill'; activeTool.innerHTML = '<span class="spin">◈</span> '; activeTool.appendChild(document.createTextNode(msg.label + '…')); messagesEl.appendChild(activeTool); scrollBottom(); }
     else if (activeTool) { activeTool.className = 'tool-pill done'; activeTool.innerHTML = '◈ '; activeTool.appendChild(document.createTextNode(msg.label)); activeTool = null; scrollBottom(); }
@@ -574,10 +592,11 @@
   }
 
   /* ============================================================ WIRING */
-  $('send-btn').addEventListener('click', function () { sendMessage(); });
-  $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') sendMessage(); });
+  // Typed / quick-action sends open the chat so he sees the exchange; voice stays hands-free (glow only).
+  $('send-btn').addEventListener('click', function () { if ($('chat-input').value.trim()) setChat(true); sendMessage(); });
+  $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') { if ($('chat-input').value.trim()) setChat(true); sendMessage(); } });
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-msg]'), function (btn) {
-    btn.addEventListener('click', function () { sendMessage(btn.getAttribute('data-msg')); });
+    btn.addEventListener('click', function () { setChat(true); sendMessage(btn.getAttribute('data-msg')); });
   });
 
   if ('serviceWorker' in navigator) {

@@ -29,26 +29,36 @@
 
 <div id="app" class="hidden">
 
-  <!-- Corner chrome — no bars, no tabs -->
+  <!-- Corner chrome — no bars, no tabs. Up-next lives here now (top, glanceable). -->
   <div id="chrome">
     <div class="wordmark">ACE <span class="dot-sep">◈</span> <span class="dot-sep">PFI</span></div>
+    <div id="upnext" class="hidden"></div>
     <div id="chrome-right">
       <div id="clock">--:--</div>
+      <button id="chat-toggle" class="icon-btn" title="Conversation" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7A8.4 8.4 0 0 1 4 11.5 8.5 8.5 0 0 1 12.5 3 8.4 8.4 0 0 1 21 11.5z"/>
+        </svg>
+      </button>
       <div id="link-dot" title="Link"></div>
     </div>
   </div>
 
-  <!-- The stage: galaxy + conversation. Ace materializes #cards himself. -->
+  <!-- The stage: the orb is the star. Ace materializes #cards to the side slots. -->
   <div id="stage">
     <div id="orb-wrap">
-      <canvas id="orb-canvas" width="480" height="480"></canvas>
+      <canvas id="orb-canvas" width="640" height="640"></canvas>
       <div id="orb-state">[ IDLE ]</div>
     </div>
-    <div id="upnext" class="hidden"></div>
-    <div id="messages"></div>
     <div id="cards-left" class="card-slot"></div>
     <div id="cards" class="card-slot"></div>
   </div>
+
+  <!-- Conversation lives in a side window you toggle on/off (chat-toggle in chrome). -->
+  <aside id="chat-panel">
+    <div id="chat-head"><span>CONVERSATION</span><button id="chat-close" title="Close">✕</button></div>
+    <div id="messages"></div>
+  </aside>
 
   <div id="quick">
     <button class="qa" data-msg="Give me my morning brief.">Morning brief</button>
