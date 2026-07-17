@@ -97,6 +97,14 @@
         cyan: Math.random() < .3,
       });
     }
+    // Free-drifting outer motes — wander independently, fade at the soft edge (cosmic wisp)
+    var motes = [];
+    for (var d = 0; d < 30; d++) motes.push({
+      r: 46 + Math.random() * 62, a0: Math.random() * 6.283,
+      w: (.035 + Math.random() * .07) * (Math.random() < .5 ? 1 : -1),
+      s: .4 + Math.random() * 1.1, tw: Math.random() * 6.283, ts: .4 + Math.random() * 1.5,
+      cyan: Math.random() < .35,
+    });
 
     function setState(s) {
       if (s === 'speaking') { speedT = 2.2; glowT = 1; }
@@ -112,58 +120,76 @@
       var breath = 1 + .045 * Math.sin(t * .55) + amp * .1;
       var light = .75 + .25 * Math.sin(t * .55 + .8) + glow * .5 + amp * .8;
 
+      // Autonomous life: the whole cloud slowly drifts, rotates, and tilts on its own.
+      var dx = 4 * Math.sin(t * 0.11), dy = 3.2 * Math.cos(t * 0.14);   // wander
+      var ox = cx + dx, oy = cy + dy;
+      var flat = 0.56 + 0.13 * Math.sin(t * 0.17);                      // disc tilt over time
+      var gRot = t * 0.06 * speed;                                      // whole-galaxy rotation
+      // Soft edge: everything fades to 0 before the canvas edge — no hard boundary.
+      function fade(r) { return Math.max(0, Math.min(1, 1 - (r - R * 0.6) / (R * 0.42))); }
+
       ctx.clearRect(0, 0, W, W);
       ctx.save();
-      ctx.beginPath(); ctx.arc(cx, cy, R + 6, 0, 6.283); ctx.clip();
-      ctx.translate(cx, cy); ctx.scale(breath, breath); ctx.translate(-cx, -cy);
+      ctx.translate(ox, oy); ctx.scale(breath, breath); ctx.translate(-ox, -oy);
+      ctx.globalCompositeOperation = 'lighter';   // pure additive glow on transparent — it floats in space
 
-      // deep vignette base
-      var base = ctx.createRadialGradient(cx, cy, 10, cx, cy, R + 10);
-      base.addColorStop(0, 'rgba(6,20,18,.9)'); base.addColorStop(1, 'rgba(1,4,5,.2)');
-      ctx.fillStyle = base; ctx.beginPath(); ctx.arc(cx, cy, R + 8, 0, 6.283); ctx.fill();
+      // edgeless glow bed — replaces the old hard vignette/rim; fades fully out, no circle
+      var halo = ctx.createRadialGradient(ox, oy, 6, ox, oy, R * 1.02);
+      var ha = (.11 + glow * .10 + amp * .13) * light;
+      halo.addColorStop(0, 'rgba(69,255,166,' + ha.toFixed(3) + ')');
+      halo.addColorStop(.5, 'rgba(69,255,166,' + (ha * .4).toFixed(3) + ')');
+      halo.addColorStop(1, 'rgba(69,255,166,0)');
+      ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(ox, oy, R * 1.02, 0, 6.283); ctx.fill();
 
-      // nebula clouds (additive)
-      ctx.globalCompositeOperation = 'lighter';
+      // nebula clouds — drift with the galaxy, morph, tilt
       for (var i = 0; i < clouds.length; i++) {
         var c = clouds[i];
-        var ang = c.ang + t * c.spd * speed;
-        var wr = c.r * (1 + .12 * Math.sin(t * .4 + c.wob));
-        var x = cx + Math.cos(ang) * c.dist, y = cy + Math.sin(ang) * c.dist * .62;
+        var ang = c.ang + gRot + t * c.spd * speed;
+        var wr = c.r * (1 + .14 * Math.sin(t * .4 + c.wob));
+        var x = ox + Math.cos(ang) * c.dist, y = oy + Math.sin(ang) * c.dist * flat;
         var g = ctx.createRadialGradient(x, y, 0, x, y, wr);
         g.addColorStop(0, 'rgba(' + c.hue + ',' + (c.a * light).toFixed(3) + ')');
         g.addColorStop(1, 'rgba(' + c.hue + ',0)');
         ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, wr, 0, 6.283); ctx.fill();
       }
 
-      // spiral-arm stars
+      // spiral-arm stars — orbit + global rotation, fading softly at the rim
       for (var k = 0; k < starsG.length; k++) {
         var st = starsG[k];
-        var a = st.a0 + t * st.w * speed;
-        var x2 = cx + Math.cos(a) * st.r, y2 = cy + Math.sin(a) * st.r * .62;
+        var a = st.a0 + gRot + t * st.w * speed;
+        var x2 = ox + Math.cos(a) * st.r, y2 = oy + Math.sin(a) * st.r * flat;
         var tw = .35 + .55 * (.5 + .5 * Math.sin(t * st.ts + st.tw));
+        var al = tw * light * .9 * fade(st.r);
+        if (al <= 0) continue;
         ctx.fillStyle = st.cyan
-          ? 'rgba(160,240,255,' + (tw * light * .9).toFixed(3) + ')'
-          : 'rgba(190,255,225,' + (tw * light * .9).toFixed(3) + ')';
+          ? 'rgba(160,240,255,' + al.toFixed(3) + ')'
+          : 'rgba(190,255,225,' + al.toFixed(3) + ')';
         ctx.beginPath(); ctx.arc(x2, y2, st.s, 0, 6.283); ctx.fill();
       }
 
-      // luminous core
-      var coreR = 26 + amp * 10;
-      var core = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
-      core.addColorStop(0, 'rgba(235,255,245,' + (.85 * light).toFixed(3) + ')');
-      core.addColorStop(.35, 'rgba(69,255,166,' + (.5 * light).toFixed(3) + ')');
+      // free-drifting outer motes — wander on their own, wispy, fade at the edge
+      for (var d2 = 0; d2 < motes.length; d2++) {
+        var mo = motes[d2];
+        var ma = mo.a0 + gRot * .6 + t * mo.w;
+        var mr = mo.r * (1 + .07 * Math.sin(t * .3 + mo.tw));
+        var mx = ox + Math.cos(ma) * mr, my = oy + Math.sin(ma) * mr * flat;
+        var mal = (.3 + .6 * (.5 + .5 * Math.sin(t * mo.ts + mo.tw))) * light * .7 * fade(mr);
+        if (mal <= 0) continue;
+        ctx.fillStyle = mo.cyan
+          ? 'rgba(150,235,255,' + mal.toFixed(3) + ')'
+          : 'rgba(200,255,230,' + mal.toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(mx, my, mo.s, 0, 6.283); ctx.fill();
+      }
+
+      // luminous core — the galaxy's heart, drifting with it
+      var coreR = 30 + amp * 12;
+      var core = ctx.createRadialGradient(ox, oy, 0, ox, oy, coreR);
+      core.addColorStop(0, 'rgba(240,255,248,' + (.92 * light).toFixed(3) + ')');
+      core.addColorStop(.32, 'rgba(69,255,166,' + (.55 * light).toFixed(3) + ')');
       core.addColorStop(1, 'rgba(69,255,166,0)');
-      ctx.fillStyle = core; ctx.beginPath(); ctx.arc(cx, cy, coreR, 0, 6.283); ctx.fill();
+      ctx.fillStyle = core; ctx.beginPath(); ctx.arc(ox, oy, coreR, 0, 6.283); ctx.fill();
 
       ctx.globalCompositeOperation = 'source-over';
-      ctx.restore();
-
-      // halo rim — soft, breathing with the galaxy
-      ctx.save();
-      ctx.shadowColor = 'rgba(69,255,166,.8)'; ctx.shadowBlur = 16 + glow * 18 + amp * 14;
-      ctx.strokeStyle = 'rgba(69,255,166,' + (.22 + glow * .3 + amp * .3).toFixed(3) + ')';
-      ctx.lineWidth = 1.2;
-      ctx.beginPath(); ctx.arc(cx, cy, (R + 4) * breath, 0, 6.283); ctx.stroke();
       ctx.restore();
 
       requestAnimationFrame(frame);
