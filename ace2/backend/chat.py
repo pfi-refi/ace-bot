@@ -44,7 +44,7 @@ logger = logging.getLogger("ace2.chat")
 EASTERN = pytz.timezone("America/New_York")
 MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
-MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "1500"))
+MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "2000"))  # headroom for adaptive thinking
 MAX_TOOL_ITERS = 8
 
 _client = None
@@ -91,16 +91,27 @@ async def _live_context() -> str:
     return "\n".join(parts)
 
 
-async def _load_messages(user_text: str) -> list:
-    """Shared continuity (read-only) + this turn, sanitized to {role,content}."""
-    hist = await asyncio.to_thread(brain.read_shared_conversation)
-    msgs = brain.sanitize_for_api(hist)
-    msgs.append({"role": "user", "content": user_text})
+async def _load_messages(user_text: str, prior=None) -> list:
+    """Conversation for the API, sanitized to {role,content} + this turn.
+
+    prior=None (HUD chat): read the shared Telegram window for continuity — 2.0
+    reads it, never writes it. prior given (voice adapter): use the caller's
+    conversation verbatim; ElevenLabs sends the full turn history each call, so
+    that IS the source of truth for intra-call memory.
+    """
+    if prior is None:
+        prior = await asyncio.to_thread(brain.read_shared_conversation)
+    msgs = brain.sanitize_for_api(prior)
+    if not msgs or msgs[-1].get("content") != user_text:
+        msgs.append({"role": "user", "content": user_text})
     return msgs
 
 
-async def stream_turn(user_text: str, emit):
-    """Run one Ace turn, emitting WS events via `emit(type, payload)` (async)."""
+async def stream_turn(user_text: str, emit, prior=None):
+    """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
+
+    prior: optional prior conversation (voice adapter passes ElevenLabs' messages).
+    """
     user_text = (user_text or "").strip()
     if not user_text:
         await emit("error", {"text": "Empty message"})
@@ -108,7 +119,7 @@ async def stream_turn(user_text: str, emit):
 
     try:
         system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + await _live_context()
-        messages = await _load_messages(user_text)
+        messages = await _load_messages(user_text, prior)
     except Exception as e:
         logger.error("context build failed: %s", e)
         await emit("error", {"text": f"⚠️ Couldn't reach your data: {e}"})

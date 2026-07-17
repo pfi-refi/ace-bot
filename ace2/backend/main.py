@@ -325,13 +325,21 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
     body = await request.json()
     model = body.get("model", "ace-2")
     msgs = body.get("messages", [])
+
+    def _text(c):
+        return c if isinstance(c, str) else " ".join(
+            b.get("text", "") for b in c if isinstance(b, dict)
+        )
+
+    # Full prior conversation (ElevenLabs sends it each call) → Ace's turn memory.
+    prior = [
+        {"role": m["role"], "content": _text(m.get("content", ""))}
+        for m in msgs if m.get("role") in ("user", "assistant") and _text(m.get("content", "")).strip()
+    ]
     user_text = ""
-    for m in reversed(msgs):
-        if m.get("role") == "user":
-            c = m.get("content", "")
-            user_text = c if isinstance(c, str) else " ".join(
-                b.get("text", "") for b in c if isinstance(b, dict)
-            )
+    for m in reversed(prior):
+        if m["role"] == "user":
+            user_text = m["content"]
             break
 
     created = int(time.time())
@@ -350,7 +358,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
 
         async def run():
             try:
-                await chat.stream_turn(user_text, emit)
+                await chat.stream_turn(user_text, emit, prior=prior)
             finally:
                 await queue.put(("done", None))
 
