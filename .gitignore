@@ -1,1 +1,3 @@
 .recovered/
+.venv-test/
+__pycache__/
