@@ -20,13 +20,13 @@ import httpx
 
 logger = logging.getLogger("ace2.voice")
 
-DEFAULT_MODEL = "eleven_flash_v2_5"          # ~75ms, ElevenLabs' real-time pick
+DEFAULT_MODEL = "eleven_flash_v2_5"          # ~75ms, ElevenLabs' real-time pick (matches the bot)
 DEFAULT_SETTINGS = {
-    "stability": 0.5,
+    "stability": 0.55,        # a touch steadier → less warble between phrases
     "similarity_boost": 0.75,
-    "style": 0.3,
+    "style": 0.25,
     "use_speaker_boost": True,
-    "speed": 1.1,
+    "speed": 1.0,             # was 1.1 — 10% faster read made it sound rushed/clipped
 }
 
 

@@ -587,24 +587,26 @@
       .catch(function () { browserSpeak(text); });
   }
   function playAudioBlob(blob) {
+    // Play the mp3 through the NATIVE <audio> path — no Web Audio rerouting. Routing the
+    // element through createMediaElementSource just to read amplitude is the classic cause
+    // of stuttery/"broken up" playback; the orb is driven by a synthetic pulse instead.
     setOrbState('speaking');
-    try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
-    ttsAudio = new Audio(URL.createObjectURL(blob));
-    var analyser = null, data = null, raf = null;
-    if (audioCtx) {
-      try {
-        var src = audioCtx.createMediaElementSource(ttsAudio);
-        analyser = audioCtx.createAnalyser(); analyser.fftSize = 256;
-        src.connect(analyser); analyser.connect(audioCtx.destination);
-        data = new Uint8Array(analyser.frequencyBinCount);
-        (function loop() { if (!analyser) return; analyser.getByteFrequencyData(data);
-          var sum = 0; for (var i = 0; i < data.length; i++) sum += data[i];
-          orb.setAmplitude((sum / data.length) / 128); raf = requestAnimationFrame(loop); })();
-      } catch (e) { analyser = null; }
-    }
-    var done = function () { if (raf) cancelAnimationFrame(raf); orb.setAmplitude(0); ttsAudio = null; playNextTts(); };
+    var url = URL.createObjectURL(blob);
+    ttsAudio = new Audio(url);
+    var raf = null, t0 = performance.now();
+    (function pulse() {
+      if (!ttsAudio) return;
+      var e = (performance.now() - t0) / 1000;
+      orb.setAmplitude(0.30 + 0.26 * Math.abs(Math.sin(e * 6.1)) + 0.16 * Math.abs(Math.sin(e * 10.7)));
+      raf = requestAnimationFrame(pulse);
+    })();
+    var done = function () {
+      if (raf) cancelAnimationFrame(raf);
+      orb.setAmplitude(0);
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      ttsAudio = null; playNextTts();
+    };
     ttsAudio.onended = done; ttsAudio.onerror = done;
-    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     ttsAudio.play().catch(done);
   }
   function browserSpeak(text) {
