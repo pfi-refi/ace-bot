@@ -35,12 +35,21 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .brain import google_ready, read_memory
+from . import chat, history, voice
+from .brain import google_ready, read_memory, read_recovered_history, read_shared_conversation
 from .integrations.calendar_api import get_events_structured
 from .integrations.tasks_api import get_tasks_structured
 from .integrations.weather import get_weather
@@ -208,6 +217,166 @@ async def bootstrap(days: int = 7):
         "weather": wx,
         "services": {"calendar": e_ok, "tasks": t_ok, "drive": m_ok, "weather": w_ok},
     }
+
+
+# ── Chat: streaming WebSocket + HTTP fallback ───────────────────────────────────
+class ChatReq(BaseModel):
+    message: str = ""
+
+
+@app.websocket("/ws/chat")
+async def ws_chat(websocket: WebSocket):
+    """Real-time streaming chat. Token rides as ?token= (browsers can't set WS
+    headers). A bad token closes 4401 so the client routes back to login."""
+    token = websocket.query_params.get("token", "")
+    if not token_valid(token):
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+
+    async def emit(event_type, payload):
+        await websocket.send_json({"type": event_type, **payload})
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            text = (data.get("message") or "").strip()
+            if not text:
+                await emit("error", {"text": "Empty message"})
+                continue
+            await emit("start", {})
+            await chat.stream_turn(text, emit)
+            await emit("done", {})
+    except WebSocketDisconnect:
+        logger.info("WS disconnected.")
+    except Exception as e:
+        logger.error("WS error: %s", e)
+        try:
+            await emit("error", {"text": f"⚠️ {e}"})
+        except Exception:
+            pass
+
+
+@app.post("/chat", dependencies=[Depends(require_auth)])
+async def chat_http(req: ChatReq):
+    """Non-streaming fallback — collects the full reply + confirmations."""
+    reply, confirmations = [], []
+
+    async def emit(event_type, payload):
+        if event_type == "final":
+            reply.append(payload.get("text", ""))
+        elif event_type == "confirmation":
+            confirmations.append(payload.get("text", ""))
+        elif event_type == "error":
+            reply.append(payload.get("text", ""))
+
+    await chat.stream_turn((req.message or "").strip(), emit)
+    return {"reply": "".join(reply), "confirmations": confirmations}
+
+
+# ── Voice: TTS proxy (ACE voice, key server-side) ───────────────────────────────
+class TTSReq(BaseModel):
+    text: str = ""
+
+
+@app.post("/tts", dependencies=[Depends(require_auth)])
+async def tts(req: TTSReq):
+    audio, info = await voice.synthesize(req.text)
+    if audio is None:
+        # 204 → frontend falls back to browser speechSynthesis, no error noise.
+        return Response(status_code=204, headers={"X-TTS-Fallback": info})
+    return Response(content=audio, media_type=info)
+
+
+# ── History: 2.0's own + the read-only shared/recovered Telegram past ────────────
+@app.get("/history", dependencies=[Depends(require_auth)])
+async def history_view(months: int = 3):
+    """Merged transcript: 2.0's timestamped history + the shared Telegram window +
+    the recovered pre-wipe archive. Read-only — nothing here can touch the bot."""
+    own, shared, recovered = await asyncio.gather(
+        asyncio.to_thread(history.read_recent, months),
+        asyncio.to_thread(read_shared_conversation),
+        asyncio.to_thread(read_recovered_history),
+    )
+    return {
+        "own": own,                    # [{ts, source, role, content}]
+        "shared": shared,              # [{role, content}] — current Telegram window
+        "recovered_count": len(recovered),
+    }
+
+
+# ── Voice brain: OpenAI-compatible custom-LLM endpoint for ElevenLabs Agents ─────
+# ElevenLabs' Conversational AI can use a custom LLM by POSTing an OpenAI-shaped
+# /v1/chat/completions and streaming SSE back. This exposes Ace's REAL brain
+# (same prompt, memory, tools) as that LLM — so a realtime voice agent is still
+# the same Ace, tools and all, not a second assistant. Gated by ACE2_LLM_KEY.
+def _llm_authorized(authorization: str) -> bool:
+    want = os.environ.get("ACE2_LLM_KEY", "").strip()
+    if not want:
+        return True  # unset → open (dev only; set it before pointing ElevenLabs here)
+    token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+    return hmac.compare_digest(token.strip(), want)
+
+
+@app.post("/v1/chat/completions")
+async def openai_compat(request: Request, authorization: str = Header(default="")):
+    if not _llm_authorized(authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    model = body.get("model", "ace-2")
+    msgs = body.get("messages", [])
+    user_text = ""
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            c = m.get("content", "")
+            user_text = c if isinstance(c, str) else " ".join(
+                b.get("text", "") for b in c if isinstance(b, dict)
+            )
+            break
+
+    created = int(time.time())
+
+    async def sse():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def emit(event_type, payload):
+            if event_type == "delta":
+                await queue.put(("delta", payload.get("text", "")))
+            elif event_type in ("final", "done"):
+                await queue.put(("done", None))
+            elif event_type == "error":
+                await queue.put(("delta", payload.get("text", "")))
+                await queue.put(("done", None))
+
+        async def run():
+            try:
+                await chat.stream_turn(user_text, emit)
+            finally:
+                await queue.put(("done", None))
+
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                kind, text = await queue.get()
+                if kind == "done":
+                    break
+                chunk = {
+                    "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            done_chunk = {
+                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(done_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            task.cancel()
+
+    return StreamingResponse(sse(), media_type="text/event-stream")
 
 
 # ── Static frontend (mounted last so API routes win) ────────────────────────────

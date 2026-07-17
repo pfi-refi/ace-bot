@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>ACE 2.0 // PFI Command Center</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<canvas id="matrix"></canvas>
+<div id="overlay"></div>
+
+<!-- Login gate -->
+<div id="login" class="hidden">
+  <div class="box">
+    <div class="title">ACE <span class="v">2.0</span></div>
+    <div class="sub">PFI Command Center</div>
+    <input id="login-input" type="password" placeholder="ACCESS CODE" autocomplete="current-password">
+    <button id="login-btn">AUTHENTICATE</button>
+    <div id="login-err" class="err"></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+
+  <!-- TOP BAR -->
+  <header id="topbar">
+    <div class="brand">ACE <span class="diamond">◈</span> PFI COMMAND CENTER</div>
+    <div id="summon-bar"></div>
+    <div id="clock-wrap">
+      <div id="clock">--:--<span class="sec">:--</span><span class="ampm">--</span></div>
+      <div id="topdate">&nbsp;</div>
+    </div>
+    <div class="status-chips">
+      <div class="chip" id="chip-link"><span class="dot"></span>ACE LINK</div>
+      <div class="chip" id="chip-sync"><span class="dot"></span>SYNCED</div>
+    </div>
+  </header>
+
+  <!-- MAIN GRID (data-dir switches layout: rail | halo | focus) -->
+  <div id="main" data-dir="rail">
+
+    <!-- LEFT DOCK -->
+    <aside id="dock-left" class="rail scroll">
+      <section class="layer" data-layer="schedule" data-grow="1">
+        <div class="layer-head"><span class="t">SCHEDULE</span><button class="collapse" aria-label="Collapse">–</button></div>
+        <div class="layer-body scroll">
+          <div class="sub-head">TODAY</div>
+          <div id="today-list"><div class="loading">loading…</div></div>
+          <div class="sub-head divide">UPCOMING</div>
+          <div id="upcoming-list"><div class="loading">loading…</div></div>
+        </div>
+      </section>
+      <section class="layer" data-layer="weather">
+        <div class="layer-head"><span class="t">WEATHER</span><button class="collapse" aria-label="Collapse">–</button></div>
+        <div class="layer-body"><div id="wx-card"><div class="loading">loading…</div></div></div>
+      </section>
+    </aside>
+
+    <!-- CORE -->
+    <section id="core">
+      <div id="orb-stage">
+        <div id="orb-wrap">
+          <div id="orb-glow"></div>
+          <canvas id="orb-canvas" width="240" height="240"></canvas>
+          <div id="orb-state">[ IDLE ]</div>
+        </div>
+      </div>
+
+      <div id="messages" class="scroll"></div>
+
+      <div id="quick">
+        <button class="qa" data-msg="Give me my morning brief.">MORNING BRIEF</button>
+        <button class="qa" data-msg="What are my tasks, ranked by priority?">TASKS</button>
+        <button class="qa" data-msg="What's on my calendar today?">CALENDAR</button>
+        <button class="qa" id="qa-history">HISTORY</button>
+        <button class="qa" id="qa-memory">MEMORY</button>
+      </div>
+
+      <div id="input-bar">
+        <button id="mic-btn" class="icon-btn" title="Hold to talk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </button>
+        <input id="chat-input" type="text" placeholder="Message Ace…" autocomplete="off">
+        <button id="voice-toggle" class="icon-btn" title="Voice reply on/off" aria-pressed="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>
+          </svg>
+        </button>
+        <button id="send-btn" class="icon-btn" title="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+    </section>
+
+    <!-- RIGHT DOCK -->
+    <aside id="dock-right" class="rail scroll">
+      <section class="layer" data-layer="intel">
+        <div class="layer-head"><span class="t">INTEL FEED</span><button class="collapse" aria-label="Collapse">–</button></div>
+        <div class="layer-body scroll"><div id="intel-list"><div class="empty-state">awaiting signal</div></div></div>
+      </section>
+      <section class="layer" data-layer="tasks" data-grow="1">
+        <div class="layer-head"><span class="t">TASKS</span><button class="collapse" aria-label="Collapse">–</button></div>
+        <div class="layer-body scroll"><div id="tasks-list"><div class="loading">loading…</div></div></div>
+      </section>
+    </aside>
+
+  </div>
+
+  <!-- BOTTOM BAR -->
+  <footer id="bottombar">
+    <div id="bb-version">ACE v2.0.0 // OPERATIONAL</div>
+    <div class="grp" id="bb-services">
+      <span class="svc" id="svc-calendar"><span class="d"></span>CALENDAR</span>
+      <span class="svc" id="svc-gmail"><span class="d"></span>GMAIL</span>
+      <span class="svc" id="svc-tasks"><span class="d"></span>TASKS</span>
+      <span class="svc" id="svc-drive"><span class="d"></span>DRIVE</span>
+    </div>
+    <div id="bb-weather">CLE ---°F</div>
+  </footer>
+
+</div>
+
+<!-- Overlay layer (memory / history) -->
+<div id="modal" class="hidden">
+  <div class="box">
+    <div class="m-title"><span id="modal-title">ACE</span><span class="m-close" id="modal-close">✕ CLOSE</span></div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
