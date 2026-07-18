@@ -144,6 +144,22 @@ async def require_auth(authorization: str = Header(default="")):
 
 app = FastAPI(title="Ace 2.0", version=VERSION)
 
+# Live browser sockets (the HUD's /ws/chat). Single-user, so every connected socket is
+# Brady's authenticated browser — we broadcast stage events (cards) to all of them. This is
+# the side-channel that lets a VOICE turn (which rides ElevenLabs' pipe) paint the screen.
+_stage_clients: set = set()
+
+
+async def publish_stage_event(event_type: str, payload: dict):
+    dead = []
+    for ws in list(_stage_clients):
+        try:
+            await ws.send_json({"type": event_type, **payload})
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _stage_clients.discard(ws)
+
 
 class AuthReq(BaseModel):
     password: str = ""
@@ -279,6 +295,7 @@ async def ws_chat(websocket: WebSocket):
         await websocket.close(code=4401)
         return
     await websocket.accept()
+    _stage_clients.add(websocket)   # register for voice-turn stage events (cards)
 
     async def emit(event_type, payload):
         await websocket.send_json({"type": event_type, **payload})
@@ -313,6 +330,8 @@ async def ws_chat(websocket: WebSocket):
             await emit("error", {"text": f"⚠️ {e}"})
         except Exception:
             pass
+    finally:
+        _stage_clients.discard(websocket)
 
 
 @app.post("/chat", dependencies=[Depends(require_auth)])
@@ -465,6 +484,16 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             yield "data: [DONE]\n\n"
         finally:
             task.cancel()
+
+    # Off to the side of the spoken reply: decide whether to paint a card on Brady's screen
+    # and push it over the app WebSocket. Spawned OUTSIDE sse() so its lifecycle isn't tied to
+    # the SSE `finally: task.cancel()`. Only runs when a browser is actually connected. It emits
+    # ONLY card/open events (never delta/final), so it can't touch the voice first-token deadline.
+    if _stage_clients:
+        async def _stage_emit(event_type, payload):
+            if event_type in ("card", "open"):
+                await publish_stage_event(event_type, payload)
+        asyncio.create_task(chat.stage_pass(user_text, _stage_emit, prior=prior))
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 

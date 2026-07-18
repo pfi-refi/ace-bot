@@ -343,6 +343,45 @@ async def _fast_context() -> str:
     ])
 
 
+STAGE_TOOLS = [t for t in tools.TOOLS if t["name"] in tools.UI_TOOLS]
+# Picking which card to show is a simple call — run it on Haiku, not Opus, so the stage
+# pass adds minimal cost/latency on top of every voice turn.
+STAGE_MODEL = os.environ.get("ACE2_STAGE_MODEL", "claude-haiku-4-5-20251001")
+
+STAGE_NUDGE = (
+    "\n\n---\nSTAGE MODE: Brady is on a live VOICE call — he is talking, not reading. "
+    "Your ONLY job right now is the screen. Call display_card (or open_url) when he asks "
+    "to see something, or when a card materially helps what he just said (e.g. he asks "
+    "about his schedule → show 'timeline' or 'calendar'; his to-dos → 'daybank'). If "
+    "nothing should appear on screen, call NO tool at all. Do not produce spoken text — a "
+    "separate process handles the reply; you only decide the visuals."
+)
+
+
+async def stage_pass(user_text: str, emit, prior=None):
+    """Off-critical-path DISPLAY decision for a live voice turn: pick a card (if any) and
+    push it to Brady's browser over the app WebSocket. Display-only tools, no thinking, one
+    non-streaming round-trip. It NEVER writes to the ElevenLabs SSE stream, so it cannot
+    reintroduce the first-token 'LLM Cascade Error' — that's the whole point of keeping it
+    separate from the spoken reply in stream_turn(fast=True)."""
+    user_text = (user_text or "").strip()
+    if not user_text:
+        return
+    try:
+        ctx = await _fast_context()
+        system = build_system_prompt() + STAGE_NUDGE + "\n\n---\nLIVE CONTEXT\n" + ctx
+        messages = await _load_messages(user_text, prior)
+        client = _anthropic()
+        final = await client.messages.create(
+            model=STAGE_MODEL, max_tokens=512, system=system, messages=messages, tools=STAGE_TOOLS,
+        )
+        for block in final.content:
+            if getattr(block, "type", "") == "tool_use" and block.name in tools.UI_TOOLS:
+                await _run_ui_tool(block.name, dict(block.input), emit)
+    except Exception as e:
+        logger.warning("stage_pass failed: %s", e)
+
+
 async def stream_turn(user_text: str, emit, prior=None, fast=False):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
