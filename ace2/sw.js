@@ -5,7 +5,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v11';   // v11: full-duplex live voice (ElevenLabs Agents)
+const CACHE_VERSION = 'ace2-shell-v12';   // v12: chat panel toggle-only (never auto-opens)
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 

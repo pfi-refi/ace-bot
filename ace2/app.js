@@ -668,7 +668,7 @@
         if (!d || !d.signed_url) throw ((d && d.error) || 'no signed url');
         return Conv.startSession({
           signedUrl: d.signed_url,
-          onConnect: function () { setChat(true); liveRAF = requestAnimationFrame(livePulse); },
+          onConnect: function () { liveRAF = requestAnimationFrame(livePulse); },
           onDisconnect: function () { endLiveVoice(); },
           onError: function (err) { addAceMessage('Live voice error: ' + (err && err.message || err)); endLiveVoice(); },
           onModeChange: function (m) { var mm = (m && m.mode) || m; liveMode = (mm === 'speaking') ? 'speaking' : 'listening'; setOrbState(liveMode); },
@@ -756,11 +756,13 @@
   }
 
   /* ============================================================ WIRING */
-  // Typed / quick-action sends open the chat so he sees the exchange; voice stays hands-free (glow only).
-  $('send-btn').addEventListener('click', function () { if ($('chat-input').value.trim()) setChat(true); sendMessage(); });
-  $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') { if ($('chat-input').value.trim()) setChat(true); sendMessage(); } });
+  // Chat panel stays hidden until Brady toggles it — sends never auto-open it. Every reply
+  // still glows the toggle (markUnread) so he knows one landed, and Ace speaks it; cards render
+  // on the stage regardless of the panel. Toggle it open only when he wants to read the thread.
+  $('send-btn').addEventListener('click', function () { sendMessage(); });
+  $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') { sendMessage(); } });
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-msg]'), function (btn) {
-    btn.addEventListener('click', function () { setChat(true); sendMessage(btn.getAttribute('data-msg')); });
+    btn.addEventListener('click', function () { sendMessage(btn.getAttribute('data-msg')); });
   });
 
   if ('serviceWorker' in navigator) {
