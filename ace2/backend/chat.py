@@ -279,8 +279,11 @@ async def _fast_context() -> str:
         "TODAY'S SCHEDULE (relative to the current time above):",
         _format_today_schedule(ok(today_events, []), now),
         "",
-        "(VOICE MODE: keep replies short, natural and spoken — a sentence or two. "
-        "For inbox, weather, tasks or other days, call the matching tool.)",
+        "(VOICE MODE — you are speaking out loud. Reply in a sentence or two of natural "
+        "spoken English: no lists, no markdown, no headings. Answer from the context above. "
+        "You have NO tools on this voice channel, so if Brady asks you to DO something — send "
+        "an email, add an event, capture a to-do — tell him you'll line it up and to confirm "
+        "from the screen or by text; never claim it's already done.)",
     ])
 
 
@@ -311,24 +314,28 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
         await emit("error", {"text": f"⚠️ Couldn't reach your data: {e}"})
         return ""
 
-    effort = "low" if fast else EFFORT
-
     client = _anthropic()
     full_reply = []
     confirmations = []
 
+    # Voice (fast) path: NO tools, NO extended thinking, tight token cap — the
+    # model must lead with SPOKEN TEXT so the first token streams inside
+    # ElevenLabs' custom-LLM first-token deadline. Leading with a tool call or a
+    # thinking block = no text in time = "LLM Cascade Error" (the call fails and
+    # Ace never replies). The typed path keeps the full tooled + thinking loop.
+    if fast:
+        stream_kwargs = dict(model=MODEL, max_tokens=1024, system=system, messages=messages)
+    else:
+        stream_kwargs = dict(
+            model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
+            tools=tools.TOOLS, thinking={"type": "adaptive"},
+            output_config={"effort": EFFORT},
+        )
+
     try:
         for _ in range(MAX_TOOL_ITERS):
             turn_text = []
-            async with client.messages.stream(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=system,
-                messages=messages,
-                tools=tools.TOOLS,
-                thinking={"type": "adaptive"},
-                output_config={"effort": effort},
-            ) as stream:
+            async with client.messages.stream(**stream_kwargs) as stream:
                 async for event in stream:
                     if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
                         turn_text.append(event.delta.text)
@@ -376,6 +383,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
             logger.warning("hit MAX_TOOL_ITERS for: %s", user_text[:80])
 
         reply = "".join(full_reply).strip()
+        if fast and not reply:
+            # An empty completion makes ElevenLabs treat the turn as an LLM failure
+            # and cascade — always give voice something to say.
+            reply = "I'm here — say that again for me?"
         await emit("final", {"text": reply})
 
         # Persist to 2.0's OWN history (best-effort; never blocks the reply).
