@@ -250,17 +250,20 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
 
 
 async def _fast_context() -> str:
-    """Lean context for LOW-LATENCY voice: memory + time + today's schedule only.
+    """Lean context for LOW-LATENCY voice: memory + time + today's schedule +
+    data bank + the recent conversation thread (for continuity).
 
-    The full `_live_context()` fans out to Gmail, Calendar, Tasks, Drive and weather
-    on every turn — several seconds before Ace can speak, which is fatal on a live
-    call. Voice skips that and fetches only what's local/cheap (memory) plus one
-    calendar read for time-awareness; Ace calls the matching tool on demand when
-    Brady actually asks about inbox / weather / tasks / other days.
+    The full `_live_context()` also fans out to Gmail, Tasks and weather every turn
+    — several seconds before Ace can speak, which is fatal on a live call. Voice
+    skips those (Ace has no tools on this channel anyway) but DOES carry memory,
+    today's schedule, the tracked data bank, and the last few turns of the ongoing
+    thread so it isn't a cold start — all fetched concurrently to stay fast.
     """
-    memory, today_events = await asyncio.gather(
+    memory, today_events, bank, convo = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
         asyncio.to_thread(get_events_structured, 1),
+        asyncio.to_thread(daybank.read_items, True),
+        asyncio.to_thread(brain.read_shared_conversation),
         return_exceptions=True,
     )
 
@@ -270,14 +273,25 @@ async def _fast_context() -> str:
     now = datetime.now(EASTERN)
     mem_list = ok(memory, [])
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
+    # Continuity: the last few turns of the ongoing thread (HUD + voice + Telegram)
+    # so voice remembers what we were just talking about — not a cold start each call.
+    thread = brain.sanitize_for_api(ok(convo, []))[-10:]
+    convo_str = "\n".join(f"{m['role']}: {m['content'][:280]}" for m in thread) if thread else "(no earlier conversation on record)"
     return "\n".join([
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
-        "ACE MEMORY (what you know about Brady and PFI):",
+        "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
         "",
         "TODAY'S SCHEDULE (relative to the current time above):",
         _format_today_schedule(ok(today_events, []), now),
+        "",
+        "DATA BANK (commitments / to-dos / deals you're already tracking for Brady):",
+        _format_daybank(ok(bank, [])),
+        "",
+        "RECENT THREAD (what you and Brady have been discussing lately, across the HUD, "
+        "voice and Telegram — use it for continuity):",
+        convo_str,
         "",
         "(VOICE MODE — you are speaking out loud. Reply in a sentence or two of natural "
         "spoken English: no lists, no markdown, no headings. Answer from the context above. "
