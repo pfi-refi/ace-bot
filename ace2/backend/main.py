@@ -440,7 +440,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
 
         async def run():
             try:
-                await chat.stream_turn(user_text, emit, prior=prior)
+                await chat.stream_turn(user_text, emit, prior=prior, fast=True)
             finally:
                 await queue.put(("done", None))
 

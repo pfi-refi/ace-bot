@@ -249,13 +249,51 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
     return f"⚠️ Unknown UI tool: {name}"
 
 
-async def stream_turn(user_text: str, emit, prior=None):
+async def _fast_context() -> str:
+    """Lean context for LOW-LATENCY voice: memory + time + today's schedule only.
+
+    The full `_live_context()` fans out to Gmail, Calendar, Tasks, Drive and weather
+    on every turn — several seconds before Ace can speak, which is fatal on a live
+    call. Voice skips that and fetches only what's local/cheap (memory) plus one
+    calendar read for time-awareness; Ace calls the matching tool on demand when
+    Brady actually asks about inbox / weather / tasks / other days.
+    """
+    memory, today_events = await asyncio.gather(
+        asyncio.to_thread(brain.read_memory),
+        asyncio.to_thread(get_events_structured, 1),
+        return_exceptions=True,
+    )
+
+    def ok(v, default):
+        return default if isinstance(v, Exception) else v
+
+    now = datetime.now(EASTERN)
+    mem_list = ok(memory, [])
+    mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
+    return "\n".join([
+        f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
+        "",
+        "ACE MEMORY (what you know about Brady and PFI):",
+        mem,
+        "",
+        "TODAY'S SCHEDULE (relative to the current time above):",
+        _format_today_schedule(ok(today_events, []), now),
+        "",
+        "(VOICE MODE: keep replies short, natural and spoken — a sentence or two. "
+        "For inbox, weather, tasks or other days, call the matching tool.)",
+    ])
+
+
+async def stream_turn(user_text: str, emit, prior=None, fast=False):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
     prior: the conversation so far. The WS handler passes its per-connection
     transcript (shared Telegram window + this session's turns) so Ace actually
     remembers the conversation he's in; the voice adapter passes ElevenLabs'
     messages. None = fall back to the shared window only (HTTP one-shots).
+
+    fast: low-latency path for live voice — lean context + low effort so Ace
+    starts speaking quickly instead of stalling behind a full data prefetch.
 
     Returns the reply text so the caller can append it to its transcript.
     """
@@ -265,12 +303,15 @@ async def stream_turn(user_text: str, emit, prior=None):
         return ""
 
     try:
-        system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + await _live_context()
+        ctx = await (_fast_context() if fast else _live_context())
+        system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + ctx
         messages = await _load_messages(user_text, prior)
     except Exception as e:
         logger.error("context build failed: %s", e)
         await emit("error", {"text": f"⚠️ Couldn't reach your data: {e}"})
         return ""
+
+    effort = "low" if fast else EFFORT
 
     client = _anthropic()
     full_reply = []
@@ -286,7 +327,7 @@ async def stream_turn(user_text: str, emit, prior=None):
                 messages=messages,
                 tools=tools.TOOLS,
                 thinking={"type": "adaptive"},
-                output_config={"effort": EFFORT},
+                output_config={"effort": effort},
             ) as stream:
                 async for event in stream:
                     if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
