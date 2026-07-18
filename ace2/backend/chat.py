@@ -47,6 +47,11 @@ logger = logging.getLogger("ace2.chat")
 
 EASTERN = pytz.timezone("America/New_York")
 MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
+# Live VOICE replies run on the FASTEST model, not Opus — conversational snappiness
+# (time-to-first-word) matters far more than depth per spoken sentence, and Opus's
+# thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
+# Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
+VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
@@ -419,7 +424,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     # thinking block = no text in time = "LLM Cascade Error" (the call fails and
     # Ace never replies). The typed path keeps the full tooled + thinking loop.
     if fast:
-        stream_kwargs = dict(model=MODEL, max_tokens=1024, system=system, messages=messages)
+        stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1024, system=system, messages=messages)
     else:
         stream_kwargs = dict(
             model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
