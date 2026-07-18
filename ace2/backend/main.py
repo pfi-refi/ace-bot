@@ -346,6 +346,15 @@ async def tts(req: TTSReq):
     return Response(content=audio, media_type=info)
 
 
+@app.post("/stt", dependencies=[Depends(require_auth)])
+async def stt(request: Request):
+    """Transcribe recorded mic audio (raw body) → {text}. Real STT, not the browser's."""
+    audio = await request.body()
+    ctype = request.headers.get("content-type", "audio/webm")
+    text, err = await voice.transcribe(audio, "speech.webm", ctype)
+    return {"text": text or "", "error": err}
+
+
 # ── History: 2.0's own + the read-only shared/recovered Telegram past ────────────
 @app.get("/history", dependencies=[Depends(require_auth)])
 async def history_view(months: int = 3):

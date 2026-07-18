@@ -527,35 +527,109 @@
      Recognition pauses while his voice plays so he doesn't hear himself.
      Click the mic again to close the loop. */
   var audioCtx = null, ttsAudio = null, ttsQueue = [], ttsPlaying = false;
-  function setupRecognition() {
-    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return null;
-    var rec = new SR(); rec.continuous = false; rec.interimResults = false; rec.lang = 'en-US';
-    rec.onresult = function (e) {
-      var tr = e.results[0][0].transcript; $('chat-input').value = '';
-      if (!state.handsFree) stopMic();
-      sendMessage(tr);
+  // Record the mic, let a short silence end the utterance, transcribe it server-side
+  // (real STT) and send. Reused stream across a hands-free session; released on stop.
+  var micStream = null, micRec = null, sttCtx = null, sttAnalyser = null, vadRAF = null, segmentEmpty = false;
+
+  function ensureStream() {
+    if (micStream) return Promise.resolve(micStream);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) return Promise.reject('unsupported');
+    return navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      .then(function (s) { micStream = s; return s; });
+  }
+  function pickMime() {
+    var opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+    for (var i = 0; i < opts.length; i++) { try { if (MediaRecorder.isTypeSupported(opts[i])) return opts[i]; } catch (e) {} }
+    return '';
+  }
+  function beginSegment() {
+    if (!micStream || !state.micActive || state.busy || ttsPlaying) return;
+    setOrbState('listening');
+    var mime = pickMime(), chunks = [];
+    try { micRec = mime ? new MediaRecorder(micStream, { mimeType: mime }) : new MediaRecorder(micStream); }
+    catch (e) { micRec = null; return; }
+    segmentEmpty = false;
+    micRec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    micRec.onstop = function () {
+      stopVAD();
+      var mt = (micRec && micRec.mimeType) || mime || 'audio/webm';
+      micRec = null;
+      transcribeAndSend(new Blob(chunks, { type: mt }));
     };
-    rec.onend = function () {
-      // In hands-free, keep listening unless Ace is thinking or speaking —
-      // those paths resume the mic themselves when they finish.
-      if (state.handsFree && state.micActive && !state.busy && !ttsPlaying) {
-        setTimeout(function () { try { rec.start(); } catch (e) {} }, 250);
-      } else if (!state.handsFree && state.micActive) { stopMic(); }
-    };
-    rec.onerror = function (e) { if (!state.handsFree || e.error === 'not-allowed') stopMic(); };
-    return rec;
+    try { micRec.start(); } catch (e) { micRec = null; return; }
+    startVAD();
+  }
+  function startVAD() {
+    var buf = null;
+    try {
+      if (!sttCtx) sttCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (sttCtx.state === 'suspended') sttCtx.resume();
+      var node = sttCtx.createMediaStreamSource(micStream);
+      sttAnalyser = sttCtx.createAnalyser(); sttAnalyser.fftSize = 512;
+      node.connect(sttAnalyser); buf = new Uint8Array(sttAnalyser.fftSize);
+    } catch (e) { sttAnalyser = null; }
+    var t0 = performance.now(), lastVoice = 0, spoke = false;
+    (function loop() {
+      if (!micRec) return;
+      var now = performance.now(), rms = 0;
+      if (sttAnalyser && buf) {
+        sttAnalyser.getByteTimeDomainData(buf);
+        var s = 0; for (var i = 0; i < buf.length; i++) { var v = (buf[i] - 128) / 128; s += v * v; }
+        rms = Math.sqrt(s / buf.length);
+      }
+      if (rms > 0.035) { spoke = true; lastVoice = now; orb.setAmplitude(Math.min(1, rms * 6)); }
+      else if (spoke) { orb.setAmplitude(0.15); }
+      // end on ~1.2s pause after speech; hard-cap 14s; bail after 9s of pure silence
+      if ((spoke && now - lastVoice > 1200) || (now - t0 > 14000) || (!spoke && now - t0 > 9000)) { endSegment(!spoke); return; }
+      vadRAF = requestAnimationFrame(loop);
+    })();
+  }
+  function stopVAD() { if (vadRAF) cancelAnimationFrame(vadRAF); vadRAF = null; orb.setAmplitude(0); }
+  function endSegment(empty) {
+    segmentEmpty = !!empty;
+    if (micRec && micRec.state !== 'inactive') { try { micRec.stop(); } catch (e) {} } else { stopVAD(); }
+  }
+  function sttHeaders(type) { var h = { 'Content-Type': type || 'audio/webm' }; if (state.token) h.Authorization = 'Bearer ' + state.token; return h; }
+  var sttFails = 0;
+  function transcribeAndSend(blob) {
+    if (segmentEmpty || !blob || blob.size < 1400) {   // nothing worth sending — keep the ear open
+      segmentEmpty = false; if (state.micActive && state.handsFree) beginSegment(); return;
+    }
+    fetch(API + '/stt', { method: 'POST', headers: sttHeaders(blob.type), body: blob })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject('http ' + r.status); })
+      .then(function (d) {
+        if (d && d.error) return Promise.reject(d.error);
+        sttFails = 0;
+        var text = (d && d.text || '').trim();
+        if (text) sendMessage(text);                         // Ace's turn; mic resumes after his reply
+        else if (state.micActive && state.handsFree) beginSegment();
+      })
+      .catch(function (err) {
+        sttFails++;
+        if (sttFails >= 2) {   // transcription is genuinely down — stop the loop, let him type
+          addAceMessage('Voice input is having trouble transcribing (' + err + '). I turned the mic off — type to me for now.');
+          state.handsFree = false; stopMic();
+        } else if (state.micActive && state.handsFree) { beginSegment(); }
+      });
   }
   function startMic() {
-    if (!state.recognition) state.recognition = setupRecognition();
-    if (!state.recognition) { addAceMessage('Voice input is not supported in this browser.'); state.handsFree = false; return; }
-    state.micActive = true; $('mic-btn').classList.add('active');
-    if (!ttsPlaying) setOrbState('listening');
-    try { state.recognition.start(); } catch (e) {}
+    ensureStream().then(function () {
+      state.micActive = true; $('mic-btn').classList.add('active');
+      beginSegment();
+    }).catch(function () {
+      addAceMessage('I could not reach the microphone — check this site’s mic permission.');
+      state.handsFree = false; state.micActive = false; $('mic-btn').classList.remove('active');
+    });
   }
-  function stopMic() { state.micActive = false; $('mic-btn').classList.remove('active'); if (!state.busy && !ttsPlaying) setOrbState('idle'); try { state.recognition && state.recognition.stop(); } catch (e) {} }
+  function stopMic() {
+    state.micActive = false; $('mic-btn').classList.remove('active');
+    if (micRec && micRec.state !== 'inactive') { segmentEmpty = true; try { micRec.stop(); } catch (e) {} }
+    stopVAD();
+    if (micStream) { try { micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} micStream = null; }
+    if (!state.busy && !ttsPlaying) setOrbState('idle');
+  }
   function maybeResumeMic() {
-    if (state.handsFree && !state.busy && !ttsPlaying && document.visibilityState === 'visible') startMic();
+    if (state.handsFree && state.micActive && !state.busy && !ttsPlaying && document.visibilityState === 'visible') beginSegment();
   }
   $('mic-btn').addEventListener('click', function () {
     if (state.handsFree || state.micActive) { state.handsFree = false; stopMic(); }
@@ -579,7 +653,7 @@
     }
     ttsPlaying = true;
     // Pause the ear while he speaks, so he doesn't transcribe himself.
-    try { state.recognition && state.recognition.stop(); } catch (e) {}
+    try { if (micRec && micRec.state !== 'inactive') { segmentEmpty = true; micRec.stop(); } stopVAD(); } catch (e) {}
     var text = ttsQueue.shift();
     fetch(API + '/tts', { method: 'POST', headers: headers(), body: JSON.stringify({ text: text }) })
       .then(function (r) { if (!r.ok || r.status === 204) throw 'fallback'; return r.blob(); })
