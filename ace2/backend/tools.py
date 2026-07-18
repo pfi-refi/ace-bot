@@ -24,13 +24,19 @@ import logging
 from datetime import datetime, timedelta
 
 from . import brain, daybank
-from .integrations.calendar_api import create_calendar_event, delete_calendar_event
+from .integrations.calendar_api import (
+    create_calendar_event,
+    delete_calendar_event,
+    get_calendar_range,
+)
 from .integrations.google_client import EASTERN
 from .integrations.tasks_api import (
     add_task,
     complete_task,
     draft_email,
+    read_gmail,
     search_drive,
+    search_gmail,
     send_email,
 )
 
@@ -144,6 +150,56 @@ TOOLS = [
                 "body": {"type": "string", "description": "Plain-text body"},
             },
             "required": ["to", "subject", "body"],
+        },
+    },
+    {
+        "name": "search_gmail",
+        "description": (
+            "Search Brady's WHOLE mailbox (not just unread) and get back matching emails "
+            "with an id + a snippet. Use whenever he asks to find, look up, or check an email "
+            "— 'did X email me', 'find the email about Y', 'what did the lender say'. Supports "
+            "Gmail search operators: from:, to:, subject:, keywords, newer_than:7d, older_than:, "
+            "has:attachment, is:unread. To read one in full, pass its id to read_gmail."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Gmail search query (operators supported)"},
+                "max_results": {"type": "integer", "description": "How many to return (1-20, default 8)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "read_gmail",
+        "description": (
+            "Read the FULL body of one email by its id (from search_gmail). Use when Brady "
+            "wants the details of a specific email, or before you summarize/answer/draft a reply."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The email id from search_gmail"},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "get_calendar_range",
+        "description": (
+            "Read Brady's calendar for ANY window — past or future — beyond what's already in "
+            "context. Use for 'what did I have last month', 'what's on my calendar the week of "
+            "the 20th', 'am I free in three weeks'. start_offset_days shifts the start from "
+            "today (negative = past, e.g. -30 ≈ a month ago; positive = future); num_days = "
+            "window length."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_offset_days": {"type": "integer", "description": "Days from today to start (negative = past)"},
+                "num_days": {"type": "integer", "description": "Window length in days (1-120)"},
+            },
+            "required": ["start_offset_days", "num_days"],
         },
     },
     {
@@ -279,10 +335,13 @@ TOOLS = [
 TOOL_LABELS = {
     "create_calendar_event": "CREATING EVENT",
     "delete_calendar_event": "REMOVING EVENT",
+    "get_calendar_range": "READING CALENDAR",
     "add_task": "ADDING TASK",
     "complete_task": "COMPLETING TASK",
     "send_email": "SENDING EMAIL",
     "draft_email": "DRAFTING EMAIL",
+    "search_gmail": "SEARCHING EMAIL",
+    "read_gmail": "READING EMAIL",
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
     "capture_item": "CAPTURING",
@@ -428,13 +487,28 @@ def _do_update_item(id="", status=None, text=None, **_):
     return f"⚠️ Could not update item: {res}"
 
 
+def _do_search_gmail(query, max_results=8, **_):
+    return search_gmail(query, max_results)
+
+
+def _do_read_gmail(message_id, **_):
+    return read_gmail(message_id)
+
+
+def _do_get_calendar_range(start_offset_days=0, num_days=7, **_):
+    return get_calendar_range(start_offset_days, num_days)
+
+
 _DISPATCH = {
     "create_calendar_event": _do_create_calendar_event,
     "delete_calendar_event": _do_delete_calendar_event,
+    "get_calendar_range": _do_get_calendar_range,
     "add_task": _do_add_task,
     "complete_task": _do_complete_task,
     "send_email": _do_send_email,
     "draft_email": _do_draft_email,
+    "search_gmail": _do_search_gmail,
+    "read_gmail": _do_read_gmail,
     "search_drive": _do_search_drive,
     "save_memory": _do_save_memory,
     "capture_item": _do_capture_item,

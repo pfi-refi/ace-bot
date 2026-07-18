@@ -102,6 +102,61 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
         return []
 
 
+def get_calendar_range(start_offset_days: int = 0, num_days: int = 7) -> str:
+    """Text calendar for an ARBITRARY window, grouped by date. start_offset_days shifts the
+    start from today (negative = into the past, e.g. -30 ≈ a month ago; positive = future,
+    e.g. 30 ≈ starting a month out); num_days = how many days the window spans. Use this for
+    any 'what did I have' / 'what's on my calendar around <date>' beyond the default context."""
+    start_offset_days = max(-365, min(int(start_offset_days), 365))
+    num_days = max(1, min(int(num_days), 120))
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        today = datetime.now(EASTERN).replace(hour=0, minute=0, second=0, microsecond=0)
+        win_start = today + timedelta(days=start_offset_days)
+        win_end = win_start + timedelta(days=num_days)
+        events, seen = [], set()
+        for cal in service.calendarList().list().execute().get("items", []):
+            try:
+                res = service.events().list(
+                    calendarId=cal["id"], timeMin=win_start.isoformat(), timeMax=win_end.isoformat(),
+                    singleEvents=True, orderBy="startTime",
+                ).execute()
+                for ev in res.get("items", []):
+                    eid = ev.get("id", "")
+                    if eid in seen:
+                        continue
+                    seen.add(eid)
+                    start = ev.get("start", {})
+                    s = start.get("dateTime", start.get("date", ""))
+                    if "T" in s:
+                        dt = datetime.fromisoformat(s)
+                        if dt.tzinfo:
+                            dt = dt.astimezone(EASTERN)
+                        tstr = dt.strftime("%-I:%M %p")
+                    else:
+                        dt = EASTERN.localize(datetime.strptime(s, "%Y-%m-%d"))
+                        tstr = "All day"
+                    events.append((dt, tstr, ev.get("summary", "No title")))
+            except Exception as e:
+                logger.warning("range cal '%s': %s", cal.get("summary"), e)
+        span = f"{win_start.strftime('%b %-d')} – {win_end.strftime('%b %-d, %Y')}"
+        if not events:
+            return f"No events on the calendar for {span}."
+        events.sort(key=lambda x: x[0])
+        lines, cur = [f"📅 {span}:"], None
+        for dt, tstr, title in events:
+            dstr = dt.strftime("%A, %B %-d")
+            if dstr != cur:
+                lines.append(f"\n{dstr}:")
+                cur = dstr
+            lines.append(f"  {tstr} — {title}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("get_calendar_range error: %s", e)
+        return f"⚠️ Could not read that calendar window: {e}"
+
+
 # ── Text reads (ported verbatim — feed Ace's context) ───────────────────────────
 def get_calendar_events(days_ahead: int = 1) -> str:
     """Pull calendar events from today through `days_ahead` days from ALL calendars."""

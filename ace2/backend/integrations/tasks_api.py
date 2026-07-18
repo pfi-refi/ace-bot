@@ -262,6 +262,91 @@ def get_recent_read_emails() -> str:
         return "⚠️ Could not load recent read emails."
 
 
+def _decode_b64url(data: str) -> str:
+    import base64
+    try:
+        return base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _extract_email_body(payload: dict) -> str:
+    """Walk a Gmail message payload for readable text — prefer text/plain, fall back to
+    stripped text/html, recursing into multipart parts."""
+    mime = payload.get("mimeType", "")
+    data = payload.get("body", {}).get("data")
+    if data and mime.startswith("text/plain"):
+        return _decode_b64url(data)
+    text_plain, text_html = "", ""
+    for part in payload.get("parts", []) or []:
+        pm = part.get("mimeType", "")
+        if pm.startswith("multipart/"):
+            nested = _extract_email_body(part)
+            if nested:
+                return nested
+        d = part.get("body", {}).get("data")
+        if not d:
+            continue
+        if pm.startswith("text/plain") and not text_plain:
+            text_plain = _decode_b64url(d)
+        elif pm.startswith("text/html") and not text_html:
+            text_html = _decode_b64url(d)
+    if text_plain:
+        return text_plain
+    if text_html:
+        import re
+        return re.sub(r"<[^>]+>", " ", text_html)
+    return ""
+
+
+def search_gmail(query: str, max_results: int = 8) -> str:
+    """Search the whole mailbox with a Gmail query (supports from:, to:, subject:, keywords,
+    newer_than:/older_than:, has:attachment, etc.) → matching emails with their id + snippet.
+    Pass an id to read_gmail to open the full email."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        n = max(1, min(int(max_results), 20))
+        results = service.users().messages().list(userId="me", q=query, maxResults=n).execute()
+        messages = results.get("messages", [])
+        if not messages:
+            return f"No emails found for: {query}"
+        lines = []
+        for msg in messages:
+            md = service.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in md.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "Unknown")
+            if "<" in sender:
+                sender = sender.split("<")[0].strip().strip('"')
+            subject = headers.get("Subject", "No subject")
+            date = headers.get("Date", "")[:31]
+            snippet = md.get("snippet", "")[:150]
+            lines.append(f"[{msg['id']}] {sender[:32]} — {subject[:75]}\n    {date}\n    {snippet}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("Gmail search error: %s", e)
+        return f"⚠️ Could not search email: {e}"
+
+
+def read_gmail(message_id: str) -> str:
+    """Read the full body of one email by its message id (from search_gmail)."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        md = service.users().messages().get(userId="me", id=message_id.strip(), format="full").execute()
+        headers = {h["name"]: h["value"] for h in md.get("payload", {}).get("headers", [])}
+        body = (_extract_email_body(md.get("payload", {})) or "").strip()[:4000] or "(no readable text body)"
+        return (f"From: {headers.get('From','Unknown')}\n"
+                f"Subject: {headers.get('Subject','No subject')}\n"
+                f"Date: {headers.get('Date','')}\n\n{body}")
+    except Exception as e:
+        logger.error("Gmail read error: %s", e)
+        return f"⚠️ Could not read email: {e}"
+
+
 def send_email(to_addr: str, subject: str, body: str) -> bool:
     """Send an email immediately via Gmail."""
     try:
