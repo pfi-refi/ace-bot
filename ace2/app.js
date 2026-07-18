@@ -319,6 +319,7 @@
     applyChatState();
     connectWS();
     loadToday();
+    checkConvai();
     greeting();
   }
   function greeting() {
@@ -636,8 +637,64 @@
   function maybeResumeMic() {
     if (state.handsFree && state.micActive && !state.busy && !ttsPlaying && document.visibilityState === 'visible') beginSegment();
   }
+
+  /* ============================================================ LIVE VOICE (full-duplex)
+     ElevenLabs Agents: he listens, thinks (via our brain), and talks in real time, and
+     you can talk over him. Replaces record-and-transcribe when the agent is configured. */
+  var convaiEnabled = false, liveConv = null, liveRAF = null, liveMode = 'idle';
+  function checkConvai() {
+    fetch(API + '/convai/config', { headers: headers() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { convaiEnabled = !!(d && d.enabled); })
+      .catch(function () {});
+  }
+  function livePulse() {
+    if (!liveConv) return;
+    var e = performance.now() / 1000;
+    if (liveMode === 'speaking') orb.setAmplitude(0.30 + 0.26 * Math.abs(Math.sin(e * 6.1)) + 0.16 * Math.abs(Math.sin(e * 10.7)));
+    else if (liveMode === 'listening') orb.setAmplitude(0.10 + 0.07 * Math.abs(Math.sin(e * 3.1)));
+    else orb.setAmplitude(0);
+    liveRAF = requestAnimationFrame(livePulse);
+  }
+  function startLiveVoice() {
+    if (liveConv) return;
+    var Conv = window.__ConvAI;
+    if (!Conv) { addAceMessage('Live voice is still loading — give it a second and tap again.'); return; }
+    $('mic-btn').classList.add('active'); setOrbState('listening'); liveMode = 'listening';
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+      .then(function () { return fetch(API + '/convai/signed-url', { headers: headers() }); })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.signed_url) throw ((d && d.error) || 'no signed url');
+        return Conv.startSession({
+          signedUrl: d.signed_url,
+          onConnect: function () { setChat(true); liveRAF = requestAnimationFrame(livePulse); },
+          onDisconnect: function () { endLiveVoice(); },
+          onError: function (err) { addAceMessage('Live voice error: ' + (err && err.message || err)); endLiveVoice(); },
+          onModeChange: function (m) { var mm = (m && m.mode) || m; liveMode = (mm === 'speaking') ? 'speaking' : 'listening'; setOrbState(liveMode); },
+          onMessage: function (msg) {
+            var t = (msg && (msg.message || msg.text)) || '';
+            if (!t) return;
+            var src = msg && (msg.source || msg.role);
+            if (src === 'user' || src === 'user_transcript') addUserMessage(t); else addAceMessage(t);
+          },
+        });
+      })
+      .then(function (conv) { liveConv = conv; })
+      .catch(function (err) {
+        addAceMessage('Couldn’t start live voice (' + err + '). If you just set it up, give ElevenLabs a moment and try again.');
+        endLiveVoice();
+      });
+  }
+  function endLiveVoice() {
+    if (liveRAF) cancelAnimationFrame(liveRAF); liveRAF = null; liveMode = 'idle';
+    if (liveConv) { try { liveConv.endSession(); } catch (e) {} liveConv = null; }
+    orb.setAmplitude(0); $('mic-btn').classList.remove('active');
+    if (!state.busy) setOrbState('idle');
+  }
   $('mic-btn').addEventListener('click', function () {
-    if (state.handsFree || state.micActive) { state.handsFree = false; stopMic(); }
+    if (convaiEnabled) { if (liveConv) endLiveVoice(); else startLiveVoice(); return; }   // full-duplex
+    if (state.handsFree || state.micActive) { state.handsFree = false; stopMic(); }        // fallback: record + transcribe
     else { state.handsFree = true; startMic(); }
   });
 

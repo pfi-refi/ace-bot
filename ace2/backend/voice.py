@@ -53,6 +53,36 @@ def _settings() -> dict:
 
 STT_MODEL = "scribe_v1"          # ElevenLabs Scribe — real transcription, one vendor with TTS
 
+# ── Full-duplex realtime voice (ElevenLabs Agents) ──────────────────────────────
+# The agent's brain is our own /v1/chat/completions (Ace, tools and all). The browser
+# connects over a signed WebSocket we mint here so the agent stays private.
+CONVAI_AGENT_ID = os.environ.get("CONVAI_AGENT_ID", "agent_2801kxtj8x58fazsq5f9j16ds7vq").strip()
+
+
+def convai_enabled() -> bool:
+    return bool(CONVAI_AGENT_ID and os.environ.get("ELEVENLABS_API_KEY", "").strip())
+
+
+async def convai_signed_url():
+    """Mint a short-lived signed WebSocket URL for the ACE agent. → (url, None) | (None, reason)."""
+    if not convai_enabled():
+        return None, "not configured"
+    key = os.environ["ELEVENLABS_API_KEY"].strip()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
+                params={"agent_id": CONVAI_AGENT_ID},
+                headers={"xi-api-key": key},
+            )
+        if r.status_code != 200:
+            logger.warning("convai signed-url %s: %s", r.status_code, r.text[:200])
+            return None, f"elevenlabs {r.status_code}"
+        return r.json().get("signed_url"), None
+    except Exception as e:
+        logger.warning("convai signed-url error: %s", e)
+        return None, str(e)
+
 
 async def transcribe(audio: bytes, filename: str = "speech.webm", content_type: str = "audio/webm"):
     """Transcribe recorded mic audio with ElevenLabs Scribe. → (text, None) | (None, reason).

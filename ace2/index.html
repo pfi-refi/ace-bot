@@ -87,6 +87,16 @@
 
 </div>
 
+<!-- ElevenLabs Agents SDK for full-duplex live voice (loaded from CDN, off the shell) -->
+<script type="module">
+  (async function () {
+    var cdns = ['https://cdn.jsdelivr.net/npm/@elevenlabs/client/+esm', 'https://esm.sh/@elevenlabs/client'];
+    for (var i = 0; i < cdns.length; i++) {
+      try { var m = await import(cdns[i]); if (m && m.Conversation) { window.__ConvAI = m.Conversation; return; } } catch (e) {}
+    }
+    window.__ConvAI = null;
+  })();
+</script>
 <script src="/app.js"></script>
 </body>
 </html>

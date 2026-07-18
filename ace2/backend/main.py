@@ -355,6 +355,19 @@ async def stt(request: Request):
     return {"text": text or "", "error": err}
 
 
+# ── Full-duplex realtime voice (ElevenLabs Agents) ──────────────────────────────
+@app.get("/convai/config", dependencies=[Depends(require_auth)])
+async def convai_config():
+    on = voice.convai_enabled()
+    return {"enabled": on, "agent_id": voice.CONVAI_AGENT_ID if on else None}
+
+
+@app.get("/convai/signed-url", dependencies=[Depends(require_auth)])
+async def convai_signed():
+    url, err = await voice.convai_signed_url()
+    return {"signed_url": url, "error": err}
+
+
 # ── History: 2.0's own + the read-only shared/recovered Telegram past ────────────
 @app.get("/history", dependencies=[Depends(require_auth)])
 async def history_view(months: int = 3):
