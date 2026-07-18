@@ -30,19 +30,23 @@ _PRIMARY_CAL_IDS = ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimp
 
 
 # ── Structured read (for the Schedule panel) ────────────────────────────────────
-def get_events_structured(days: int = 7) -> list:
-    """Return upcoming events across all calendars as a list of dicts.
+def get_events_structured(days: int = 7, back_days: int = 0) -> list:
+    """Return events across all calendars as a list of dicts.
 
     Each item: {start, iso, date, date_label, day_label, time, all_day, title, calendar}
-    Spans today 00:00 through `days` days ahead, sorted by start time.
+    Spans (today - `back_days`) 00:00 through `days` days ahead, sorted by start time.
+    back_days=0 keeps the original today-forward behaviour; pass a positive value to
+    include recent past events (e.g. back_days=7 for the last week + `days` ahead).
     """
-    days = max(1, min(int(days), 30))
+    days = max(1, min(int(days), 60))
+    back_days = max(0, min(int(back_days), 60))
     try:
         creds = get_google_creds()
         service = build("calendar", "v3", credentials=creds)
         now_et = datetime.now(EASTERN)
-        start_of_day = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_window = start_of_day + timedelta(days=days)
+        today_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day = today_start - timedelta(days=back_days)
+        end_window = today_start + timedelta(days=days)
 
         calendars = service.calendarList().list().execute().get("items", [])
         events: list = []

@@ -111,11 +111,11 @@ def _anthropic() -> AsyncAnthropic:
 
 
 async def _live_context() -> str:
-    """Fetch memory + today/tomorrow calendar + tasks + data bank concurrently."""
-    memory, today_events, tomorrow, tasks, bank, inbox, wx = await asyncio.gather(
+    """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
+    + data bank concurrently."""
+    memory, cal_all, tasks, bank, inbox, wx = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
-        asyncio.to_thread(get_events_structured, 1),
-        asyncio.to_thread(get_tomorrow_events),
+        asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
         asyncio.to_thread(get_tasks),
         asyncio.to_thread(daybank.read_items, True),
         asyncio.to_thread(get_gmail_summary),
@@ -127,9 +127,12 @@ async def _live_context() -> str:
         return default if isinstance(v, Exception) else v
 
     now = datetime.now(EASTERN)
+    events = ok(cal_all, [])
+    today_str = now.strftime("%Y-%m-%d")
+    today_events = [e for e in events if e.get("date") == today_str]
     mem_list = ok(memory, [])
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
-    today_sched = _format_today_schedule(ok(today_events, []), now)
+    today_sched = _format_today_schedule(today_events, now)
     bank_str = _format_daybank(ok(bank, []))
     parts = [
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
@@ -140,14 +143,15 @@ async def _live_context() -> str:
         "TODAY'S SCHEDULE (relative to the current time above):",
         today_sched,
         "",
+        "CALENDAR — last week through the next 3 weeks (past for reference, upcoming for "
+        "planning; answer any date-range question from this directly):",
+        _format_calendar_window(events, now),
+        "",
         "UNREAD PRIORITY INBOX (last 2 days — scan it; flag anything that needs a reply):",
         ok(inbox, "(unavailable)"),
         "",
         "WEATHER RIGHT NOW (factor it into his day when it matters):",
         _format_weather(ok(wx, {})),
-        "",
-        "TOMORROW:",
-        ok(tomorrow, "(unavailable)") or "(nothing tomorrow)",
         "",
         "OPEN TASKS:",
         ok(tasks, "(unavailable)") or "(inbox zero)",
@@ -211,7 +215,7 @@ async def _load_messages(user_text: str, prior=None) -> list:
 async def _card_payload(panel: str):
     """Structured data for a display_card call. Concurrent, graceful."""
     if panel == "calendar":
-        return {"events": await asyncio.to_thread(get_events_structured, 7)}
+        return {"events": await asyncio.to_thread(get_events_structured, 21, 7)}
     if panel == "timeline":
         # Today only; the frontend computes the NOW line against the live clock.
         return {"events": await asyncio.to_thread(get_events_structured, 1)}
@@ -249,6 +253,32 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
     return f"⚠️ Unknown UI tool: {name}"
 
 
+def _format_calendar_window(events: list, now) -> str:
+    """Group a get_events_structured(days, back_days) list by date for context — recent
+    past + upcoming — so Ace can answer 'what did I have Tuesday' and 'what's next week'.
+    """
+    if not events:
+        return "(no events in this window)"
+    today = now.date()
+    by_date: dict = {}
+    for e in events:
+        by_date.setdefault(e.get("date", ""), []).append(e)
+    lines = []
+    for dstr in sorted(k for k in by_date if k):
+        try:
+            d = datetime.strptime(dstr, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        delta = (d - today).days
+        rel = {0: " — TODAY", -1: " — YESTERDAY", 1: " — TOMORROW"}.get(delta, " (past)" if delta < 0 else "")
+        header = by_date[dstr][0].get("date_label", dstr)
+        lines.append(f"{header}{rel}:")
+        for e in by_date[dstr]:
+            cal = e.get("calendar", "")
+            lines.append(f"  {e.get('time','')} — {e.get('title','')}" + (f" [{cal}]" if cal else ""))
+    return "\n".join(lines)
+
+
 async def _fast_context() -> str:
     """Lean context for LOW-LATENCY voice: memory + time + today's schedule +
     data bank + the recent conversation thread (for continuity).
@@ -259,9 +289,10 @@ async def _fast_context() -> str:
     today's schedule, the tracked data bank, and the last few turns of the ongoing
     thread so it isn't a cold start — all fetched concurrently to stay fast.
     """
-    memory, today_events, bank, convo = await asyncio.gather(
+    now = datetime.now(EASTERN)
+    memory, cal_all, bank, convo = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
-        asyncio.to_thread(get_events_structured, 1),
+        asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
         asyncio.to_thread(daybank.read_items, True),
         asyncio.to_thread(brain.read_shared_conversation),
         return_exceptions=True,
@@ -270,7 +301,9 @@ async def _fast_context() -> str:
     def ok(v, default):
         return default if isinstance(v, Exception) else v
 
-    now = datetime.now(EASTERN)
+    events = ok(cal_all, [])
+    today_str = now.strftime("%Y-%m-%d")
+    today_events = [e for e in events if e.get("date") == today_str]
     mem_list = ok(memory, [])
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
     # Continuity: the last few turns of the ongoing thread (HUD + voice + Telegram)
@@ -284,7 +317,11 @@ async def _fast_context() -> str:
         mem,
         "",
         "TODAY'S SCHEDULE (relative to the current time above):",
-        _format_today_schedule(ok(today_events, []), now),
+        _format_today_schedule(today_events, now),
+        "",
+        "CALENDAR — last week through the next 3 weeks (past events for reference, "
+        "upcoming for planning; answer range questions from this directly):",
+        _format_calendar_window(events, now),
         "",
         "DATA BANK (commitments / to-dos / deals you're already tracking for Brady):",
         _format_daybank(ok(bank, [])),
