@@ -125,8 +125,6 @@
       var ox = cx + dx, oy = cy + dy;
       var flat = 0.56 + 0.13 * Math.sin(t * 0.17);                      // disc tilt over time
       var gRot = t * 0.06 * speed;                                      // whole-galaxy rotation
-      // Soft edge: everything fades to 0 before the canvas edge — no hard boundary.
-      function fade(r) { return Math.max(0, Math.min(1, 1 - (r - R * 0.6) / (R * 0.42))); }
 
       ctx.clearRect(0, 0, W, W);
       ctx.save();
@@ -135,7 +133,7 @@
 
       // edgeless glow bed — replaces the old hard vignette/rim; fades fully out, no circle
       var halo = ctx.createRadialGradient(ox, oy, 6, ox, oy, R * 1.02);
-      var ha = (.11 + glow * .10 + amp * .13) * light;
+      var ha = (.14 + glow * .11 + amp * .14) * light;
       halo.addColorStop(0, 'rgba(69,255,166,' + ha.toFixed(3) + ')');
       halo.addColorStop(.5, 'rgba(69,255,166,' + (ha * .4).toFixed(3) + ')');
       halo.addColorStop(1, 'rgba(69,255,166,0)');
@@ -148,7 +146,7 @@
         var wr = c.r * (1 + .14 * Math.sin(t * .4 + c.wob));
         var x = ox + Math.cos(ang) * c.dist, y = oy + Math.sin(ang) * c.dist * flat;
         var g = ctx.createRadialGradient(x, y, 0, x, y, wr);
-        g.addColorStop(0, 'rgba(' + c.hue + ',' + (c.a * light).toFixed(3) + ')');
+        g.addColorStop(0, 'rgba(' + c.hue + ',' + (c.a * light * 1.25).toFixed(3) + ')');
         g.addColorStop(1, 'rgba(' + c.hue + ',0)');
         ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, wr, 0, 6.283); ctx.fill();
       }
@@ -159,8 +157,7 @@
         var a = st.a0 + gRot + t * st.w * speed;
         var x2 = ox + Math.cos(a) * st.r, y2 = oy + Math.sin(a) * st.r * flat;
         var tw = .35 + .55 * (.5 + .5 * Math.sin(t * st.ts + st.tw));
-        var al = tw * light * .9 * fade(st.r);
-        if (al <= 0) continue;
+        var al = tw * light * .95;
         ctx.fillStyle = st.cyan
           ? 'rgba(160,240,255,' + al.toFixed(3) + ')'
           : 'rgba(190,255,225,' + al.toFixed(3) + ')';
@@ -173,8 +170,7 @@
         var ma = mo.a0 + gRot * .6 + t * mo.w;
         var mr = mo.r * (1 + .07 * Math.sin(t * .3 + mo.tw));
         var mx = ox + Math.cos(ma) * mr, my = oy + Math.sin(ma) * mr * flat;
-        var mal = (.3 + .6 * (.5 + .5 * Math.sin(t * mo.ts + mo.tw))) * light * .7 * fade(mr);
-        if (mal <= 0) continue;
+        var mal = (.3 + .6 * (.5 + .5 * Math.sin(t * mo.ts + mo.tw))) * light * .8;
         ctx.fillStyle = mo.cyan
           ? 'rgba(150,235,255,' + mal.toFixed(3) + ')'
           : 'rgba(200,255,230,' + mal.toFixed(3) + ')';
@@ -188,6 +184,15 @@
       core.addColorStop(.32, 'rgba(69,255,166,' + (.55 * light).toFixed(3) + ')');
       core.addColorStop(1, 'rgba(69,255,166,0)');
       ctx.fillStyle = core; ctx.beginPath(); ctx.arc(ox, oy, coreR, 0, 6.283); ctx.fill();
+
+      // Feather EVERYTHING into a soft round edge — guarantees the square canvas
+      // boundary never shows, no matter how far the nebula/glow reaches.
+      ctx.globalCompositeOperation = 'destination-in';
+      var mask = ctx.createRadialGradient(ox, oy, R * 0.55, ox, oy, R * 1.04);
+      mask.addColorStop(0, 'rgba(0,0,0,1)');
+      mask.addColorStop(0.7, 'rgba(0,0,0,1)');
+      mask.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = mask; ctx.fillRect(cx - W, cy - W, W * 2, W * 2);
 
       ctx.globalCompositeOperation = 'source-over';
       ctx.restore();

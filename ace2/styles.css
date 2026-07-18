@@ -45,7 +45,7 @@
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
 
   --r-md: 10px; --r-lg: 16px; --r-pill: 999px;
-  --orb-size: clamp(230px, 46vh, 480px);
+  --orb-size: clamp(280px, 56vh, 580px);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
