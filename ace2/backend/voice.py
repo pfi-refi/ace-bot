@@ -20,13 +20,14 @@ import httpx
 
 logger = logging.getLogger("ace2.voice")
 
-DEFAULT_MODEL = "eleven_flash_v2_5"          # ~75ms, ElevenLabs' real-time pick (matches the bot)
+DEFAULT_MODEL = "eleven_turbo_v2_5"          # conversational quality, still low-latency
+FALLBACK_MODEL = "eleven_flash_v2_5"         # if the primary model errors (e.g. plan), still the real ACE voice — never the robot
 DEFAULT_SETTINGS = {
     "stability": 0.55,        # a touch steadier → less warble between phrases
     "similarity_boost": 0.75,
     "style": 0.25,
     "use_speaker_boost": True,
-    "speed": 1.0,             # was 1.1 — 10% faster read made it sound rushed/clipped
+    "speed": 1.0,             # normal cadence (1.1 read rushed/clipped)
 }
 
 
@@ -60,20 +61,27 @@ async def synthesize(text: str):
 
     api_key = os.environ["ELEVENLABS_API_KEY"].strip()
     voice_id = os.environ["ELEVENLABS_VOICE_ID"].strip()
-    model_id = os.environ.get("ELEVENLABS_MODEL_ID", DEFAULT_MODEL).strip()
-    try:
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                url,
-                params={"output_format": "mp3_44100_128"},
-                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-                json={"text": text, "model_id": model_id, "voice_settings": _settings()},
-            )
-        if resp.status_code != 200:
-            logger.warning("ElevenLabs %s: %s", resp.status_code, resp.text[:300])
-            return None, f"tts {resp.status_code}"
-        return resp.content, "audio/mpeg"
-    except Exception as e:
-        logger.warning("ElevenLabs error: %s", e)
-        return None, str(e)
+    primary = os.environ.get("ELEVENLABS_MODEL_ID", DEFAULT_MODEL).strip()
+    # Try the good conversational model; if it errors, drop to flash before ever
+    # letting the frontend fall back to the browser's robot voice.
+    models = [primary] + ([FALLBACK_MODEL] if primary != FALLBACK_MODEL else [])
+    settings = _settings()
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    last = "tts failed"
+    for model_id in models:
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    url,
+                    params={"output_format": "mp3_44100_128"},
+                    headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                    json={"text": text, "model_id": model_id, "voice_settings": settings},
+                )
+            if resp.status_code == 200:
+                return resp.content, "audio/mpeg"
+            last = f"tts {resp.status_code}"
+            logger.warning("ElevenLabs %s (model=%s): %s", resp.status_code, model_id, resp.text[:200])
+        except Exception as e:
+            last = str(e)
+            logger.warning("ElevenLabs error (model=%s): %s", model_id, e)
+    return None, last
