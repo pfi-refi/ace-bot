@@ -148,6 +148,7 @@ app = FastAPI(title="Ace 2.0", version=VERSION)
 # Brady's authenticated browser — we broadcast stage events (cards) to all of them. This is
 # the side-channel that lets a VOICE turn (which rides ElevenLabs' pipe) paint the screen.
 _stage_clients: set = set()
+_bg_tasks: set = set()   # hold refs to fire-and-forget tasks so they aren't GC'd mid-run
 
 
 async def publish_stage_event(event_type: str, payload: dict):
@@ -493,7 +494,9 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         async def _stage_emit(event_type, payload):
             if event_type in ("card", "open"):
                 await publish_stage_event(event_type, payload)
-        asyncio.create_task(chat.stage_pass(user_text, _stage_emit, prior=prior))
+        _t = asyncio.create_task(chat.stage_pass(user_text, _stage_emit, prior=prior))
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 
