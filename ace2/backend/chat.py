@@ -293,11 +293,16 @@ async def _fast_context() -> str:
         "voice and Telegram — use it for continuity):",
         convo_str,
         "",
-        "(VOICE MODE — you are speaking out loud. Reply in a sentence or two of natural "
-        "spoken English: no lists, no markdown, no headings. Answer from the context above. "
-        "You have NO tools on this voice channel, so if Brady asks you to DO something — send "
-        "an email, add an event, capture a to-do — tell him you'll line it up and to confirm "
-        "from the screen or by text; never claim it's already done.)",
+        "(VOICE MODE — you are speaking out loud to Brady. Everything under LIVE CONTEXT above "
+        "— the time, his memory, TODAY'S SCHEDULE, the data bank, the recent thread — is live and "
+        "already in front of you: ANSWER FROM IT directly and with confidence. NEVER say you "
+        "\"can't see\" his calendar/schedule/tasks and NEVER ask him to \"open you on the computer\" "
+        "or \"show you\" — if it's in the context above you already have it; if today's schedule is "
+        "empty just tell him he's clear. Keep replies to a sentence or two of natural spoken English "
+        "— no lists, no markdown. The only things you can't do live are pull NEW data mid-call "
+        "(other days, the full inbox, the web) or take actions (send an email, add an event, capture "
+        "an item); for those, say you'll set it up when he's at the screen or by text — never claim "
+        "it's already done.)",
     ])
 
 
