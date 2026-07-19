@@ -5,7 +5,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v14';   // v14: Fable 5 design pass — unified glass, orb halo, elevated HUD
+const CACHE_VERSION = 'ace2-shell-v15';   // v15: mic state machine (no double-session, always-stoppable) + varied greeting
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 

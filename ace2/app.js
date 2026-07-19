@@ -325,7 +325,16 @@
   }
   function greeting() {
     var d = new Date(), days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    addAceMessage('Online. ' + days[d.getDay()] + '. Calendar, tasks, mail, memory — live, and the screen is mine to use. What are we moving first?');
+    var day = days[d.getDay()];
+    var lines = [
+      'Online, ' + day + '. What are we moving first?',
+      day + '. Board\'s in front of me — where do you want to start?',
+      'Back online. ' + day + ' — say the word.',
+      'Ready when you are, ' + day + '. What\'s first?',
+      day + '. Everything\'s live. What do you need?',
+      'I\'m up. ' + day + ' — what\'s the priority?'
+    ];
+    addAceMessage(lines[Math.floor(Math.random() * lines.length)]);
   }
 
   /* ============================================================ WEBSOCKET */
@@ -662,7 +671,7 @@
   /* ============================================================ LIVE VOICE (full-duplex)
      ElevenLabs Agents: he listens, thinks (via our brain), and talks in real time, and
      you can talk over him. Replaces record-and-transcribe when the agent is configured. */
-  var convaiEnabled = false, liveConv = null, liveRAF = null, liveMode = 'idle';
+  var convaiEnabled = false, liveConv = null, liveStarting = false, liveRAF = null, liveMode = 'idle';
   function checkConvai() {
     fetch(API + '/convai/config', { headers: headers() })
       .then(function (r) { return r.ok ? r.json() : null; })
@@ -678,14 +687,16 @@
     liveRAF = requestAnimationFrame(livePulse);
   }
   function startLiveVoice() {
-    if (liveConv) return;
+    if (liveConv || liveStarting) return;   // already on a call or spinning one up — ignore extra taps
     var Conv = window.__ConvAI;
     if (!Conv) { addAceMessage('Live voice is still loading — give it a second and tap again.'); return; }
+    liveStarting = true;
     $('mic-btn').classList.add('active'); setOrbState('listening'); liveMode = 'listening';
     navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
       .then(function () { return fetch(API + '/convai/signed-url', { headers: headers() }); })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
+        if (!liveStarting) return null;   // user hit the mic again to cancel while we were connecting
         if (!d || !d.signed_url) throw ((d && d.error) || 'no signed url');
         return Conv.startSession({
           signedUrl: d.signed_url,
@@ -701,20 +712,25 @@
           },
         });
       })
-      .then(function (conv) { liveConv = conv; })
+      .then(function (conv) {
+        if (!conv) return;                                   // cancelled before the session opened
+        if (!liveStarting) { try { conv.endSession(); } catch (e) {} return; }  // cancelled mid-connect → tear it down
+        liveConv = conv; liveStarting = false;
+      })
       .catch(function (err) {
         addAceMessage('Couldn’t start live voice (' + err + '). If you just set it up, give ElevenLabs a moment and try again.');
         endLiveVoice();
       });
   }
   function endLiveVoice() {
+    liveStarting = false;
     if (liveRAF) cancelAnimationFrame(liveRAF); liveRAF = null; liveMode = 'idle';
     if (liveConv) { try { liveConv.endSession(); } catch (e) {} liveConv = null; }
     orb.setAmplitude(0); $('mic-btn').classList.remove('active');
     if (!state.busy) setOrbState('idle');
   }
   $('mic-btn').addEventListener('click', function () {
-    if (convaiEnabled) { if (liveConv) endLiveVoice(); else startLiveVoice(); return; }   // full-duplex
+    if (convaiEnabled) { if (liveConv || liveStarting) endLiveVoice(); else startLiveVoice(); return; }   // full-duplex: one tap starts, next tap ALWAYS stops
     if (state.handsFree || state.micActive) { state.handsFree = false; stopMic(); }        // fallback: record + transcribe
     else { state.handsFree = true; startMic(); }
   });
