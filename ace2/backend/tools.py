@@ -23,7 +23,7 @@ caller (chat.py). Do not call these straight from the event loop.
 import logging
 from datetime import datetime, timedelta
 
-from . import brain, daybank
+from . import brain, daybank, memory_db
 from .integrations.calendar_api import (
     create_calendar_event,
     delete_calendar_event,
@@ -203,6 +203,25 @@ TOOLS = [
         },
     },
     {
+        "name": "recall",
+        "description": (
+            "TOTAL RECALL — search everything you and Brady have EVER discussed or "
+            "recorded: all past conversations (this app, Telegram, the archive), your "
+            "durable memory facts, and the data bank. Use whenever Brady references "
+            "something not in your live context — 'what did we say about…', 'that thing "
+            "from last week/month', a client or deal detail you don't see — instead of "
+            "guessing or saying you don't remember. Returns matched snippets with dates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keywords to search memory for (names, deals, topics)"},
+                "max_results": {"type": "integer", "description": "How many matches (1-20, default 8)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "search_drive",
         "description": (
             "Search Brady's Google Drive by name or full-text. Use when Brady asks to "
@@ -342,6 +361,7 @@ TOOL_LABELS = {
     "draft_email": "DRAFTING EMAIL",
     "search_gmail": "SEARCHING EMAIL",
     "read_gmail": "READING EMAIL",
+    "recall": "SEARCHING MEMORY",
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
     "capture_item": "CAPTURING",
@@ -487,6 +507,10 @@ def _do_update_item(id="", status=None, text=None, **_):
     return f"⚠️ Could not update item: {res}"
 
 
+def _do_recall(query, max_results=8, **_):
+    return memory_db.recall(query, max_results)
+
+
 def _do_search_gmail(query, max_results=8, **_):
     return search_gmail(query, max_results)
 
@@ -509,6 +533,7 @@ _DISPATCH = {
     "draft_email": _do_draft_email,
     "search_gmail": _do_search_gmail,
     "read_gmail": _do_read_gmail,
+    "recall": _do_recall,
     "search_drive": _do_search_drive,
     "save_memory": _do_save_memory,
     "capture_item": _do_capture_item,

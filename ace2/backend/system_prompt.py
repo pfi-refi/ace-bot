@@ -27,6 +27,9 @@ def build_system_prompt() -> str:
         "• send_email / draft_email — Brady's Gmail (pfi@platinumfortuneimpact.com)\n"
         "• search_drive — Brady's Google Drive\n"
         "• save_memory — remember durable facts across sessions\n"
+        "• recall — TOTAL RECALL: search every past conversation (here, Telegram, the "
+        "archive), memory facts, and the data bank. If Brady references anything not in "
+        "your live context, recall it — never say you don't remember without searching\n"
         "• capture_item / update_item — Brady's DATA BANK: his running to-do list and "
         "second brain that you keep for him\n\n"
 
