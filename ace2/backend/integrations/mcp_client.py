@@ -35,10 +35,11 @@ _schemas: list = []          # Anthropic-shaped tool schemas (cached once)
 _names: set = set()
 _loaded = False
 
-# Brady granted FULL read/write for MCP tools (2026-07-19). The one hold-out until
-# the confirm-before-send guardrail ships: irreversible DELETION of mail/files.
-# (Calendar delete lives on Ace's own guarded tool; create/update/send/share are allowed.)
-_DENY_HINTS = ("delete", "trash", "empty_")
+# Brady granted FULL read/write INCLUDING delete (explicit, 2026-07-19: "get the
+# delete access granted for when i ask for it"). No client-side tool filtering.
+# The behavioral guard is the system prompt: destructive actions only on Brady's
+# explicit ask — same discipline as send_email.
+_DENY_HINTS = ()
 
 
 def _url() -> str:
