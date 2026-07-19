@@ -15,12 +15,19 @@ GOOGLE_TOKEN_JSON / GOOGLE_CREDENTIALS_JSON or any secret.
 import json
 import logging
 import os
+import socket
 
 import pytz
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger("ace_portal.google")
+
+# A stuck Google HTTPS call has no timeout by default and hangs the WHOLE turn —
+# Brady experiences it as Ace "timing out." Cap every socket so the worst case is
+# a fast, visible tool error instead of a dead turn. (Process-wide default; only
+# applies where no explicit timeout is set — httpx calls set their own.)
+socket.setdefaulttimeout(15)
 
 # ── Constants (shared with bot.py) ──────────────────────────────────────────────
 EASTERN = pytz.timezone("America/New_York")

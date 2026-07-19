@@ -355,6 +355,10 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
 def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALENDAR_ID) -> tuple:
     """Delete a calendar event by title match on a given date. Returns (success, message).
 
+    Checks the PFI calendar first, then falls back to Brady's other calendars —
+    booked meetings (FTAs, scheduler invites) often live on the primary calendar,
+    not the PFI one, and "not found" there used to dead-end the request.
+
     NOTE: this deletes CALENDAR events only (an explicit Ace action Brady asks for).
     It never touches the protected Drive data files (ace_memory / ace_conversation).
     """
@@ -363,20 +367,33 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALE
         service = build("calendar", "v3", credentials=creds)
         start_dt = EASTERN.localize(datetime.strptime(date_str, "%Y-%m-%d"))
         end_dt = start_dt + timedelta(days=1)
-        events_result = service.events().list(
-            calendarId=calendar_id,
-            timeMin=start_dt.isoformat(),
-            timeMax=end_dt.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute()
-        events = events_result.get("items", [])
         title_lower = title.lower()
-        matches = [e for e in events if title_lower in e.get("summary", "").lower()]
-        if not matches:
-            return False, f"No event matching '{title}' on {date_str}"
-        service.events().delete(calendarId=calendar_id, eventId=matches[0]["id"]).execute()
-        return True, matches[0].get("summary", title)
+
+        cal_ids = [calendar_id]
+        try:
+            for c in service.calendarList().list().execute().get("items", []):
+                if c["id"] not in cal_ids:
+                    cal_ids.append(c["id"])
+        except Exception as e:
+            logger.warning("delete: calendarList failed (%s) — PFI only", e)
+
+        for cid in cal_ids:
+            try:
+                events = service.events().list(
+                    calendarId=cid,
+                    timeMin=start_dt.isoformat(),
+                    timeMax=end_dt.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                ).execute().get("items", [])
+            except Exception as e:
+                logger.warning("delete: list failed on %s: %s", cid, e)
+                continue
+            matches = [e for e in events if title_lower in e.get("summary", "").lower()]
+            if matches:
+                service.events().delete(calendarId=cid, eventId=matches[0]["id"]).execute()
+                return True, matches[0].get("summary", title)
+        return False, f"No event matching '{title}' on {date_str} on any calendar"
     except Exception as e:
         logger.error("Calendar delete error: %s", e)
         return False, str(e)

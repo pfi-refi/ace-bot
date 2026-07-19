@@ -490,6 +490,12 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             elif event_type == "error":
                 await queue.put(("delta", payload.get("text", "")))
                 await queue.put(("done", None))
+            elif event_type == "tool" and payload.get("status") == "running":
+                # Speak the tool status ("Removing event. ") — JARVIS narration that ALSO
+                # keeps tokens flowing so ElevenLabs never cuts the stream during a silent
+                # tool phase (the mid-turn "timeout" Brady kept hitting on actions).
+                label = (payload.get("label") or "Working on it").capitalize()  # "REMOVING EVENT" -> "Removing event"
+                await queue.put(("delta", label + ". "))
             elif event_type in ("card", "open"):
                 # Voice turn wants to paint the screen → push over the app WebSocket, not the
                 # ElevenLabs audio stream. Same channel the typed path uses.
