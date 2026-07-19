@@ -52,10 +52,10 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
 VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
-# On voice Ace gets nearly the full toolset so he can ACT (calendar, weather, email search/read,
-# capture, cards) — the only things withheld are the irreversible/outbound ones (send email,
-# delete event) until the confirm-before-send guardrail exists. Built once for cache stability.
-_VOICE_TOOL_DENY = {"send_email", "delete_calendar_event"}
+# On voice Ace gets the full toolset so he can ACT — including delete_calendar_event (Brady
+# explicitly granted it 2026-07-19 for reschedules). The one hold-out is send_email (outbound
+# to third parties) until the confirm-before-send guardrail exists. Built once for cache stability.
+_VOICE_TOOL_DENY = {"send_email"}
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
@@ -350,9 +350,9 @@ async def _fast_context() -> str:
         "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
         "tools on this call: use display_card to put things on his screen, get_calendar_range / "
         "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
-        "capture_item, update_item, add_task, draft_email, search_drive to ACT — actually do these, "
-        "then tell him it's done. (You can't send email or delete events by voice yet — offer to draft "
-        "or to handle it from the screen.) Keep spoken replies short and natural — a sentence or two, "
+        "delete_calendar_event, capture_item, update_item, add_task, draft_email, search_drive to ACT "
+        "— actually do these, then tell him it's done. (The one thing you can't do by voice is SEND "
+        "email — offer to draft instead.) Keep spoken replies short and natural — a sentence or two, "
         "no lists or markdown; if you're doing something, say so in a few words while it happens.)",
     ])
 

@@ -151,6 +151,20 @@ _stage_clients: set = set()
 _bg_tasks: set = set()   # hold refs to fire-and-forget tasks so they aren't GC'd mid-run
 
 
+_FILLERS = ("On it.", "Right away.", "Checking now.", "One moment.", "Pulling that up.",
+            "Working on it.", "Give me a second.", "Looking now.", "Copy that.", "Alright.")
+_last_filler = [""]
+
+
+def _next_filler() -> str:
+    """Short spoken lead-in for voice turns — varied, never the same one twice in a row."""
+    import random
+    choices = [f for f in _FILLERS if f != _last_filler[0]]
+    pick = random.choice(choices)
+    _last_filler[0] = pick
+    return pick
+
+
 async def publish_stage_event(event_type: str, payload: dict):
     dead = []
     for ws in list(_stage_clients):
@@ -477,8 +491,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # Stream a short, natural filler IMMEDIATELY so ElevenLabs gets a first token before Ace's
         # tools run. This is what lets voice use tools/act without starving the first-token deadline
         # (the old "LLM Cascade Error"). The real reply follows once the model produces it.
-        import random
-        lead = random.choice(("Sure.", "On it.", "Alright.", "Let's see.", "Okay.", "Got it."))
+        lead = _next_filler()
         yield ("data: " + json.dumps({
             "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
             "created": created, "model": model,
