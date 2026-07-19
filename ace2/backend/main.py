@@ -151,18 +151,38 @@ _stage_clients: set = set()
 _bg_tasks: set = set()   # hold refs to fire-and-forget tasks so they aren't GC'd mid-run
 
 
-_FILLERS = ("On it.", "Right away.", "Checking now.", "One moment.", "Pulling that up.",
-            "Working on it.", "Give me a second.", "Looking now.", "Copy that.", "Alright.")
+_FILLERS = ("On it —", "Right away —", "Sure —", "One sec —", "Alright —",
+            "Copy that —", "Give me a moment —", "You got it —")
 _last_filler = [""]
 
 
 def _next_filler() -> str:
-    """Short spoken lead-in for voice turns — varied, never the same one twice in a row."""
+    """Short spoken lead-in for voice tool turns — varied, never the same one twice in a row."""
     import random
     choices = [f for f in _FILLERS if f != _last_filler[0]]
     pick = random.choice(choices)
     _last_filler[0] = pick
     return pick
+
+
+# What Ace SAYS while a tool runs on a live call — conversational, specific, first person.
+# Falls back to the lowercased UI label for anything unlisted (incl. mcp_* names).
+_SPOKEN_STATUS = {
+    "get_calendar_range": "checking your calendar",
+    "create_calendar_event": "putting it on your calendar",
+    "delete_calendar_event": "pulling that off your calendar",
+    "add_task": "adding that to your list",
+    "complete_task": "checking that off",
+    "send_email": "sending that email",
+    "draft_email": "drafting that for you",
+    "search_gmail": "going through your inbox",
+    "read_gmail": "reading that email",
+    "recall": "searching my memory",
+    "search_drive": "digging through Drive",
+    "save_memory": "locking that in",
+    "capture_item": "noting that down",
+    "update_item": "updating your bank",
+}
 
 
 async def publish_stage_event(event_type: str, payload: dict):
@@ -438,6 +458,20 @@ async def history_view(months: int = 3):
     }
 
 
+@app.get("/thread", dependencies=[Depends(require_auth)])
+async def thread_view(limit: int = 20):
+    """The tail of Ace 2.0's own conversation (HUD + voice turns) for the chat panel,
+    so Brady sees recent history on open without asking. Read-only, oldest-first."""
+    limit = max(1, min(int(limit), 60))
+    own = await asyncio.to_thread(history.read_recent, 2)
+    tail = [
+        {"role": m.get("role"), "text": (m.get("content") or "").strip(), "ts": m.get("ts")}
+        for m in own[-limit:]
+        if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
+    ]
+    return {"messages": tail}
+
+
 # ── Voice brain: OpenAI-compatible custom-LLM endpoint for ElevenLabs Agents ─────
 # ElevenLabs' Conversational AI can use a custom LLM by POSTing an OpenAI-shaped
 # /v1/chat/completions and streaming SSE back. This exposes Ace's REAL brain
@@ -481,21 +515,51 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
 
     async def sse():
         queue: asyncio.Queue = asyncio.Queue()
+        # Context-aware in-between talk (Brady, 2026-07-19): NO upfront filler anymore —
+        # a plain conversational turn streams Ace's actual words immediately, so "how's it
+        # going" never gets "On it." theater. The filler now fires ONLY if the model's
+        # first move is a tool call (text hasn't started), which also keeps ElevenLabs'
+        # first-token deadline fed exactly when it's actually at risk (silent tool phase).
+        spoke = {"any": False}
+
+        async def keepalive():
+            """One neutral lead-in so ElevenLabs always gets a first token before a silent
+            tool round-trip — but ONLY if Ace hasn't already started speaking (plain small
+            talk streams its own words, so no 'On it —' theater there)."""
+            if not spoke["any"]:
+                spoke["any"] = True
+                await queue.put(("delta", _next_filler() + " "))
 
         async def emit(event_type, payload):
             if event_type == "delta":
+                spoke["any"] = True
                 await queue.put(("delta", payload.get("text", "")))
             elif event_type in ("final", "done"):
                 await queue.put(("done", None))
             elif event_type == "error":
                 await queue.put(("delta", payload.get("text", "")))
                 await queue.put(("done", None))
+            elif event_type == "hold":
+                # A gated action was blocked pending Brady's yes — no status word (nothing
+                # happened), just keep the stream alive for the spoken confirmation question.
+                await keepalive()
             elif event_type == "tool" and payload.get("status") == "running":
-                # Speak the tool status ("Removing event. ") — JARVIS narration that ALSO
-                # keeps tokens flowing so ElevenLabs never cuts the stream during a silent
-                # tool phase (the mid-turn "timeout" Brady kept hitting on actions).
-                label = (payload.get("label") or "Working on it").capitalize()  # "REMOVING EVENT" -> "Removing event"
-                await queue.put(("delta", label + ". "))
+                # Screen-only tools (display_card/open_url) paint silently — but if Ace
+                # hasn't spoken yet, still drop ONE lead-in so ElevenLabs isn't starved
+                # (a card-only turn used to deliver zero tokens → cascade). Never narrate
+                # "projecting" mid-sentence.
+                if payload.get("ui"):
+                    await keepalive()
+                    return
+                label = (payload.get("label") or "working on it").lower()
+                spoken = _SPOKEN_STATUS.get(payload.get("name"), label)
+                if not spoke["any"]:
+                    spoke["any"] = True
+                    await queue.put(("delta", f"{_next_filler()} {spoken}… "))
+                else:
+                    # Mid-turn: keep tokens flowing through silent tool phases so
+                    # ElevenLabs never cuts the stream (the old mid-turn "timeout").
+                    await queue.put(("delta", f"{spoken.capitalize()}… "))
             elif event_type in ("card", "open"):
                 # Voice turn wants to paint the screen → push over the app WebSocket, not the
                 # ElevenLabs audio stream. Same channel the typed path uses.
@@ -508,15 +572,6 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 await queue.put(("done", None))
 
         task = asyncio.create_task(run())
-        # Stream a short, natural filler IMMEDIATELY so ElevenLabs gets a first token before Ace's
-        # tools run. This is what lets voice use tools/act without starving the first-token deadline
-        # (the old "LLM Cascade Error"). The real reply follows once the model produces it.
-        lead = _next_filler()
-        yield ("data: " + json.dumps({
-            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-            "created": created, "model": model,
-            "choices": [{"index": 0, "delta": {"content": lead + " "}, "finish_reason": None}],
-        }) + "\n\n")
         try:
             while True:
                 kind, text = await queue.get()
@@ -528,6 +583,15 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                     "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
+            if not spoke["any"]:
+                # Nothing ever streamed (a blank model turn) → an empty completion makes
+                # ElevenLabs treat the call as an LLM failure and cascade. Always say one line.
+                yield ("data: " + json.dumps({
+                    "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {"content": "I'm here — say that again for me?"},
+                                 "finish_reason": None}],
+                }) + "\n\n")
             done_chunk = {
                 "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
                 "created": created, "model": model,

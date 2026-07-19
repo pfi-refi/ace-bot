@@ -477,3 +477,24 @@ body {
   #app.chat-open { padding-right: 22px; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---------- Voice/Chat mode toggle (top chrome) ---------- */
+#mode-toggle { display: flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(180deg, rgba(9,22,18,.85), rgba(5,13,11,.85)) padding-box,
+              linear-gradient(120deg, rgba(69,255,166,.35), rgba(83,231,255,.18)) border-box;
+  border: 1px solid transparent; }
+.mode-seg { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 2px;
+  color: var(--text-faint); background: transparent; border: 0; cursor: pointer;
+  padding: 5px 12px; border-radius: var(--r-pill);
+  transition: color .22s var(--ease-out), background .22s var(--ease-out); }
+.mode-seg:hover { color: var(--text); }
+.mode-seg.on { color: #06110C; background: linear-gradient(92deg, var(--aurora) 0%, #A8FFD6 100%);
+  text-shadow: none; box-shadow: 0 0 14px -2px rgba(69,255,166,.55); }
+body.mode-chat #mic-btn { display: none; }
+
+/* ---------- Preloaded history in the chat panel ---------- */
+.msg.hist { opacity: .62; }
+.msg.hist .sender { opacity: .8; }
+.hist-sep { align-self: center; font-family: var(--mono); font-size: 10px; letter-spacing: 3px;
+  color: var(--text-faint); margin: 10px 0 6px; opacity: .7; }

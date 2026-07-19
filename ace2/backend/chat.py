@@ -27,8 +27,10 @@ Design decisions carried in from the portal's scars:
 """
 
 import asyncio
+import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -53,10 +55,89 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
 VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
-# On voice Ace gets the full toolset so he can ACT — including delete_calendar_event (Brady
-# explicitly granted it 2026-07-19 for reschedules). The one hold-out is send_email (outbound
-# to third parties) until the confirm-before-send guardrail exists. Built once for cache stability.
-_VOICE_TOOL_DENY = {"send_email"}
+# On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
+# confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
+# says yes, only then does the second call actually send). Built once for cache stability.
+_VOICE_TOOL_DENY = set()
+
+# ---- Confirm-before-execute gate (guardrails, 2026-07-19) ----------------------------
+# Two-phase confirm for outward/destructive tools. A gated tool NEVER executes on its
+# first call: it arms a per-TOOL "permission ticket" and returns CONFIRMATION REQUIRED,
+# so Ace must state exactly what he's about to do and ask Brady. It executes only when
+# (a) the model re-calls with "confirmed": true, (b) a ticket for that tool was armed on
+# an EARLIER turn (so Ace cannot self-approve inside one turn), and (c) the ticket is
+# still fresh. `_turn_seq` is a monotonic counter bumped once per stream_turn call —
+# immune to the 160-message transcript cap that a message-count deadlocks on. On the
+# yes-turn we execute the args the model RE-SENDS (no byte-identical replay), so a fresh
+# email body never livelocks the confirm.
+_CONFIRM_ALWAYS = {
+    "send_email", "mcp_send_gmail_message",   # outbound to third parties
+    "delete_calendar_event",                  # destroys a meeting
+    "mcp_get_drive_shareable_link",           # outward data exposure
+}
+_DESTRUCTIVE_ACTIONS = {"delete", "remove", "clear", "cancel", "trash"}
+_DESTRUCTIVE_HINTS = ("delete", "remove", "clear", "trash", "cancel")
+_SHARE_UPDATES = {"all", "externalonly", "true", "1"}
+_CONFIRM_TTL_SEC = 300
+_pending_confirm: dict = {}   # tool_name -> {"turn": int, "ts": float}
+_turn_seq = [0]
+
+_CONFIRM_MSG = (
+    "CONFIRMATION REQUIRED — nothing was executed. Tell Brady in ONE plain sentence exactly "
+    "what this will do (for an email: who it goes to and the subject; for a delete or change: "
+    "which item and what happens to it) and ask him to confirm. Do NOT say it's done — it has "
+    "not happened. Only after he clearly says yes on a LATER turn, call this same tool again "
+    "with the same details plus \"confirmed\": true. If he wants any change, call it again with "
+    "the updated details (no confirmed) so he can okay the new version. If he says no, drop it."
+)
+
+
+def _next_turn_id() -> int:
+    _turn_seq[0] += 1
+    return _turn_seq[0]
+
+
+def _strip_confirm(args: dict) -> dict:
+    return {k: v for k, v in args.items() if k not in ("confirmed", "confirm_token")}
+
+
+def _needs_confirm(name: str, args: dict) -> bool:
+    if name in _CONFIRM_ALWAYS:
+        return True
+    a = _strip_confirm(args)
+    if name in ("mcp_manage_event", "mcp_manage_task"):
+        action = str(a.get("action", "")).strip().lower()
+        if action:
+            # Trust the explicit action verb — 'create'/'update' a task named
+            # "Cancel Comcast" must NOT trip a destructive hint.
+            if action in _DESTRUCTIVE_ACTIONS:
+                return True
+            return str(a.get("send_updates", "")).strip().lower() in _SHARE_UPDATES
+        # No action given → sniff the whole payload as a fallback.
+        blob = json.dumps(a, default=str).lower()
+        return any(h in blob for h in _DESTRUCTIVE_HINTS)
+    if name == "mcp_modify_sheet_values":
+        return bool(a.get("clear_values"))   # clearing a range destroys data
+    if name == "mcp_modify_doc_text":
+        return True   # overwrites document content
+    return False
+
+
+def _confirm_gate(name: str, args: dict, turn_id: int):
+    """Returns (blocked: bool, clean_args: dict). Arms/consumes per-tool tickets.
+    clean_args always has confirm flags stripped so they never reach an executor."""
+    clean = _strip_confirm(args)
+    if not _needs_confirm(name, args):
+        return False, clean
+    now = time.time()
+    for k in [k for k, v in _pending_confirm.items() if now - v["ts"] > _CONFIRM_TTL_SEC]:
+        _pending_confirm.pop(k, None)
+    ticket = _pending_confirm.get(name)
+    if args.get("confirmed") and ticket and ticket["turn"] < turn_id:
+        _pending_confirm.pop(name, None)   # single-use — a fresh call must re-arm
+        return False, clean
+    _pending_confirm[name] = {"turn": turn_id, "ts": now}
+    return True, clean
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
@@ -351,10 +432,13 @@ async def _fast_context() -> str:
         "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
         "tools on this call: use display_card to put things on his screen, get_calendar_range / "
         "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
-        "delete_calendar_event, capture_item, update_item, add_task, draft_email, search_drive to ACT "
-        "— actually do these, then tell him it's done. (The one thing you can't do by voice is SEND "
-        "email — offer to draft instead.) Keep spoken replies short and natural — a sentence or two, "
-        "no lists or markdown; if you're doing something, say so in a few words while it happens.)",
+        "delete_calendar_event, capture_item, update_item, add_task, send_email, draft_email, "
+        "search_drive to ACT — actually do these, then tell him it's done. Sending and deleting are "
+        "GATED: the tool will come back asking for confirmation — say in one short sentence exactly "
+        "what you're about to do, wait for his yes, then call it again with confirmed true. "
+        "Keep spoken replies short and natural — a sentence or two, no lists or markdown. If he's "
+        "just chatting with you, just talk — no tools, no status narration, never repeat his "
+        "question back to him.)",
     ])
 
 
@@ -428,6 +512,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     client = _anthropic()
     full_reply = []
     confirmations = []
+    # One monotonic id per real user turn — the confirm gate uses it to tell "Brady
+    # spoke again" from "the model looped inside this same turn." Immune to the
+    # transcript cap that a message-count would deadlock on.
+    turn_id = _next_turn_id()
 
     # Voice (fast) path: NO tools, NO extended thinking, tight token cap — the
     # model must lead with SPOKEN TEXT so the first token streams inside
@@ -481,16 +569,28 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
             for block in final.content:
                 if getattr(block, "type", "") != "tool_use":
                     continue
-                label = tools.TOOL_LABELS.get(block.name, block.name.upper())
-                await emit("tool", {"name": block.name, "label": label, "status": "running"})
-                if block.name in tools.UI_TOOLS:
-                    result = await _run_ui_tool(block.name, dict(block.input), emit)
+                is_ui = block.name in tools.UI_TOOLS
+                # Gate BEFORE any "running" narration — a blocked action must never be
+                # spoken/painted as if it happened (it's about to be asked, not done).
+                blocked, use_args = _confirm_gate(block.name, dict(block.input), turn_id)
+                if blocked:
+                    # No action pill/narration; just a keep-alive token so a voice
+                    # turn's confirmation question doesn't stall behind a silent round-trip.
+                    await emit("hold", {"name": block.name})
+                    result = _CONFIRM_MSG
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+                    continue
+                label = tools.TOOL_LABELS.get(block.name) or \
+                    block.name.removeprefix("mcp_").replace("_", " ").upper()
+                await emit("tool", {"name": block.name, "label": label, "status": "running", "ui": is_ui})
+                if is_ui:
+                    result = await _run_ui_tool(block.name, use_args, emit)
                 elif mcp_client.is_mcp_tool(block.name):
-                    result = await mcp_client.call(block.name, dict(block.input))
+                    result = await mcp_client.call(block.name, use_args)
                 else:
-                    result = await asyncio.to_thread(tools.execute, block.name, dict(block.input))
-                await emit("tool", {"name": block.name, "label": label, "status": "done"})
-                if block.name not in tools.UI_TOOLS:
+                    result = await asyncio.to_thread(tools.execute, block.name, use_args)
+                await emit("tool", {"name": block.name, "label": label, "status": "done", "ui": is_ui})
+                if not is_ui:
                     await emit("confirmation", {"text": result})
                     confirmations.append(result)
                 tool_results.append({

@@ -228,6 +228,33 @@
   $('chat-toggle').addEventListener('click', function () { setChat(!chatOpen); });
   $('chat-close').addEventListener('click', function () { setChat(false); });
 
+  /* ============================================================ VOICE / CHAT MODE
+     Brady's toggle (2026-07-19): VOICE = today's behavior (mic starts a live call,
+     replies are spoken). CHAT = meeting-safe — completely silent, mic hidden, panel
+     open, works like the Telegram bot. Persisted; survives reloads. */
+  var aceMode = localStorage.getItem('ace2_mode') === 'chat' ? 'chat' : 'voice';
+  function applyMode() {
+    var chat = aceMode === 'chat';
+    document.body.classList.toggle('mode-chat', chat);
+    $('mode-voice').classList.toggle('on', !chat); $('mode-voice').setAttribute('aria-pressed', String(!chat));
+    $('mode-chat').classList.toggle('on', chat); $('mode-chat').setAttribute('aria-pressed', String(chat));
+  }
+  function setMode(m) {
+    if (m === aceMode) return;
+    aceMode = m; localStorage.setItem('ace2_mode', m); applyMode();
+    if (m === 'chat') {
+      // Meeting-safe means NOTHING is listening or talking: kill the live call,
+      // the record-and-transcribe fallback mic, and any TTS in flight.
+      try { endLiveVoice(); } catch (e) {}
+      state.handsFree = false;
+      try { stopMic(); } catch (e) {}
+      killTts();
+      setChat(true);   // chat mode lives in the panel — open it
+    }
+  }
+  $('mode-voice').addEventListener('click', function () { setMode('voice'); });
+  $('mode-chat').addEventListener('click', function () { setMode('chat'); });
+
   /* ============================================================ DAY / UP-NEXT */
   var todayEvents = [], todayLoaded = false;
   function fmtClock(d) { var h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12; return h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap; }
@@ -316,12 +343,41 @@
 
   function startApp() {
     $('app').classList.remove('hidden');
+    applyMode();
+    if (aceMode === 'chat' && !chatOpen) setChat(true);
     applyChatState();
     connectWS();
     loadToday();
     loadDashboard();
     checkConvai();
-    greeting();
+    loadHistory();   // renders the recent thread, then drops the greeting under it
+  }
+  /* Last ~18 turns of Ace 2.0's own history, preloaded so the panel opens with
+     context instead of empty (Brady: "see history without always asking him").
+     Guarded so a re-login can't duplicate it, and INSERTED AT THE TOP so a message
+     Brady fires off before the fetch resolves still reads in order. */
+  var historyLoaded = false, greeted = false;
+  function loadHistory() {
+    if (historyLoaded) { if (!greeted) { greeted = true; greeting(); } return; }
+    historyLoaded = true;
+    fetch(API + '/thread?limit=18', { headers: headers() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var msgs = (d && d.messages) || [];
+        if (!msgs.length) return;
+        var frag = document.createDocumentFragment();
+        msgs.forEach(function (m) {
+          var el = document.createElement('div');
+          el.className = 'msg ' + (m.role === 'user' ? 'user' : 'ace') + ' hist';
+          if (m.role !== 'user') { var s = document.createElement('div'); s.className = 'sender'; s.textContent = 'ACE'; el.appendChild(s); }
+          el.appendChild(document.createTextNode(m.text));
+          frag.appendChild(el);
+        });
+        var sep = document.createElement('div'); sep.className = 'hist-sep'; sep.textContent = '— now —'; frag.appendChild(sep);
+        messagesEl.insertBefore(frag, messagesEl.firstChild);
+      })
+      .catch(function () {})
+      .then(function () { if (!greeted) { greeted = true; greeting(); } scrollBottom(); });
   }
   function greeting() {
     var d = new Date(), days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -730,6 +786,7 @@
     if (!state.busy) setOrbState('idle');
   }
   $('mic-btn').addEventListener('click', function () {
+    if (aceMode === 'chat') return;   // chat mode: mic is hidden/inert — flip to VOICE to call
     if (convaiEnabled) { if (liveConv || liveStarting) endLiveVoice(); else startLiveVoice(); return; }   // full-duplex: one tap starts, next tap ALWAYS stops
     if (state.handsFree || state.micActive) { state.handsFree = false; stopMic(); }        // fallback: record + transcribe
     else { state.handsFree = true; startMic(); }
@@ -738,11 +795,22 @@
   $('voice-toggle').addEventListener('click', function () {
     state.voiceOut = !state.voiceOut; localStorage.setItem('ace2_voice', state.voiceOut ? 'on' : 'off');
     $('voice-toggle').classList.toggle('off', !state.voiceOut); $('voice-toggle').setAttribute('aria-pressed', String(state.voiceOut));
-    if (!state.voiceOut) { try { window.speechSynthesis.cancel(); } catch (e) {} if (ttsAudio) ttsAudio.pause(); ttsQueue = []; ttsPlaying = false; orb.setAmplitude(0); }
+    if (!state.voiceOut) killTts();
   });
   $('voice-toggle').classList.toggle('off', !state.voiceOut);
 
-  function speak(text) { if (!state.voiceOut || !text) return; ttsQueue.push(text); if (!ttsPlaying) playNextTts(); }
+  // Hard-stop ALL reply audio. Nulling ttsAudio first is what stops playAudioBlob's
+  // pulse rAF loop (it checks ttsAudio each frame) — pause() alone never fires
+  // onended, which used to leave the orb surging in [ SPEAKING ] forever.
+  function killTts() {
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+    var a = ttsAudio; ttsAudio = null;
+    if (a) { try { a.onended = a.onerror = null; a.pause(); a.src = ''; } catch (e) {} }
+    ttsQueue = []; ttsPlaying = false; orb.setAmplitude(0);
+    if (!state.busy) setOrbState(state.micActive ? 'listening' : 'idle');
+  }
+
+  function speak(text) { if (aceMode === 'chat' || !state.voiceOut || !text) return; ttsQueue.push(text); if (!ttsPlaying) playNextTts(); }
   function playNextTts() {
     if (!ttsQueue.length) {
       ttsPlaying = false;

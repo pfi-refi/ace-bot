@@ -85,6 +85,11 @@ TOOLS = [
                     "type": "string",
                     "description": "Date of the event, ISO YYYY-MM-DD, to narrow the search",
                 },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Leave unset the first time. After Brady says yes to the "
+                                   "delete on a later turn, re-call with confirmed: true.",
+                },
             },
             "required": ["event_title", "event_date"],
         },
@@ -132,6 +137,11 @@ TOOLS = [
                 "to": {"type": "string", "description": "Recipient email address"},
                 "subject": {"type": "string", "description": "Subject line"},
                 "body": {"type": "string", "description": "Plain-text body"},
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Leave unset the first time. After Brady says yes to the "
+                                   "send on a later turn, re-call with confirmed: true.",
+                },
             },
             "required": ["to", "subject", "body"],
         },
