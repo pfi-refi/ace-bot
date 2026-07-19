@@ -457,6 +457,10 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             elif event_type == "error":
                 await queue.put(("delta", payload.get("text", "")))
                 await queue.put(("done", None))
+            elif event_type in ("card", "open"):
+                # Voice turn wants to paint the screen → push over the app WebSocket, not the
+                # ElevenLabs audio stream. Same channel the typed path uses.
+                await publish_stage_event(event_type, payload)
 
         async def run():
             try:
@@ -465,6 +469,16 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 await queue.put(("done", None))
 
         task = asyncio.create_task(run())
+        # Stream a short, natural filler IMMEDIATELY so ElevenLabs gets a first token before Ace's
+        # tools run. This is what lets voice use tools/act without starving the first-token deadline
+        # (the old "LLM Cascade Error"). The real reply follows once the model produces it.
+        import random
+        lead = random.choice(("Sure.", "On it.", "Alright.", "Let's see.", "Okay.", "Got it."))
+        yield ("data: " + json.dumps({
+            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+            "created": created, "model": model,
+            "choices": [{"index": 0, "delta": {"content": lead + " "}, "finish_reason": None}],
+        }) + "\n\n")
         try:
             while True:
                 kind, text = await queue.get()
@@ -485,18 +499,6 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             yield "data: [DONE]\n\n"
         finally:
             task.cancel()
-
-    # Off to the side of the spoken reply: decide whether to paint a card on Brady's screen
-    # and push it over the app WebSocket. Spawned OUTSIDE sse() so its lifecycle isn't tied to
-    # the SSE `finally: task.cancel()`. Only runs when a browser is actually connected. It emits
-    # ONLY card/open events (never delta/final), so it can't touch the voice first-token deadline.
-    if _stage_clients:
-        async def _stage_emit(event_type, payload):
-            if event_type in ("card", "open"):
-                await publish_stage_event(event_type, payload)
-        _t = asyncio.create_task(chat.stage_pass(user_text, _stage_emit, prior=prior))
-        _bg_tasks.add(_t)
-        _t.add_done_callback(_bg_tasks.discard)
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 

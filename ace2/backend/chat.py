@@ -52,6 +52,10 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
 VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
+# On voice Ace gets nearly the full toolset so he can ACT (calendar, weather, email search/read,
+# capture, cards) — the only things withheld are the irreversible/outbound ones (send email,
+# delete event) until the confirm-before-send guardrail exists. Built once for cache stability.
+_VOICE_TOOL_DENY = {"send_email", "delete_calendar_event"}
 EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
@@ -295,11 +299,12 @@ async def _fast_context() -> str:
     thread so it isn't a cold start — all fetched concurrently to stay fast.
     """
     now = datetime.now(EASTERN)
-    memory, cal_all, bank, convo = await asyncio.gather(
+    memory, cal_all, bank, convo, wx = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
         asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
         asyncio.to_thread(daybank.read_items, True),
         asyncio.to_thread(brain.read_shared_conversation),
+        get_weather(),
         return_exceptions=True,
     )
 
@@ -331,24 +336,27 @@ async def _fast_context() -> str:
         "DATA BANK (commitments / to-dos / deals you're already tracking for Brady):",
         _format_daybank(ok(bank, [])),
         "",
+        "WEATHER RIGHT NOW:",
+        _format_weather(ok(wx, {})),
+        "",
         "RECENT THREAD (what you and Brady have been discussing lately, across the HUD, "
         "voice and Telegram — use it for continuity):",
         convo_str,
         "",
-        "(VOICE MODE — you are speaking out loud to Brady. Everything under LIVE CONTEXT above "
-        "— the time, his memory, TODAY'S SCHEDULE, the data bank, the recent thread — is live and "
-        "already in front of you: ANSWER FROM IT directly and with confidence. NEVER say you "
-        "\"can't see\" his calendar/schedule/tasks and NEVER ask him to \"open you on the computer\" "
-        "or \"show you\" — if it's in the context above you already have it; if today's schedule is "
-        "empty just tell him he's clear. Keep replies to a sentence or two of natural spoken English "
-        "— no lists, no markdown. The only things you can't do live are pull NEW data mid-call "
-        "(other days, the full inbox, the web) or take actions (send an email, add an event, capture "
-        "an item); for those, say you'll set it up when he's at the screen or by text — never claim "
-        "it's already done.)",
+        "(VOICE MODE — you are speaking out loud to Brady. Everything under LIVE CONTEXT above is "
+        "live and in front of you — ANSWER FROM IT directly and confidently; never say you \"can't "
+        "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
+        "tools on this call: use display_card to put things on his screen, get_calendar_range / "
+        "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
+        "capture_item, update_item, add_task, draft_email, search_drive to ACT — actually do these, "
+        "then tell him it's done. (You can't send email or delete events by voice yet — offer to draft "
+        "or to handle it from the screen.) Keep spoken replies short and natural — a sentence or two, "
+        "no lists or markdown; if you're doing something, say so in a few words while it happens.)",
     ])
 
 
 STAGE_TOOLS = [t for t in tools.TOOLS if t["name"] in tools.UI_TOOLS]
+VOICE_TOOLS = [t for t in tools.TOOLS if t["name"] not in _VOICE_TOOL_DENY]
 # Picking which card to show is a simple call — run it on Haiku, not Opus, so the stage
 # pass adds minimal cost/latency on top of every voice turn.
 STAGE_MODEL = os.environ.get("ACE2_STAGE_MODEL", "claude-haiku-4-5-20251001")
@@ -424,7 +432,11 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     # thinking block = no text in time = "LLM Cascade Error" (the call fails and
     # Ace never replies). The typed path keeps the full tooled + thinking loop.
     if fast:
-        stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1024, system=system, messages=messages)
+        # Voice: fast model + real tools (so Ace can ACT by voice), but NO extended thinking.
+        # openai_compat streams a short filler first, so leading with a tool call no longer
+        # starves ElevenLabs' first-token deadline (what used to cause the cascade error).
+        stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=system,
+                             messages=messages, tools=VOICE_TOOLS)
     else:
         stream_kwargs = dict(
             model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
