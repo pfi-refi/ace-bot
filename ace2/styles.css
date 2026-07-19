@@ -231,6 +231,12 @@ body { background: radial-gradient(120% 90% at 50% 0%, #041012 0%, var(--bg) 45%
   font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Data bank card — Ace's captured to-dos / commitments / notes */
+.in-row { padding: 8px 0; border-bottom: 1px solid rgba(69,255,166,.1); }
+.in-row:last-child { border-bottom: none; }
+.in-from { color: var(--aurora); font-weight: 600; font-size: 12px; letter-spacing: .01em; }
+.in-subj { color: var(--text); line-height: 1.35; margin-top: 1px; }
+.in-snip { color: var(--text-dim); font-size: 11.5px; line-height: 1.35; margin-top: 2px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
 .db-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid rgba(69,255,166,.1); }
 .db-item:last-child { border-bottom: none; }
 .db-box { flex: none; width: 16px; height: 16px; margin-top: 1px; padding: 0; cursor: pointer;

@@ -231,7 +231,7 @@ TOOLS = [
             "properties": {
                 "panel": {
                     "type": "string",
-                    "enum": ["calendar", "tasks", "weather", "memory", "timeline", "daybank"],
+                    "enum": ["calendar", "tasks", "weather", "memory", "timeline", "daybank", "inbox"],
                     "description": (
                         "Which card to display. Use 'timeline' for today's schedule "
                         "laid out against the current time (a live NOW line with what's "

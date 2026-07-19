@@ -262,6 +262,39 @@ def get_recent_read_emails() -> str:
         return "⚠️ Could not load recent read emails."
 
 
+def get_inbox_structured(max_results: int = 6) -> list:
+    """Priority unread emails (last 2d, no promos/social) as dicts for the inbox card:
+    [{id, from, subject, snippet}]."""
+    try:
+        creds = get_google_creds()
+        service = build("gmail", "v1", credentials=creds)
+        n = max(1, min(int(max_results), 15))
+        results = service.users().messages().list(
+            userId="me", q="is:unread newer_than:2d -category:promotions -category:social",
+            maxResults=n,
+        ).execute()
+        out = []
+        for msg in results.get("messages", []):
+            md = service.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["From", "Subject"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in md.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "Unknown")
+            if "<" in sender:
+                sender = sender.split("<")[0].strip().strip('"')
+            out.append({
+                "id": msg["id"],
+                "from": sender[:40],
+                "subject": headers.get("Subject", "No subject")[:90],
+                "snippet": md.get("snippet", "")[:120],
+            })
+        return out
+    except Exception as e:
+        logger.error("inbox structured error: %s", e)
+        return []
+
+
 def _decode_b64url(data: str) -> str:
     import base64
     try:

@@ -319,6 +319,7 @@
     applyChatState();
     connectWS();
     loadToday();
+    loadDashboard();
     checkConvai();
     greeting();
   }
@@ -393,7 +394,7 @@
   /* ============================================================ CARDS — Ace's projections */
   // Default screen side per card; Ace can override with a `where` on display_card.
   var CARD_SLOTS = { timeline: 'left', daybank: 'right', calendar: 'left', tasks: 'left',
-                     weather: 'right', memory: 'right' };
+                     weather: 'right', memory: 'right', inbox: 'right' };
   function slotEl(where) { return (where === 'left') ? $('cards-left') : $('cards'); }
   function cardShell(title, where) {
     var host = slotEl(where);
@@ -504,7 +505,27 @@
         row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
       });
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
+    } else if (panel === 'inbox') {
+      var body7 = cardShell('PRIORITY INBOX', slot);
+      var emails = data.emails || [];
+      if (!emails.length) return empty(body7, 'Inbox clear — nothing unread.');
+      emails.forEach(function (m) {
+        var row = document.createElement('div'); row.className = 'in-row';
+        var from = document.createElement('div'); from.className = 'in-from'; from.textContent = m.from || '';
+        var subj = document.createElement('div'); subj.className = 'in-subj'; subj.textContent = m.subject || '';
+        var snip = document.createElement('div'); snip.className = 'in-snip'; snip.textContent = m.snippet || '';
+        row.appendChild(from); row.appendChild(subj); row.appendChild(snip); body7.appendChild(row);
+      });
     }
+  }
+  // Dashboard: auto-load the always-on panels on startup so the HUD is a live command
+  // center at a glance (orb stays the centerpiece). Each is best-effort and independent.
+  function loadDashboard() {
+    var g = function (url) { return fetch(API + url, { headers: headers() }).then(function (r) { return r.ok ? r.json() : null; }); };
+    g('/calendar?days=1').then(function (d) { if (d) materializeCard('timeline', { events: d.events || [] }, 'left'); }).catch(function () {});
+    g('/tasks').then(function (d) { if (d) materializeCard('tasks', { tasks: d.tasks || [] }, 'left'); }).catch(function () {});
+    g('/inbox').then(function (d) { if (d) materializeCard('inbox', { emails: d.emails || [] }, 'right'); }).catch(function () {});
+    g('/weather').then(function (d) { if (d) materializeCard('weather', d, 'right'); }).catch(function () {});
   }
   function toggleBankItem(id, status) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
