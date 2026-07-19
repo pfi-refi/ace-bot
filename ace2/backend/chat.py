@@ -39,6 +39,7 @@ from .integrations.calendar_api import (
     get_events_structured,
     get_tomorrow_events,
 )
+from .integrations import mcp_client
 from .integrations.tasks_api import get_gmail_summary, get_inbox_structured, get_tasks, get_tasks_structured
 from .integrations.weather import get_weather
 from .system_prompt import build_system_prompt
@@ -440,9 +441,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
         stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=system,
                              messages=messages, tools=VOICE_TOOLS)
     else:
+        # MCP read-tools fold into the typed loop when activated (MCP_SERVER_URL set);
+        # dormant → empty list, byte-identical tool set (prompt-cache stable).
+        mcp_schemas = await mcp_client.tool_schemas()
         stream_kwargs = dict(
             model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
-            tools=tools.TOOLS, thinking={"type": "adaptive"},
+            tools=tools.TOOLS + mcp_schemas, thinking={"type": "adaptive"},
             output_config={"effort": EFFORT},
         )
 
@@ -481,6 +485,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
                 await emit("tool", {"name": block.name, "label": label, "status": "running"})
                 if block.name in tools.UI_TOOLS:
                     result = await _run_ui_tool(block.name, dict(block.input), emit)
+                elif mcp_client.is_mcp_tool(block.name):
+                    result = await mcp_client.call(block.name, dict(block.input))
                 else:
                     result = await asyncio.to_thread(tools.execute, block.name, dict(block.input))
                 await emit("tool", {"name": block.name, "label": label, "status": "done"})
