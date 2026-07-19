@@ -35,9 +35,10 @@ _schemas: list = []          # Anthropic-shaped tool schemas (cached once)
 _names: set = set()
 _loaded = False
 
-# Belt-and-suspenders: never register write/destructive MCP tools even if the
-# server exposes them (server should be --read-only anyway; see spec §security).
-_DENY_HINTS = ("send", "delete", "remove", "create", "update", "share", "move", "trash", "modify", "write")
+# Brady granted FULL read/write for MCP tools (2026-07-19). The one hold-out until
+# the confirm-before-send guardrail ships: irreversible DELETION of mail/files.
+# (Calendar delete lives on Ace's own guarded tool; create/update/send/share are allowed.)
+_DENY_HINTS = ("delete", "trash", "empty_")
 
 
 def _url() -> str:
