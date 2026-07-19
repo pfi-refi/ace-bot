@@ -320,6 +320,19 @@ async def ws_chat(websocket: WebSocket):
     async def emit(event_type, payload):
         await websocket.send_json({"type": event_type, **payload})
 
+    # Heartbeat: during long turns (tools + thinking) the socket can sit silent for
+    # 30-60s+ and the edge proxy drops it as idle — Brady sees it as "he timed out."
+    # A ping every 20s keeps the line alive; the frontend ignores unknown event types.
+    async def _keepalive():
+        try:
+            while True:
+                await asyncio.sleep(20)
+                await websocket.send_json({"type": "ping"})
+        except Exception:
+            pass
+
+    ka = asyncio.create_task(_keepalive())
+
     # Per-connection conversation: seeded once from the shared Telegram window
     # (read-only continuity), then grows with THIS session's turns — so Ace
     # remembers the conversation he's actually in, turn to turn.
@@ -351,6 +364,7 @@ async def ws_chat(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        ka.cancel()
         _stage_clients.discard(websocket)
 
 
