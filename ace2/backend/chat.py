@@ -54,7 +54,7 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # (time-to-first-word) matters far more than depth per spoken sentence, and Opus's
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
-VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
+VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-sonnet-5")
 # On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
 # confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
 # says yes, only then does the second call actually send). Built once for cache stability.
@@ -303,15 +303,16 @@ async def _load_messages(user_text: str, prior=None) -> list:
     return msgs
 
 
-# ── The ONE brain: a single conversation across voice AND chat ───────────────────
-# Ace 2.0 records EVERY turn from both paths to its own history (see the history.append
-# calls at the end of stream_turn). That log — not the write-only shared Telegram
-# window — is the source of truth for "what we've been talking about." Seeding both
-# modes from it is what makes voice and chat the same brain: talk by voice and the
-# typed side sees it; type and voice sees it. The Telegram window is now only a
-# cold-start fallback (used until ace2 has its own recent turns).
-def _unified_thread(limit: int = 24) -> list:
-    """Recent conversation across voice + chat, oldest-first, as [{role,content,ts}]."""
+# ── The ONE brain: Ace 2.0 is SELF-CONTAINED ────────────────────────────────────
+# Ace records EVERY turn from both voice and chat to its OWN history. That log — not
+# the Telegram bot's shared window — is the single source of truth. Ace no longer
+# reads the bot's conversation at all: the bot is a standalone backup now, never a
+# dependency. This is what makes voice and chat the same brain AND makes Ace fully
+# individual — the bot going dark can't take Ace's memory with it. Durable state
+# lives in ACE MEMORY (facts) + the DATA BANK (commitments/deals); this raw thread
+# is only the last handful of turns for immediate continuity.
+def _unified_thread(limit: int = 12) -> list:
+    """Recent conversation across voice + chat, from Ace's OWN history only."""
     try:
         entries = history.read_recent(2)
     except Exception:
@@ -321,32 +322,24 @@ def _unified_thread(limit: int = 24) -> list:
         for e in entries
         if e.get("role") in ("user", "assistant") and (e.get("content") or "").strip()
     ]
-    if len(turns) < 4:  # cold start — borrow the Telegram window for continuity
-        try:
-            shared = brain.read_shared_conversation()
-        except Exception:
-            shared = []
-        older = [
-            {"role": m.get("role"), "content": (m.get("content") or "").strip(), "ts": None}
-            for m in shared
-            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
-        ]
-        turns = older + turns
     return turns[-limit:]
 
 
 def _format_thread(turns: list) -> str:
-    """Render the unified thread for the context block — each line DATE-STAMPED so Ace
-    never mistakes an earlier day's message for today (the 'it's Saturday' bug)."""
+    """Render the recent thread for the context block. Lines are stamped with the DAY
+    ONLY (never a clock time) — day-stamps stop the 'it's Saturday' drift, while
+    omitting the time stops Ace from echoing a past turn's timestamp as 'now' (the
+    9:24-vs-10:12 bug). The one authority for the current time is the CURRENT TIME
+    line at the top of the context."""
     if not turns:
-        return "(no earlier conversation on record)"
+        return "(no earlier conversation yet — start fresh)"
     lines = []
     for m in turns:
         stamp = ""
         if m.get("ts"):
             try:
                 dt = datetime.fromisoformat(m["ts"]).astimezone(EASTERN)
-                stamp = f"[{dt.strftime('%a %-I:%M%p').lower()}] "
+                stamp = f"[{dt.strftime('%a')}] "
             except Exception:
                 stamp = ""
         lines.append(f"{stamp}{m['role']}: {m['content'][:280]}")
@@ -566,21 +559,19 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     # transcript cap that a message-count would deadlock on.
     turn_id = _next_turn_id()
 
-    # Voice (fast) path: NO tools, NO extended thinking, tight token cap — the
-    # model must lead with SPOKEN TEXT so the first token streams inside
-    # ElevenLabs' custom-LLM first-token deadline. Leading with a tool call or a
-    # thinking block = no text in time = "LLM Cascade Error" (the call fails and
-    # Ace never replies). The typed path keeps the full tooled + thinking loop.
+    # ONE brain, same hands: BOTH paths get the full toolset — native + MCP (Google
+    # Workspace). Voice used to run a lean native-only set; Brady expects voice and chat
+    # to be equally capable, so MCP folds into voice too. Schemas are fetched once and
+    # cached, so this is cheap. (Dormant when MCP_SERVER_URL unset → empty list.)
+    mcp_schemas = await mcp_client.tool_schemas()
     if fast:
-        # Voice: fast model + real tools (so Ace can ACT by voice), but NO extended thinking.
-        # openai_compat streams a short filler first, so leading with a tool call no longer
-        # starves ElevenLabs' first-token deadline (what used to cause the cascade error).
+        # Voice: still NO extended thinking (thinking latency is what starves ElevenLabs'
+        # first-token deadline), but now the smarter Sonnet brain + the full tool surface,
+        # so voice can do everything chat can. The keep-alive in openai_compat covers the
+        # first-token deadline when a tool leads the turn.
         stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=system,
-                             messages=messages, tools=VOICE_TOOLS)
+                             messages=messages, tools=VOICE_TOOLS + mcp_schemas)
     else:
-        # MCP read-tools fold into the typed loop when activated (MCP_SERVER_URL set);
-        # dormant → empty list, byte-identical tool set (prompt-cache stable).
-        mcp_schemas = await mcp_client.tool_schemas()
         stream_kwargs = dict(
             model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
             tools=tools.TOOLS + mcp_schemas, thinking={"type": "adaptive"},
