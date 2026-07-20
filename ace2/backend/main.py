@@ -366,8 +366,11 @@ async def ws_chat(websocket: WebSocket):
                 await emit("error", {"text": "Empty message"})
                 continue
             if convo is None:
-                shared = await asyncio.to_thread(read_shared_conversation)
-                convo = sanitize_for_api(shared)
+                # Seed from the UNIFIED thread (ace2's own log of BOTH voice + typed
+                # turns), not the stale Telegram window — so typed Ace wakes up knowing
+                # today's voice conversation and the correct day.
+                seed = await asyncio.to_thread(chat._unified_thread)
+                convo = sanitize_for_api(seed)
             convo.append({"role": "user", "content": text})
             await emit("start", {})
             reply = await chat.stream_turn(text, emit, prior=convo)

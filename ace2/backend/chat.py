@@ -290,17 +290,67 @@ def _format_daybank(items: list) -> str:
 async def _load_messages(user_text: str, prior=None) -> list:
     """Conversation for the API, sanitized to {role,content} + this turn.
 
-    prior=None (HUD chat): read the shared Telegram window for continuity — 2.0
-    reads it, never writes it. prior given (voice adapter): use the caller's
-    conversation verbatim; ElevenLabs sends the full turn history each call, so
-    that IS the source of truth for intra-call memory.
+    prior=None (HTTP one-shot): seed from the UNIFIED thread (ace2's own history,
+    which records both voice and typed turns). prior given (WS chat / voice adapter):
+    use the caller's conversation — the WS seeds it from the unified thread too, and
+    the voice adapter passes ElevenLabs' live call history.
     """
     if prior is None:
-        prior = await asyncio.to_thread(brain.read_shared_conversation)
+        prior = await asyncio.to_thread(_unified_thread)
     msgs = brain.sanitize_for_api(prior)
     if not msgs or msgs[-1].get("content") != user_text:
         msgs.append({"role": "user", "content": user_text})
     return msgs
+
+
+# ── The ONE brain: a single conversation across voice AND chat ───────────────────
+# Ace 2.0 records EVERY turn from both paths to its own history (see the history.append
+# calls at the end of stream_turn). That log — not the write-only shared Telegram
+# window — is the source of truth for "what we've been talking about." Seeding both
+# modes from it is what makes voice and chat the same brain: talk by voice and the
+# typed side sees it; type and voice sees it. The Telegram window is now only a
+# cold-start fallback (used until ace2 has its own recent turns).
+def _unified_thread(limit: int = 24) -> list:
+    """Recent conversation across voice + chat, oldest-first, as [{role,content,ts}]."""
+    try:
+        entries = history.read_recent(2)
+    except Exception:
+        entries = []
+    turns = [
+        {"role": e.get("role"), "content": (e.get("content") or "").strip(), "ts": e.get("ts")}
+        for e in entries
+        if e.get("role") in ("user", "assistant") and (e.get("content") or "").strip()
+    ]
+    if len(turns) < 4:  # cold start — borrow the Telegram window for continuity
+        try:
+            shared = brain.read_shared_conversation()
+        except Exception:
+            shared = []
+        older = [
+            {"role": m.get("role"), "content": (m.get("content") or "").strip(), "ts": None}
+            for m in shared
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
+        ]
+        turns = older + turns
+    return turns[-limit:]
+
+
+def _format_thread(turns: list) -> str:
+    """Render the unified thread for the context block — each line DATE-STAMPED so Ace
+    never mistakes an earlier day's message for today (the 'it's Saturday' bug)."""
+    if not turns:
+        return "(no earlier conversation on record)"
+    lines = []
+    for m in turns:
+        stamp = ""
+        if m.get("ts"):
+            try:
+                dt = datetime.fromisoformat(m["ts"]).astimezone(EASTERN)
+                stamp = f"[{dt.strftime('%a %-I:%M%p').lower()}] "
+            except Exception:
+                stamp = ""
+        lines.append(f"{stamp}{m['role']}: {m['content'][:280]}")
+    return "\n".join(lines)
 
 
 async def _card_payload(panel: str):
@@ -387,7 +437,7 @@ async def _fast_context() -> str:
         asyncio.to_thread(brain.read_memory),
         asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
         asyncio.to_thread(daybank.read_items, True),
-        asyncio.to_thread(brain.read_shared_conversation),
+        asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat, not just Telegram
         get_weather(),
         return_exceptions=True,
     )
@@ -400,10 +450,9 @@ async def _fast_context() -> str:
     today_events = [e for e in events if e.get("date") == today_str]
     mem_list = ok(memory, [])
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
-    # Continuity: the last few turns of the ongoing thread (HUD + voice + Telegram)
-    # so voice remembers what we were just talking about — not a cold start each call.
-    thread = brain.sanitize_for_api(ok(convo, []))[-10:]
-    convo_str = "\n".join(f"{m['role']}: {m['content'][:280]}" for m in thread) if thread else "(no earlier conversation on record)"
+    # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
+    # today's typed turns too — not just its own call and not the stale Telegram window.
+    convo_str = _format_thread(ok(convo, [])[-12:])
     return "\n".join([
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
