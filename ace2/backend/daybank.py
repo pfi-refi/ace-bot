@@ -30,6 +30,7 @@ import pytz
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
+from . import db
 from .integrations.google_client import get_google_creds
 
 logger = logging.getLogger("ace2.daybank")
@@ -70,10 +71,15 @@ def _save(service, fid, items: list):
 
 
 def read_items(active_only: bool = True) -> list:
-    """Read the data bank. active_only → open items (any day) + items touched today.
+    """Read the data bank. Postgres when enabled, else the Drive JSON store."""
+    if db.enabled():
+        return db.read_items(active_only)
+    return _drive_read_items(active_only)
 
-    That's the default HUD view: carried-forward open work plus what got captured or
-    completed today. Newest first. [] on any failure — never raises.
+
+def _drive_read_items(active_only: bool = True) -> list:
+    """Read the data bank from Drive. active_only → open items (any day) + items
+    touched today. Newest first. [] on any failure — never raises.
     """
     try:
         service = _drive()
@@ -94,7 +100,14 @@ def read_items(active_only: bool = True) -> list:
 
 
 def add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
-    """Capture one item. Returns (ok, item_or_error). Best-effort; never raises."""
+    """Capture one item. Postgres when enabled, else Drive."""
+    if db.enabled():
+        return db.add_item(kind, text, due, tags)
+    return _drive_add_item(kind, text, due, tags)
+
+
+def _drive_add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
+    """Capture one item on Drive. Returns (ok, item_or_error). Best-effort; never raises."""
     text = (text or "").strip()
     if not text:
         return False, "empty text"
@@ -124,7 +137,14 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
 
 
 def update_item(item_id: str, status: str = None, text: str = None) -> tuple:
-    """Complete/reopen or edit an item by id. Returns (ok, message). Never raises."""
+    """Complete/reopen or edit an item by id. Postgres when enabled, else Drive."""
+    if db.enabled():
+        return db.update_item(item_id, status, text)
+    return _drive_update_item(item_id, status, text)
+
+
+def _drive_update_item(item_id: str, status: str = None, text: str = None) -> tuple:
+    """Complete/reopen or edit an item by id on Drive. Returns (ok, message). Never raises."""
     item_id = (item_id or "").strip()
     if not item_id:
         return False, "no id"

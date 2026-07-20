@@ -22,6 +22,7 @@ import pytz
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
+from . import db
 from .integrations.google_client import get_google_creds
 
 logger = logging.getLogger("ace2.history")
@@ -42,7 +43,14 @@ def _find(service, name: str):
 
 
 def append(role: str, content: str) -> bool:
-    """Append one entry to this month's history file. Best-effort; never raises."""
+    """Append one turn. Postgres when DATABASE_URL is set, else the Drive JSON store."""
+    if db.enabled():
+        return db.append_turn(role, content, SOURCE)
+    return _drive_append(role, content)
+
+
+def _drive_append(role: str, content: str) -> bool:
+    """Append one entry to this month's Drive history file. Best-effort; never raises."""
     if not content or not content.strip():
         return False
     try:
@@ -75,7 +83,15 @@ def append(role: str, content: str) -> bool:
 
 
 def read_recent(months: int = 3) -> list:
-    """Read the last N monthly history files, oldest-first. [] on any failure."""
+    """Recent turns oldest-first. Postgres when enabled (callers slice the tail),
+    else the last N monthly Drive files. [] on any failure."""
+    if db.enabled():
+        return db.recent_turns(500)
+    return _drive_read_recent(months)
+
+
+def _drive_read_recent(months: int = 3) -> list:
+    """Read the last N monthly Drive history files, oldest-first. [] on any failure."""
     try:
         service = build("drive", "v3", credentials=get_google_creds())
         results = service.files().list(
