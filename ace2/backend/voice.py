@@ -84,6 +84,42 @@ async def convai_signed_url():
         return None, str(e)
 
 
+async def convai_agent_audit() -> dict:
+    """Fetch the live agent config and boil it down to what we tune: which voice is
+    actually published, the turn/timeout settings (incl. soft timeout), and which tools
+    (system + custom-LLM) are enabled. Logged at startup so a drifted dashboard setting
+    (wrong voice, soft timeout off) shows up in the deploy logs instead of only in a bad
+    morning call. Read-only; never raises."""
+    if not convai_enabled():
+        return {"ok": False, "reason": "not configured"}
+    key = os.environ["ELEVENLABS_API_KEY"].strip()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                f"https://api.elevenlabs.io/v1/convai/agents/{CONVAI_AGENT_ID}",
+                headers={"xi-api-key": key},
+            )
+        if r.status_code != 200:
+            logger.warning("convai agent audit %s: %s", r.status_code, r.text[:200])
+            return {"ok": False, "reason": f"elevenlabs {r.status_code}"}
+        cfg = r.json() or {}
+        conv = cfg.get("conversation_config") or {}
+        agent = conv.get("agent") or {}
+        prompt = agent.get("prompt") or {}
+        tools = prompt.get("tools") or []
+        return {
+            "ok": True,
+            "voice_id": (conv.get("tts") or {}).get("voice_id"),
+            "turn": conv.get("turn") or {},          # turn_timeout / soft timeout live here
+            "tool_names": [t.get("name") for t in tools if isinstance(t, dict)],
+            "built_in_tools": list((prompt.get("built_in_tools") or {}).keys())
+            if isinstance(prompt.get("built_in_tools"), dict) else prompt.get("built_in_tools"),
+        }
+    except Exception as e:
+        logger.warning("convai agent audit error: %s", e)
+        return {"ok": False, "reason": str(e)}
+
+
 async def transcribe(audio: bytes, filename: str = "speech.webm", content_type: str = "audio/webm"):
     """Transcribe recorded mic audio with ElevenLabs Scribe. → (text, None) | (None, reason).
 

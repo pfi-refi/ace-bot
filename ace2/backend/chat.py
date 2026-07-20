@@ -554,7 +554,17 @@ async def _fast_context() -> str:
         "what you're about to do, wait for his yes, then call it again with confirmed true. "
         "Keep spoken replies short and natural — a sentence or two, no lists or markdown. If he's "
         "just chatting with you, just talk — no tools, no status narration, never repeat his "
-        "question back to him.)",
+        "question back to him. "
+        "CALL RITUALS: (1) WAKE-UP — when Brady opens with a morning greeting ('good morning, "
+        "Ace' / 'morning'), come online like JARVIS: greet him back for the time of day, then ONE "
+        "tight line with the weather beat and his NEXT event from the schedule above. Two short "
+        "sentences max, then stop — don't dump the whole day. (2) PAUSE — if he says 'hold on', "
+        "'pause', 'one sec', 'meeting mode', or starts talking to someone else: call skip_turn "
+        "with NO words if you have it (otherwise say only 'Standing by.') and then stay silent — "
+        "do not speak again, and never respond to background conversation, until he addresses you "
+        "directly. (3) SIGN-OFF — when he's clearly done ('goodnight, Ace', 'that's all for "
+        "tonight'): one short, warm sign-off line, then call end_call if you have it to hang up. "
+        "Never call end_call in any other situation.)",
     ])
 
 
@@ -598,7 +608,7 @@ async def stage_pass(user_text: str, emit, prior=None):
         logger.warning("stage_pass failed: %s", e)
 
 
-async def stream_turn(user_text: str, emit, prior=None, fast=False):
+async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
     prior: the conversation so far. The WS handler passes its per-connection
@@ -608,6 +618,11 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
 
     fast: low-latency path for live voice — lean context + low effort so Ace
     starts speaking quickly instead of stalling behind a full data prefetch.
+
+    extra_tools: PASSTHROUGH tool schemas (Anthropic format) the CALLER executes,
+    not us — ElevenLabs system tools (end_call, skip_turn, …) forwarded by the
+    voice adapter. When the model calls one we emit `el_tool` and END the turn;
+    ElevenLabs performs the action (hang up / yield the turn). Voice-only.
 
     Returns the reply text so the caller can append it to its transcript.
     """
@@ -629,6 +644,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     full_reply = []
     confirmations = []
     handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
+    passthrough = {t["name"] for t in (extra_tools or [])}
+    passthrough_called = False   # an el_tool fired (end_call/skip_turn) — the platform takes over
     # One monotonic id per real user turn — the confirm gate uses it to tell "Brady
     # spoke again" from "the model looped inside this same turn." Immune to the
     # transcript cap that a message-count would deadlock on.
@@ -643,7 +660,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
         # (Typed keeps the full MCP surface.) openai_compat also streams an instant
         # lead-in token so the first-token deadline is never at risk.
         stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=system,
-                             messages=messages, tools=VOICE_TOOLS)
+                             messages=messages, tools=VOICE_TOOLS + list(extra_tools or []))
     else:
         # MCP folds into the TYPED loop only (fetched once, cached; empty when dormant).
         mcp_schemas = await mcp_client.tool_schemas()
@@ -683,6 +700,13 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
             tool_results = []
             for block in final.content:
                 if getattr(block, "type", "") != "tool_use":
+                    continue
+                if block.name in passthrough:
+                    # An ElevenLabs system tool (end_call, skip_turn, …). We don't execute it —
+                    # we relay the call back through the SSE stream and ElevenLabs performs the
+                    # action (hangs up / yields the turn). The turn ends here on our side.
+                    await emit("el_tool", {"name": block.name, "args": dict(block.input), "id": block.id})
+                    passthrough_called = True
                     continue
                 if block.name == "build_on_screen":
                     # Voice can't author Docs/Sheets/Slides itself — hand the task to the HUD,
@@ -743,12 +767,16 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
                     "tool_use_id": block.id,
                     "content": result,
                 })
+            if passthrough_called:
+                # ElevenLabs is taking the action (hang-up / turn-yield) — no further model
+                # round-trip; anything Ace wanted to say already streamed.
+                break
             messages.append({"role": "user", "content": tool_results})
         else:
             logger.warning("hit MAX_TOOL_ITERS for: %s", user_text[:80])
 
         reply = "".join(full_reply).strip()
-        if fast and not reply:
+        if fast and not reply and not passthrough_called:
             # An empty completion makes ElevenLabs treat the turn as an LLM failure
             # and cascade — always give voice something to say.
             reply = "I'm here — say that again for me?"

@@ -229,6 +229,16 @@ async def _prime_voice_ctx():
             logger.warning("voice ctx prime failed: %s", e)
     asyncio.create_task(_bg())
 
+    async def _audit():
+        # Log the LIVE ElevenLabs agent settings (voice, turn/soft-timeout, enabled tools)
+        # so a drifted dashboard config shows up in the deploy logs, not just in a bad call.
+        try:
+            a = await voice.convai_agent_audit()
+            logger.info("convai agent audit: %s", json.dumps(a)[:800])
+        except Exception as e:
+            logger.warning("convai agent audit failed: %s", e)
+    asyncio.create_task(_audit())
+
 
 class AuthReq(BaseModel):
     password: str = ""
@@ -551,6 +561,25 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             user_text = m["content"]
             break
 
+    # ElevenLabs injects its enabled SYSTEM tools (end_call, skip_turn, …) into every
+    # request in OpenAI format. Convert them to Anthropic passthrough schemas so Ace can
+    # CALL them (goodnight → hang up; "hold on" → yield the turn); the actual execution
+    # is ElevenLabs' — we just relay the call back as an OpenAI tool_call chunk below.
+    # Nothing configured on the agent → empty list → behavior unchanged.
+    el_tools = []
+    _seen = {t["name"] for t in chat.VOICE_TOOLS}
+    for t in (body.get("tools") or []):
+        fn = (t or {}).get("function") or {}
+        name = (fn.get("name") or "").strip()
+        params = fn.get("parameters")
+        if not name or name in _seen:
+            continue
+        _seen.add(name)
+        if not isinstance(params, dict) or params.get("type") != "object":
+            params = {"type": "object", "properties": {}}
+        el_tools.append({"name": name, "description": fn.get("description") or "",
+                         "input_schema": params})
+
     created = int(time.time())
 
     async def sse():
@@ -598,10 +627,19 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # the reached-client count so the voice tool_result can be honest when no screen
                 # is connected (don't promise "watch your screen" to a call with no HUD open).
                 return await publish_stage_event("run_on_hud", {"message": payload.get("message", "")})
+            elif event_type == "el_tool":
+                # Ace called an ElevenLabs system tool (end_call / skip_turn) — relay it into
+                # the SSE stream as an OpenAI tool_call so ElevenLabs performs the action.
+                await queue.put(("tool_call", {
+                    "id": payload.get("id") or f"call_{created}",
+                    "type": "function",
+                    "function": {"name": payload.get("name", ""),
+                                 "arguments": json.dumps(payload.get("args") or {})},
+                }))
 
         async def run():
             try:
-                await chat.stream_turn(user_text, emit, prior=prior, fast=True)
+                await chat.stream_turn(user_text, emit, prior=prior, fast=True, extra_tools=el_tools)
             finally:
                 await queue.put(("done", None))
 
@@ -613,6 +651,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         cont = _continuer_cycler()
         started = False   # has the turn produced ANY real output yet?
         led_in = False    # emitted the lazy first-token lead-in yet?
+        sent_tool_call = False   # relayed an ElevenLabs system-tool call this turn?
         misses = 0
         try:
             while True:
@@ -664,13 +703,25 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 misses = 0
                 if kind == "done":
                     break
+                if kind == "tool_call":
+                    # Relay the system-tool call in OpenAI streaming format; ElevenLabs
+                    # executes it (hang up / yield the turn).
+                    sent_tool_call = True
+                    tc = dict(text)
+                    tc["index"] = 0
+                    yield ("data: " + json.dumps({
+                        "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": None}],
+                    }) + "\n\n")
+                    continue
                 chunk = {
                     "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
                     "created": created, "model": model,
                     "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-            if not spoke["any"]:
+            if not spoke["any"] and not sent_tool_call:
                 # Nothing ever streamed (a blank model turn) → an empty completion makes
                 # ElevenLabs treat the call as an LLM failure and cascade. Always say one line.
                 yield ("data: " + json.dumps({
@@ -682,7 +733,8 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             done_chunk = {
                 "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
                 "created": created, "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "delta": {},
+                             "finish_reason": "tool_calls" if sent_tool_call else "stop"}],
             }
             yield f"data: {json.dumps(done_chunk)}\n\n"
             yield "data: [DONE]\n\n"
