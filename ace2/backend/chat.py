@@ -421,44 +421,101 @@ def _format_calendar_window(events: list, now) -> str:
     return "\n".join(lines)
 
 
-async def _fast_context() -> str:
-    """Lean context for LOW-LATENCY voice: memory + time + today's schedule +
-    data bank + the recent conversation thread (for continuity).
+# ── Voice context cache (stale-while-revalidate) ────────────────────────────────
+# _fast_context() used to run a live Google-Calendar + Drive-memory + weather + Postgres
+# fan-out on EVERY voice turn (tolerated up to 9s). THAT silent gap is what makes ElevenLabs
+# cut a live call — the timeouts Brady keeps hitting. Voice conversation doesn't need
+# second-fresh calendar/memory (ElevenLabs resends the live turn-by-turn transcript as
+# `prior`), so we serve those from a background-refreshed cache and format the per-turn
+# string from cache + the LIVE clock: microseconds, zero per-turn network. Primed at startup
+# (main.prime) and kept warm every ~30s.
+_CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "ts": 0.0}
+_CTX_TTL = 45.0
+_ctx_refreshing = [False]
+_ctx_keepwarm_started = [False]
 
-    The full `_live_context()` also fans out to Gmail, Tasks and weather every turn
-    — several seconds before Ace can speak, which is fatal on a live call. Voice
-    skips those (Ace has no tools on this channel anyway) but DOES carry memory,
-    today's schedule, the tracked data bank, and the last few turns of the ongoing
-    thread so it isn't a cold start — all fetched concurrently to stay fast.
-    """
-    now = datetime.now(EASTERN)
+
+async def _refresh_ctx() -> None:
+    """Fetch the heavy voice-context bundle once and store it. Never raises; keeps the last
+    good value for any sub-fetch that errors so one dead integration can't blank the context."""
+    if _ctx_refreshing[0]:
+        return
+    _ctx_refreshing[0] = True
     try:
         memory, cal_all, bank, convo, wx = await asyncio.wait_for(
             asyncio.gather(
                 asyncio.to_thread(brain.read_memory),
                 asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
                 asyncio.to_thread(daybank.read_items, True),
-                asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat, not just Telegram
+                asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat
                 get_weather(),
                 return_exceptions=True,
             ),
-            timeout=9,  # a live call can't wait on a hung Google/Drive call — proceed lean
+            timeout=20,  # off the critical path now, so it can afford to wait out a slow call
         )
-    except asyncio.TimeoutError:
-        logger.warning("fast context timed out (>9s) — proceeding with lean context")
-        memory = cal_all = bank = convo = wx = None
+
+        def keep(v, prev):
+            return prev if isinstance(v, Exception) or v is None else v
+
+        _CTX.update(
+            memory=keep(memory, _CTX["memory"]),
+            events=keep(cal_all, _CTX["events"]),
+            bank=keep(bank, _CTX["bank"]),
+            convo=keep(convo, _CTX["convo"]),
+            wx=keep(wx, _CTX["wx"]),
+            ts=time.time(),
+        )
+    except Exception as e:
+        logger.warning("voice ctx refresh failed: %s", e)
+    finally:
+        _ctx_refreshing[0] = False
+
+
+async def prime_ctx() -> None:
+    """Warm the cache at startup and start the keep-warm loop (called once from main.py)."""
+    await _refresh_ctx()
+    if not _ctx_keepwarm_started[0]:
+        _ctx_keepwarm_started[0] = True
+        asyncio.create_task(_ctx_keepwarm())
+
+
+async def _ctx_keepwarm() -> None:
+    while True:
+        try:
+            await asyncio.sleep(30)
+            await _refresh_ctx()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+async def _fast_context() -> str:
+    """Lean context for LOW-LATENCY voice, served from the pre-warmed cache (see _refresh_ctx).
+    Formats the string from cached data + the LIVE clock, so CURRENT TIME is always correct
+    while the heavy fetches never sit on the turn's critical path (the source of the timeouts).
+    """
+    now = datetime.now(EASTERN)
+    if _CTX["ts"] == 0.0:
+        # Cold (fresh boot, not primed yet) → one inline fetch so turn 1 isn't empty.
+        await _refresh_ctx()
+    elif (time.time() - _CTX["ts"]) > _CTX_TTL:
+        # Stale → serve what we have NOW (fast); refresh in the background for the next turn.
+        asyncio.create_task(_refresh_ctx())
 
     def ok(v, default):
         return default if isinstance(v, Exception) or v is None else v
 
-    events = ok(cal_all, [])
+    events = _CTX["events"]
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
-    mem_list = ok(memory, [])
+    mem_list = _CTX["memory"]
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
+    bank = _CTX["bank"]
+    wx = _CTX["wx"]
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
     # today's typed turns too — not just its own call and not the stale Telegram window.
-    convo_str = _format_thread(ok(convo, [])[-12:])
+    convo_str = _format_thread(_CTX["convo"][-12:])
     return "\n".join([
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",

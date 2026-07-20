@@ -216,6 +216,20 @@ async def publish_stage_event(event_type: str, payload: dict) -> int:
     return sent
 
 
+@app.on_event("startup")
+async def _prime_voice_ctx():
+    """Warm the voice context cache at boot + keep it warm, so the FIRST morning call is fast
+    (no per-turn Google/Drive fetch on the critical path = no first-word timeout). Kicked as a
+    BACKGROUND task so a slow Google call can't block startup and trip Railway's health check —
+    a turn arriving before it finishes just falls back to an inline fetch (old behavior)."""
+    async def _bg():
+        try:
+            await chat.prime_ctx()
+        except Exception as e:
+            logger.warning("voice ctx prime failed: %s", e)
+    asyncio.create_task(_bg())
+
+
 class AuthReq(BaseModel):
     password: str = ""
 
@@ -548,14 +562,6 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # first-token deadline fed exactly when it's actually at risk (silent tool phase).
         spoke = {"any": False}
 
-        async def keepalive():
-            """One neutral lead-in so ElevenLabs always gets a first token before a silent
-            tool round-trip — but ONLY if Ace hasn't already started speaking (plain small
-            talk streams its own words, so no 'On it —' theater there)."""
-            if not spoke["any"]:
-                spoke["any"] = True
-                await queue.put(("delta", _next_filler() + " "))
-
         async def emit(event_type, payload):
             if event_type == "delta":
                 spoke["any"] = True
@@ -566,26 +572,21 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 await queue.put(("delta", payload.get("text", "")))
                 await queue.put(("done", None))
             elif event_type == "hold":
-                # A gated action was blocked pending Brady's yes — no status word (nothing
-                # happened), just keep the stream alive for the spoken confirmation question.
-                await keepalive()
+                # A gated action was blocked pending Brady's yes — nothing to say yet; the
+                # model's confirmation question streams next, and the loop's lazy lead-in
+                # covers any gap. (No status word — nothing happened.)
+                pass
             elif event_type == "tool" and payload.get("status") == "running":
-                # Screen-only tools (display_card/open_url) paint silently — but if Ace
-                # hasn't spoken yet, still drop ONE lead-in so ElevenLabs isn't starved
-                # (a card-only turn used to deliver zero tokens → cascade). Never narrate
-                # "projecting" mid-sentence.
+                # Screen-only tools (display_card/open_url) paint silently — no spoken token
+                # (the loop's lazy lead-in covers a card-only turn). For a real tool, the
+                # status word itself IS the turn's spoken lead-in — emit it plainly, with NO
+                # "Mm—" in front of it.
                 if payload.get("ui"):
-                    await keepalive()
                     return
                 label = (payload.get("label") or "working on it").lower()
                 spoken = _SPOKEN_STATUS.get(payload.get("name"), label)
-                if not spoke["any"]:
-                    spoke["any"] = True
-                    await queue.put(("delta", f"{_next_filler()} {spoken}… "))
-                else:
-                    # Mid-turn: keep tokens flowing through silent tool phases so
-                    # ElevenLabs never cuts the stream (the old mid-turn "timeout").
-                    await queue.put(("delta", f"{spoken.capitalize()}… "))
+                spoke["any"] = True
+                await queue.put(("delta", f"{spoken.capitalize()}… "))
             elif event_type in ("card", "open"):
                 # Voice turn wants to paint the screen → push over the app WebSocket, not the
                 # ElevenLabs audio stream. Same channel the typed path uses.
@@ -605,32 +606,41 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 await queue.put(("done", None))
 
         task = asyncio.create_task(run())
-        # Feed ElevenLabs a token INSTANTLY — before the context build and model first
-        # token — so its first-token deadline can never be missed (the timeouts Brady hit).
-        # A short, natural conversational lead; Ace's real reply continues right after it,
-        # and rule 12 keeps him from echoing the question. Marking spoke prevents the
-        # tool/hold branches from adding a second lead-in.
-        spoke["any"] = True
-        yield ("data: " + json.dumps({
-            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-            "created": created, "model": model,
-            "choices": [{"index": 0, "delta": {"content": _next_filler() + " "}, "finish_reason": None}],
-        }) + "\n\n")
+        # NO always-on lead-in anymore. With the pre-warmed context cache, Ace's real first
+        # word arrives fast, so a plain turn streams his ACTUAL words — no "Mm—" noise every
+        # turn (Brady's "hu mhh"). A lead-in is emitted LAZILY below only when the first token
+        # is genuinely slow, as a backstop against ElevenLabs' first-token deadline.
         cont = _continuer_cycler()
         started = False   # has the turn produced ANY real output yet?
+        led_in = False    # emitted the lazy first-token lead-in yet?
         misses = 0
         try:
             while True:
                 try:
-                    kind, text = await asyncio.wait_for(queue.get(), timeout=4.0)
+                    # Tight deadline BEFORE the first real token (catch a slow start before
+                    # ElevenLabs cuts it); relaxed once the turn is actually streaming.
+                    kind, text = await asyncio.wait_for(
+                        queue.get(), timeout=(1.5 if not started else 4.0))
                 except asyncio.TimeoutError:
-                    # Silence guard — but ONLY once the turn is actually underway. Before the
-                    # first token the queue is silent through the (up-to-9s) context build; the
-                    # instant lead-in above already covered that gap, and a continuer there
-                    # would be "still on it…" theater on plain small talk. After the turn has
-                    # started, a long silent gap is a real tool await (e.g. a slow Gmail search)
-                    # → keep the audio alive so ElevenLabs never cuts the call.
                     if not started:
+                        # First token is slow (rare with the cache — a model/API spike). Emit
+                        # ONE natural lead-in so ElevenLabs doesn't cut the call, then soft
+                        # continuers if it's STILL coming. Fast turns never reach here, so no
+                        # "Mm—" on normal conversation.
+                        if not led_in:
+                            led_in = True
+                            spoke["any"] = True
+                            yield ("data: " + json.dumps({
+                                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                                "created": created, "model": model,
+                                "choices": [{"index": 0, "delta": {"content": _next_filler() + " "}, "finish_reason": None}],
+                            }) + "\n\n")
+                        else:
+                            yield ("data: " + json.dumps({
+                                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                                "created": created, "model": model,
+                                "choices": [{"index": 0, "delta": {"content": next(cont) + "… "}, "finish_reason": None}],
+                            }) + "\n\n")
                         continue
                     misses += 1
                     if misses > 8:
