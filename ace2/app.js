@@ -617,7 +617,7 @@
   function loadDashboard() {
     var g = function (url) { return fetch(API + url, { headers: headers() }).then(function (r) { return r.ok ? r.json() : null; }); };
     g('/calendar?days=1').then(function (d) { if (d) materializeCard('timeline', { events: d.events || [] }, 'left'); }).catch(function () {});
-    g('/tasks').then(function (d) { if (d) materializeCard('tasks', { tasks: d.tasks || [] }, 'left'); }).catch(function () {});
+    g('/tasks').then(function (d) { if (d) materializeCard('tasks', { tasks: d.tasks || [], lists: d.lists || null }, 'left'); }).catch(function () {});
     g('/inbox').then(function (d) { if (d) materializeCard('inbox', { emails: d.emails || [] }, 'right'); }).catch(function () {});
     g('/weather').then(function (d) { if (d) materializeCard('weather', d, 'right'); }).catch(function () {});
   }
