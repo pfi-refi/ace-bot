@@ -92,6 +92,15 @@ _CONFIRM_MSG = (
     "with the same details plus \"confirmed\": true. If he wants any change, call it again with "
     "the updated details (no confirmed) so he can okay the new version. If he says no, drop it."
 )
+# Second+ block of the SAME tool inside one turn: the model is churning (re-calling with
+# confirmed:true in the same breath — approval can only arrive on Brady's NEXT turn). Cut the
+# retry loop dead: a hard STOP that leaves it exactly one legal move.
+_CONFIRM_STOP_MSG = (
+    "STOP — do NOT call this tool (or any tool) again this turn; it will keep coming back "
+    "blocked, because approval can only arrive on Brady's NEXT turn. Right now say ONE short "
+    "sentence telling him exactly what you're about to do and asking him to confirm — then "
+    "end your turn and wait for his answer."
+)
 
 
 def _next_turn_id() -> int:
@@ -431,16 +440,23 @@ def _format_calendar_window(events: list, now) -> str:
 # (main.prime) and kept warm every ~30s.
 _CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "ts": 0.0}
 _CTX_TTL = 45.0
-_ctx_refreshing = [False]
+_ctx_lock: asyncio.Lock = asyncio.Lock()
 _ctx_keepwarm_started = [False]
 
 
 async def _refresh_ctx() -> None:
     """Fetch the heavy voice-context bundle once and store it. Never raises; keeps the last
-    good value for any sub-fetch that errors so one dead integration can't blank the context."""
-    if _ctx_refreshing[0]:
-        return
-    _ctx_refreshing[0] = True
+    good value for any sub-fetch that errors so one dead integration can't blank the context.
+    If a refresh is already in flight, WAIT for it to land (don't skip) — a cold first turn
+    that skipped got an EMPTY context and answered 'confidently' from nothing."""
+    if _ctx_lock.locked():
+        async with _ctx_lock:   # queue behind the in-flight fetch; its result is ours
+            return
+    async with _ctx_lock:
+        await _refresh_ctx_inner()
+
+
+async def _refresh_ctx_inner() -> None:
     try:
         memory, cal_all, bank, convo, wx = await asyncio.wait_for(
             asyncio.gather(
@@ -467,8 +483,6 @@ async def _refresh_ctx() -> None:
         )
     except Exception as e:
         logger.warning("voice ctx refresh failed: %s", e)
-    finally:
-        _ctx_refreshing[0] = False
 
 
 async def prime_ctx() -> None:
@@ -497,8 +511,13 @@ async def _fast_context() -> str:
     """
     now = datetime.now(EASTERN)
     if _CTX["ts"] == 0.0:
-        # Cold (fresh boot, not primed yet) → one inline fetch so turn 1 isn't empty.
-        await _refresh_ctx()
+        # Cold (fresh boot, prime still in flight) → WAIT for the fetch, bounded, so the
+        # first turn speaks from real context instead of a confidently empty one. The SSE
+        # lead-in covers ElevenLabs while we wait; worst case we proceed lean at 8s.
+        try:
+            await asyncio.wait_for(_refresh_ctx(), timeout=8)
+        except asyncio.TimeoutError:
+            logger.warning("cold ctx wait >8s — proceeding lean this turn")
     elif (time.time() - _CTX["ts"]) > _CTX_TTL:
         # Stale → serve what we have NOW (fast); refresh in the background for the next turn.
         asyncio.create_task(_refresh_ctx())
@@ -640,10 +659,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         await emit("error", {"text": f"⚠️ Couldn't reach your data: {e}"})
         return ""
 
-    client = _anthropic()
     full_reply = []
     confirmations = []
     handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
+    blocked_counts: dict = {}   # per-tool confirm-gate blocks THIS turn (2nd+ gets the STOP message)
     passthrough = {t["name"] for t in (extra_tools or [])}
     passthrough_called = False   # an el_tool fired (end_call/skip_turn) — the platform takes over
     # One monotonic id per real user turn — the confirm gate uses it to tell "Brady
@@ -651,24 +670,39 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     # transcript cap that a message-count would deadlock on.
     turn_id = _next_turn_id()
 
-    if fast:
-        # Voice = SPEED, because ElevenLabs cuts the call if the first token is late and
-        # goes silent if a tool stalls. So: Haiku (fastest first token), NO extended
-        # thinking, and NATIVE tools ONLY — no MCP. An mcp_ call is a network→MCP→Google
-        # round-trip that stalls live audio mid-sentence, and 25 extra schemas slow the
-        # first token; the native tools cover calendar/tasks/email/drive/recall fast.
-        # (Typed keeps the full MCP surface.) openai_compat also streams an instant
-        # lead-in token so the first-token deadline is never at risk.
-        stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=system,
-                             messages=messages, tools=VOICE_TOOLS + list(extra_tools or []))
-    else:
-        # MCP folds into the TYPED loop only (fetched once, cached; empty when dormant).
-        mcp_schemas = await mcp_client.tool_schemas()
-        stream_kwargs = dict(
-            model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
-            tools=tools.TOOLS + mcp_schemas, thinking={"type": "adaptive"},
-            output_config={"effort": EFFORT},
-        )
+    try:
+        client = _anthropic()
+        if fast:
+            # Voice = SPEED, because ElevenLabs cuts the call if the first token is late and
+            # goes silent if a tool stalls. So: Haiku (fastest first token), NO extended
+            # thinking, and NATIVE tools ONLY — no MCP (typed keeps the full MCP surface).
+            # PROMPT CACHING: the static prompt + native tool schemas are byte-stable, so
+            # mark them as a cached prefix — Haiku stops re-paying ~6k tokens of prefill
+            # per turn, pulling first-token well under the lead-in threshold.
+            voice_tools = [dict(t) for t in VOICE_TOOLS] + list(extra_tools or [])
+            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = {"type": "ephemeral"}
+            cached_system = [
+                {"type": "text", "text": build_system_prompt(),
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
+            ]
+            stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=cached_system,
+                                 messages=messages, tools=voice_tools)
+        else:
+            # MCP folds into the TYPED loop only (fetched once, cached; empty when dormant).
+            mcp_schemas = await mcp_client.tool_schemas()
+            stream_kwargs = dict(
+                model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
+                tools=tools.TOOLS + mcp_schemas, thinking={"type": "adaptive"},
+                output_config={"effort": EFFORT},
+            )
+    except Exception as e:
+        # Setup failure (bad key, MCP registry down) must NEVER die silently — a silent
+        # death made every voice turn end in the same canned fallback line, which read
+        # as Ace stuck in a loop. Emit the error (voice speaks one fixed line for it).
+        logger.error("stream_turn setup failed: %s", e)
+        await emit("error", {"text": f"⚠️ {e}"})
+        return ""
 
     try:
         for _ in range(MAX_TOOL_ITERS):
@@ -746,7 +780,11 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     # No action pill/narration; just a keep-alive token so a voice
                     # turn's confirmation question doesn't stall behind a silent round-trip.
                     await emit("hold", {"name": block.name})
-                    result = _CONFIRM_MSG
+                    blocked_counts[block.name] = blocked_counts.get(block.name, 0) + 1
+                    # Re-blocked in the SAME turn = the model is retrying with confirmed:true
+                    # in the same breath; without a hard STOP it churns silent round-trips
+                    # until MAX_TOOL_ITERS while the caller hears only continuers.
+                    result = _CONFIRM_MSG if blocked_counts[block.name] == 1 else _CONFIRM_STOP_MSG
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 label = tools.TOOL_LABELS.get(block.name) or \
@@ -782,13 +820,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             reply = "I'm here — say that again for me?"
         await emit("final", {"text": reply})
 
-        # Persist to 2.0's OWN history (best-effort; never blocks the reply).
+        # Persist to 2.0's OWN history (best-effort; never blocks the reply). ONLY the real
+        # exchange — raw tool-result strings used to be stored as things "Ace said," and
+        # those calendar dumps / ⚠️ warnings resurfaced in the RECENT THREAD, nudging the
+        # voice model into status-report babble. The reply already summarizes what was done.
         try:
             await asyncio.to_thread(history.append, "user", user_text)
             if reply:
                 await asyncio.to_thread(history.append, "assistant", reply)
-            for c in confirmations:
-                await asyncio.to_thread(history.append, "assistant", c)
         except Exception as e:
             logger.warning("history persist skipped: %s", e)
 

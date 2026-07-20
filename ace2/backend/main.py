@@ -32,6 +32,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -180,6 +181,29 @@ def _continuer_cycler():
         i += 1
 
 
+# Adapter-injected speech (fillers, continuers, bail lines) must NEVER round-trip back into
+# the model: ElevenLabs resends the whole conversation each request, so if Ace "sees himself"
+# saying "Mm — one sec… almost there…" in the transcript he starts MIMICKING it (the babble
+# spiral Brady hit). Strip our own noise from assistant history before it reaches the model.
+_NOISE_LEAD = re.compile(r"^(?:(?:" + "|".join(re.escape(f) for f in _FILLERS) + r")\s+)+")
+_NOISE_CONT = re.compile(
+    r"(?:(?:" + "|".join(re.escape(c) for c in _CONTINUERS) + r")(?:…|\.\.\.)\s*)+", re.IGNORECASE)
+_NOISE_LINES = (
+    "I'm here — say that again for me?",
+    "That one's hanging on me — try me again in a moment.",
+    "Sorry — that took me a beat too long. Ask me again?",
+    "Hit a snag on my end — give me a second and ask me again.",
+)
+
+
+def _strip_voice_noise(text: str) -> str:
+    t = _NOISE_CONT.sub("", text)
+    t = _NOISE_LEAD.sub("", t)
+    for line in _NOISE_LINES:
+        t = t.replace(line, "")
+    return t.strip()
+
+
 # What Ace SAYS while a tool runs on a live call — conversational, specific, first person.
 # Falls back to the lowercased UI label for anything unlisted (incl. mcp_* names).
 _SPOKEN_STATUS = {
@@ -198,6 +222,11 @@ _SPOKEN_STATUS = {
     "capture_item": "noting that down",
     "update_item": "updating your bank",
 }
+
+
+# The single in-flight live-voice turn (one user, one call): a new /v1/chat/completions
+# request cancels the previous turn's task so a retry/barge-in can't double-execute tools.
+_active_voice_task = {"task": None}
 
 
 async def publish_stage_event(event_type: str, payload: dict) -> int:
@@ -551,10 +580,17 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         )
 
     # Full prior conversation (ElevenLabs sends it each call) → Ace's turn memory.
-    prior = [
-        {"role": m["role"], "content": _text(m.get("content", ""))}
-        for m in msgs if m.get("role") in ("user", "assistant") and _text(m.get("content", "")).strip()
-    ]
+    # Assistant history is scrubbed of adapter noise (fillers/continuers/bail lines) so
+    # the model never sees — and never mimics — its own keep-alive babble.
+    prior = []
+    for m in msgs:
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        t = _text(m.get("content", "")).strip()
+        if m.get("role") == "assistant":
+            t = _strip_voice_noise(t)
+        if t:
+            prior.append({"role": m["role"], "content": t})
     user_text = ""
     for m in reversed(prior):
         if m["role"] == "user":
@@ -581,8 +617,27 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                          "input_schema": params})
 
     created = int(time.time())
+    # One line per voice request so a doubled/retried turn is provable in the logs
+    # (there was no way to see ElevenLabs re-POSTs during the 8 AM incident).
+    logger.info("voice turn req: prior=%d user=%r", len(prior), (user_text or "")[:80])
 
     async def sse():
+        if not (user_text or "").strip():
+            # ElevenLabs sometimes requests a turn with NO user message (call-opening
+            # greeting / role-filtered request). Running a full turn against "" used to
+            # make Ace SAY the words "Empty message". Greet and end instead.
+            yield ("data: " + json.dumps({
+                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {"content": "Right here."}, "finish_reason": None}],
+            }) + "\n\n")
+            yield ("data: " + json.dumps({
+                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }) + "\n\n")
+            yield "data: [DONE]\n\n"
+            return
         queue: asyncio.Queue = asyncio.Queue()
         # Context-aware in-between talk (Brady, 2026-07-19): NO upfront filler anymore —
         # a plain conversational turn streams Ace's actual words immediately, so "how's it
@@ -590,6 +645,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # first move is a tool call (text hasn't started), which also keeps ElevenLabs'
         # first-token deadline fed exactly when it's actually at risk (silent tool phase).
         spoke = {"any": False}
+        status_said = set()   # tool names whose status word already played this turn
 
         async def emit(event_type, payload):
             if event_type == "delta":
@@ -598,7 +654,12 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             elif event_type in ("final", "done"):
                 await queue.put(("done", None))
             elif event_type == "error":
-                await queue.put(("delta", payload.get("text", "")))
+                # NEVER speak raw error text — an exception repr read aloud ("Error code:
+                # 529 overloaded…") is pure gibberish to a listener AND poisons the resent
+                # transcript for the rest of the call. Log the real error; say one fixed
+                # human line (which the prior-scrubber also removes from history).
+                logger.warning("voice turn error (spoken as snag line): %s", payload.get("text", ""))
+                await queue.put(("delta", "Hit a snag on my end — give me a second and ask me again."))
                 await queue.put(("done", None))
             elif event_type == "hold":
                 # A gated action was blocked pending Brady's yes — nothing to say yet; the
@@ -606,14 +667,20 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # covers any gap. (No status word — nothing happened.)
                 pass
             elif event_type == "tool" and payload.get("status") == "running":
-                # Screen-only tools (display_card/open_url) paint silently — no spoken token
-                # (the loop's lazy lead-in covers a card-only turn). For a real tool, the
-                # status word itself IS the turn's spoken lead-in — emit it plainly, with NO
-                # "Mm—" in front of it.
+                # Screen-only tools (display_card/open_url) paint silently. For real tools,
+                # say the status word ONCE PER TOOL PER TURN — a deal sweep that calls
+                # capture_item eight times must not chant "Noting that down…" eight times
+                # (Brady's 8:16 AM transcript). Cap distinct status words at 4 so even a
+                # many-tool sweep is a few beats, not a monologue; the silence guard keeps
+                # the stream alive through the quiet work.
                 if payload.get("ui"):
                     return
+                name = payload.get("name")
+                if name in status_said or len(status_said) >= 4:
+                    return
+                status_said.add(name)
                 label = (payload.get("label") or "working on it").lower()
-                spoken = _SPOKEN_STATUS.get(payload.get("name"), label)
+                spoken = _SPOKEN_STATUS.get(name, label)
                 spoke["any"] = True
                 await queue.put(("delta", f"{spoken.capitalize()}… "))
             elif event_type in ("card", "open"):
@@ -643,16 +710,26 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             finally:
                 await queue.put(("done", None))
 
+        # ONE live voice turn at a time: if ElevenLabs retried (its deadline missed, or the
+        # call blipped) or Brady barged in, the PREVIOUS turn's task must not keep executing
+        # tools and writing history behind the new one — that's the double-execution /
+        # "Ace repeats himself" spiral. Single-user system: cancel-and-replace is correct.
+        prev = _active_voice_task["task"]
+        if prev is not None and not prev.done():
+            logger.warning("voice turn superseded — cancelling previous in-flight turn")
+            prev.cancel()
         task = asyncio.create_task(run())
+        _active_voice_task["task"] = task
         # NO always-on lead-in anymore. With the pre-warmed context cache, Ace's real first
         # word arrives fast, so a plain turn streams his ACTUAL words — no "Mm—" noise every
         # turn (Brady's "hu mhh"). A lead-in is emitted LAZILY below only when the first token
         # is genuinely slow, as a backstop against ElevenLabs' first-token deadline.
         cont = _continuer_cycler()
         started = False   # has the turn produced ANY real output yet?
-        led_in = False    # emitted the lazy first-token lead-in yet?
         sent_tool_call = False   # relayed an ElevenLabs system-tool call this turn?
-        misses = 0
+        pre = 0           # 1.5s ticks waited BEFORE the first real token
+        misses = 0        # consecutive 4s silences after start (resets on real output)
+        conts_spoken = 0  # continuers voiced this TURN (never resets — hard babble budget)
         try:
             while True:
                 try:
@@ -662,24 +739,32 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                         queue.get(), timeout=(1.5 if not started else 4.0))
                 except asyncio.TimeoutError:
                     if not started:
-                        # First token is slow (rare with the cache — a model/API spike). Emit
-                        # ONE natural lead-in so ElevenLabs doesn't cut the call, then soft
-                        # continuers if it's STILL coming. Fast turns never reach here, so no
-                        # "Mm—" on normal conversation.
-                        if not led_in:
-                            led_in = True
+                        # First token is slow (a cold boot or model/API spike). Speak like a
+                        # person waiting: ONE lead-in, a beat later ONE continuer, then another
+                        # — never a chant (an uncapped 1.5s filler drumbeat is the "stuck in a
+                        # loop" Brady heard). If it's STILL not started after ~13s, bail with
+                        # one honest line and end the turn instead of babbling forever.
+                        pre += 1
+                        if pre == 1:
                             spoke["any"] = True
+                            piece = _next_filler() + " "
+                        elif pre in (3, 6):
+                            piece = next(cont) + "… "
+                        elif pre >= 9:
                             yield ("data: " + json.dumps({
                                 "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
                                 "created": created, "model": model,
-                                "choices": [{"index": 0, "delta": {"content": _next_filler() + " "}, "finish_reason": None}],
+                                "choices": [{"index": 0, "delta": {"content": "Sorry — that took me a beat too long. Ask me again?"},
+                                             "finish_reason": None}],
                             }) + "\n\n")
+                            break
                         else:
-                            yield ("data: " + json.dumps({
-                                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-                                "created": created, "model": model,
-                                "choices": [{"index": 0, "delta": {"content": next(cont) + "… "}, "finish_reason": None}],
-                            }) + "\n\n")
+                            continue   # in-between ticks: wait silently, no chatter
+                        yield ("data: " + json.dumps({
+                            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                            "created": created, "model": model,
+                            "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+                        }) + "\n\n")
                         continue
                     misses += 1
                     if misses > 8:
@@ -692,12 +777,17 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                                          "finish_reason": None}],
                         }) + "\n\n")
                         break
-                    yield ("data: " + json.dumps({
-                        "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-                        "created": created, "model": model,
-                        "choices": [{"index": 0, "delta": {"content": next(cont) + "… "},
-                                     "finish_reason": None}],
-                    }) + "\n\n")
+                    # Speak a continuer only every OTHER miss (≈8s apart) and at most 3 per
+                    # turn — a hung tool gets a few human beats, then quiet until the cap,
+                    # never a rotating chant that audibly wraps around.
+                    if misses % 2 == 0 and conts_spoken < 3:
+                        conts_spoken += 1
+                        yield ("data: " + json.dumps({
+                            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                            "created": created, "model": model,
+                            "choices": [{"index": 0, "delta": {"content": next(cont) + "… "},
+                                         "finish_reason": None}],
+                        }) + "\n\n")
                     continue
                 started = True
                 misses = 0
@@ -738,6 +828,13 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             }
             yield f"data: {json.dumps(done_chunk)}\n\n"
             yield "data: [DONE]\n\n"
+            # Give the turn a short grace to finish persisting to history (a bail/hang path
+            # may leave it a beat behind the stream) — a blind cancel left holes in the
+            # RECENT THREAD that read as Ace "forgetting" the exchange.
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except BaseException:
+                pass
         finally:
             task.cancel()
 
