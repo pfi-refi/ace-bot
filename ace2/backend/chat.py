@@ -56,7 +56,7 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # (time-to-first-word) matters far more than depth per spoken sentence, and Opus's
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
-VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-sonnet-5")
+VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
 # On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
 # confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
 # says yes, only then does the second call actually send). Built once for cache stability.
@@ -432,17 +432,24 @@ async def _fast_context() -> str:
     thread so it isn't a cold start — all fetched concurrently to stay fast.
     """
     now = datetime.now(EASTERN)
-    memory, cal_all, bank, convo, wx = await asyncio.gather(
-        asyncio.to_thread(brain.read_memory),
-        asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
-        asyncio.to_thread(daybank.read_items, True),
-        asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat, not just Telegram
-        get_weather(),
-        return_exceptions=True,
-    )
+    try:
+        memory, cal_all, bank, convo, wx = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(brain.read_memory),
+                asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
+                asyncio.to_thread(daybank.read_items, True),
+                asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat, not just Telegram
+                get_weather(),
+                return_exceptions=True,
+            ),
+            timeout=9,  # a live call can't wait on a hung Google/Drive call — proceed lean
+        )
+    except asyncio.TimeoutError:
+        logger.warning("fast context timed out (>9s) — proceeding with lean context")
+        memory = cal_all = bank = convo = wx = None
 
     def ok(v, default):
-        return default if isinstance(v, Exception) else v
+        return default if isinstance(v, Exception) or v is None else v
 
     events = ok(cal_all, [])
     today_str = now.strftime("%Y-%m-%d")
@@ -565,19 +572,19 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     # transcript cap that a message-count would deadlock on.
     turn_id = _next_turn_id()
 
-    # ONE brain, same hands: BOTH paths get the full toolset — native + MCP (Google
-    # Workspace). Voice used to run a lean native-only set; Brady expects voice and chat
-    # to be equally capable, so MCP folds into voice too. Schemas are fetched once and
-    # cached, so this is cheap. (Dormant when MCP_SERVER_URL unset → empty list.)
-    mcp_schemas = await mcp_client.tool_schemas()
     if fast:
-        # Voice: still NO extended thinking (thinking latency is what starves ElevenLabs'
-        # first-token deadline), but now the smarter Sonnet brain + the full tool surface,
-        # so voice can do everything chat can. The keep-alive in openai_compat covers the
-        # first-token deadline when a tool leads the turn.
+        # Voice = SPEED, because ElevenLabs cuts the call if the first token is late and
+        # goes silent if a tool stalls. So: Haiku (fastest first token), NO extended
+        # thinking, and NATIVE tools ONLY — no MCP. An mcp_ call is a network→MCP→Google
+        # round-trip that stalls live audio mid-sentence, and 25 extra schemas slow the
+        # first token; the native tools cover calendar/tasks/email/drive/recall fast.
+        # (Typed keeps the full MCP surface.) openai_compat also streams an instant
+        # lead-in token so the first-token deadline is never at risk.
         stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=system,
-                             messages=messages, tools=VOICE_TOOLS + mcp_schemas)
+                             messages=messages, tools=VOICE_TOOLS)
     else:
+        # MCP folds into the TYPED loop only (fetched once, cached; empty when dormant).
+        mcp_schemas = await mcp_client.tool_schemas()
         stream_kwargs = dict(
             model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
             tools=tools.TOOLS + mcp_schemas, thinking={"type": "adaptive"},

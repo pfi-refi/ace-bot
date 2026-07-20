@@ -151,8 +151,7 @@ _stage_clients: set = set()
 _bg_tasks: set = set()   # hold refs to fire-and-forget tasks so they aren't GC'd mid-run
 
 
-_FILLERS = ("On it —", "Right away —", "Sure —", "One sec —", "Alright —",
-            "Copy that —", "Give me a moment —", "You got it —")
+_FILLERS = ("Mm —", "Okay —", "Right —", "So —", "Alright —", "Well —")
 _last_filler = [""]
 
 
@@ -578,6 +577,17 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 await queue.put(("done", None))
 
         task = asyncio.create_task(run())
+        # Feed ElevenLabs a token INSTANTLY — before the context build and model first
+        # token — so its first-token deadline can never be missed (the timeouts Brady hit).
+        # A short, natural conversational lead; Ace's real reply continues right after it,
+        # and rule 12 keeps him from echoing the question. Marking spoke prevents the
+        # tool/hold branches from adding a second lead-in.
+        spoke["any"] = True
+        yield ("data: " + json.dumps({
+            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+            "created": created, "model": model,
+            "choices": [{"index": 0, "delta": {"content": _next_filler() + " "}, "finish_reason": None}],
+        }) + "\n\n")
         try:
             while True:
                 kind, text = await queue.get()
