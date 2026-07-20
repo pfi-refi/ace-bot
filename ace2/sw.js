@@ -5,7 +5,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v17';   // v17: unified brain (voice+chat share one thread) + mobile widgets readable
+const CACHE_VERSION = 'ace2-shell-v18';   // v18: click-between task lists card (all Google Tasks lists)
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 

@@ -506,3 +506,17 @@ body.mode-chat #mic-btn { display: none; }
 .msg.hist .sender { opacity: .8; }
 .hist-sep { align-self: center; font-family: var(--mono); font-size: 10px; letter-spacing: 3px;
   color: var(--text-faint); margin: 10px 0 6px; opacity: .7; }
+
+/* ---------- Task-list tabs (click between all your lists) ---------- */
+.tl-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
+.tl-tab { font-family: var(--mono); font-size: 10px; letter-spacing: .4px; color: var(--text-faint);
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(69,255,166,.16); border-radius: var(--r-pill);
+  padding: 4px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  white-space: nowrap; transition: color .18s var(--ease-out), border-color .18s var(--ease-out), background .18s var(--ease-out); }
+.tl-tab:hover { color: var(--text); border-color: rgba(69,255,166,.34); }
+.tl-tab.on { color: #06110C; background: linear-gradient(92deg, var(--aurora) 0%, #A8FFD6 100%);
+  border-color: transparent; box-shadow: 0 0 12px -3px rgba(69,255,166,.5); }
+.tl-n { font-size: 9px; opacity: .65; font-variant-numeric: tabular-nums; }
+.tl-tab.on .tl-n { opacity: .8; }
+.tl-items { display: flex; flex-direction: column; }

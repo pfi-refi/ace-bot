@@ -496,16 +496,45 @@
       });
     } else if (panel === 'tasks') {
       var body2 = cardShell('TASKS', slot);
-      var tasks = data.tasks || [];
-      if (!tasks.length) return empty(body2, 'Inbox zero.');
-      tasks.slice(0, 12).forEach(function (t) {
+      var lists = data.lists || null;
+      function taskRow(t) {
         var row = document.createElement('div'); row.className = 'c-task';
         var box = document.createElement('span'); box.className = 'c-box';
         var bd = document.createElement('span'); bd.style.flex = '1'; bd.appendChild(document.createTextNode(t.title || ''));
-        var meta = document.createElement('span'); meta.className = 'c-meta'; meta.textContent = t.list || '';
-        if (t.due) { var due = document.createElement('span'); due.className = 'c-due'; due.textContent = '  ⏱ ' + t.due; meta.appendChild(due); }
-        bd.appendChild(meta); row.appendChild(box); row.appendChild(bd); body2.appendChild(row);
-      });
+        if (t.due) { var due = document.createElement('span'); due.className = 'c-due'; due.textContent = '  ⏱ ' + t.due; bd.appendChild(due); }
+        row.appendChild(box); row.appendChild(bd); return row;
+      }
+      if (lists && lists.length) {
+        // Click between ALL your lists (incl. empty ones). Default to the fullest.
+        var tabs = document.createElement('div'); tabs.className = 'tl-tabs';
+        var items = document.createElement('div'); items.className = 'tl-items';
+        var sel = 0, best = -1;
+        lists.forEach(function (l, i) { if ((l.count || 0) > best) { best = l.count || 0; sel = i; } });
+        function renderList(idx) {
+          Array.prototype.forEach.call(tabs.children, function (c, i) { c.classList.toggle('on', i === idx); });
+          while (items.firstChild) items.removeChild(items.firstChild);
+          var ts = lists[idx].tasks || [];
+          if (!ts.length) { var e = document.createElement('div'); e.className = 'empty-note'; e.textContent = 'Nothing open here.'; items.appendChild(e); return; }
+          ts.slice(0, 50).forEach(function (t) { items.appendChild(taskRow(t)); });
+        }
+        lists.forEach(function (l, i) {
+          var tab = document.createElement('button'); tab.className = 'tl-tab';
+          tab.appendChild(document.createTextNode(l.list || 'List'));
+          var n = document.createElement('span'); n.className = 'tl-n'; n.textContent = String(l.count || 0); tab.appendChild(n);
+          tab.addEventListener('click', function () { renderList(i); });
+          tabs.appendChild(tab);
+        });
+        body2.appendChild(tabs); body2.appendChild(items);
+        renderList(sel);
+      } else {
+        var tasks = data.tasks || [];
+        if (!tasks.length) return empty(body2, 'Inbox zero.');
+        tasks.slice(0, 12).forEach(function (t) {
+          var row = taskRow(t);
+          if (t.list) { var meta = document.createElement('span'); meta.className = 'c-meta'; meta.textContent = t.list; row.lastChild.appendChild(meta); }
+          body2.appendChild(row);
+        });
+      }
     } else if (panel === 'weather') {
       var body3 = cardShell('WEATHER', slot);
       var w = data;

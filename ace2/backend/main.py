@@ -57,7 +57,7 @@ from .brain import (
     sanitize_for_api,
 )
 from .integrations.calendar_api import get_events_structured
-from .integrations.tasks_api import get_inbox_structured, get_tasks_structured
+from .integrations.tasks_api import get_inbox_structured, get_task_lists_grouped, get_tasks_structured
 from .integrations.weather import get_weather
 
 logging.basicConfig(
@@ -238,8 +238,11 @@ async def calendar(days: int = 7):
 
 @app.get("/tasks", dependencies=[Depends(require_auth)])
 async def tasks():
-    items = await asyncio.to_thread(get_tasks_structured)
-    return {"tasks": items}
+    items, lists = await asyncio.gather(
+        asyncio.to_thread(get_tasks_structured),
+        asyncio.to_thread(get_task_lists_grouped),
+    )
+    return {"tasks": items, "lists": lists}
 
 
 @app.get("/inbox", dependencies=[Depends(require_auth)])

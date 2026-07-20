@@ -116,6 +116,49 @@ def get_tasks(skip_reference: bool = False) -> str:
         return ""
 
 
+def get_task_lists_grouped() -> list:
+    """EVERY task list (including empty ones) with its open tasks, in Google's order.
+
+    Returns [{list, count, tasks:[{title, due}]}] — powers the click-between-lists
+    card so Brady can see all his lists (Deals, Admin, Brain Dump, Personal, Goals…),
+    not just whichever has items. Nothing is skipped here. [] on any failure.
+    """
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists = service.tasklists().list(maxResults=30).execute().get("items", [])
+        out = []
+        for tl in task_lists:
+            tl_title = tl.get("title", "Tasks")
+            tasks = []
+            try:
+                r = service.tasks().list(
+                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=100,
+                ).execute()
+                for task in r.get("items", []):
+                    if task.get("status") == "completed":
+                        continue
+                    title = (task.get("title") or "").strip()
+                    if not title:
+                        continue
+                    due_str = ""
+                    due = task.get("due", "")
+                    if due:
+                        try:
+                            due_str = datetime.fromisoformat(
+                                due.replace("Z", "+00:00")).astimezone(EASTERN).strftime("%-m/%-d")
+                        except Exception:
+                            pass
+                    tasks.append({"title": title, "due": due_str})
+            except Exception as e:
+                logger.warning("tasks fetch (grouped) for '%s': %s", tl_title, e)
+            out.append({"list": tl_title, "count": len(tasks), "tasks": tasks})
+        return out
+    except Exception as e:
+        logger.error("grouped task lists fetch error: %s", e)
+        return []
+
+
 # ── Task writes (ported from bot.py) ─────────────────────────────────────────────
 def add_task(title: str, list_name: str = DEFAULT_TASK_LIST) -> tuple:
     """Add a task to Google Tasks. Returns (success, actual_list_name, was_duplicate)."""

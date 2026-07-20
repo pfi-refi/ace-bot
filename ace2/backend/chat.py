@@ -42,7 +42,9 @@ from .integrations.calendar_api import (
     get_tomorrow_events,
 )
 from .integrations import mcp_client
-from .integrations.tasks_api import get_gmail_summary, get_inbox_structured, get_tasks, get_tasks_structured
+from .integrations.tasks_api import (
+    get_gmail_summary, get_inbox_structured, get_task_lists_grouped, get_tasks, get_tasks_structured,
+)
 from .integrations.weather import get_weather
 from .system_prompt import build_system_prompt
 
@@ -354,7 +356,11 @@ async def _card_payload(panel: str):
         # Today only; the frontend computes the NOW line against the live clock.
         return {"events": await asyncio.to_thread(get_events_structured, 1)}
     if panel == "tasks":
-        return {"tasks": await asyncio.to_thread(get_tasks_structured)}
+        flat, grouped = await asyncio.gather(
+            asyncio.to_thread(get_tasks_structured),
+            asyncio.to_thread(get_task_lists_grouped),
+        )
+        return {"tasks": flat, "lists": grouped}
     if panel == "inbox":
         return {"emails": await asyncio.to_thread(get_inbox_structured, 6)}
     if panel == "weather":
