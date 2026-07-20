@@ -164,6 +164,22 @@ def _next_filler() -> str:
     return pick
 
 
+# Soft continuers streamed if the voice SSE goes silent mid-turn (a slow tool await). The
+# lead-in covers the FIRST-token deadline; this covers a long silent phase AFTER Ace has
+# started, so a multi-second tool call (esp. an mcp_→Google round-trip on a screen handoff)
+# never leaves dead air long enough for ElevenLabs to cut the call. Rotated so it never
+# repeats the same word back-to-back.
+_CONTINUERS = ("still on it", "one sec", "almost there", "bear with me", "hang tight", "just a moment")
+
+
+def _continuer_cycler():
+    """A per-call generator so each turn's continuers are ordered and don't repeat."""
+    i = 0
+    while True:
+        yield _CONTINUERS[i % len(_CONTINUERS)]
+        i += 1
+
+
 # What Ace SAYS while a tool runs on a live call — conversational, specific, first person.
 # Falls back to the lowercased UI label for anything unlisted (incl. mcp_* names).
 _SPOKEN_STATUS = {
@@ -184,15 +200,20 @@ _SPOKEN_STATUS = {
 }
 
 
-async def publish_stage_event(event_type: str, payload: dict):
+async def publish_stage_event(event_type: str, payload: dict) -> int:
+    """Broadcast a stage event to every connected HUD. Returns how many clients actually
+    received it, so a voice handoff can tell whether any screen was there to build on."""
     dead = []
+    sent = 0
     for ws in list(_stage_clients):
         try:
             await ws.send_json({"type": event_type, **payload})
+            sent += 1
         except Exception:
             dead.append(ws)
     for ws in dead:
         _stage_clients.discard(ws)
+    return sent
 
 
 class AuthReq(BaseModel):
@@ -569,6 +590,13 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # Voice turn wants to paint the screen → push over the app WebSocket, not the
                 # ElevenLabs audio stream. Same channel the typed path uses.
                 await publish_stage_event(event_type, payload)
+            elif event_type == "handoff":
+                # Voice handed a Workspace AUTHORING task (Doc/Sheet/Slides/share link) to the
+                # screen → tell the HUD to run it as a normal typed turn, which has the full MCP
+                # toolset and the tested confirm flow. Same app WebSocket as the cards. Return
+                # the reached-client count so the voice tool_result can be honest when no screen
+                # is connected (don't promise "watch your screen" to a call with no HUD open).
+                return await publish_stage_event("run_on_hud", {"message": payload.get("message", "")})
 
         async def run():
             try:
@@ -588,9 +616,42 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             "created": created, "model": model,
             "choices": [{"index": 0, "delta": {"content": _next_filler() + " "}, "finish_reason": None}],
         }) + "\n\n")
+        cont = _continuer_cycler()
+        started = False   # has the turn produced ANY real output yet?
+        misses = 0
         try:
             while True:
-                kind, text = await queue.get()
+                try:
+                    kind, text = await asyncio.wait_for(queue.get(), timeout=4.0)
+                except asyncio.TimeoutError:
+                    # Silence guard — but ONLY once the turn is actually underway. Before the
+                    # first token the queue is silent through the (up-to-9s) context build; the
+                    # instant lead-in above already covered that gap, and a continuer there
+                    # would be "still on it…" theater on plain small talk. After the turn has
+                    # started, a long silent gap is a real tool await (e.g. a slow Gmail search)
+                    # → keep the audio alive so ElevenLabs never cuts the call.
+                    if not started:
+                        continue
+                    misses += 1
+                    if misses > 8:
+                        # ~30s+ of unbroken silence = a tool has truly hung. Don't stream filler
+                        # forever (that keeps a dead call alive/billing); close out gracefully.
+                        yield ("data: " + json.dumps({
+                            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                            "created": created, "model": model,
+                            "choices": [{"index": 0, "delta": {"content": "That one's hanging on me — try me again in a moment."},
+                                         "finish_reason": None}],
+                        }) + "\n\n")
+                        break
+                    yield ("data: " + json.dumps({
+                        "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"content": next(cont) + "… "},
+                                     "finish_reason": None}],
+                    }) + "\n\n")
+                    continue
+                started = True
+                misses = 0
                 if kind == "done":
                     break
                 chunk = {

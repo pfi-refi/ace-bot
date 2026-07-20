@@ -399,7 +399,7 @@
     var ws; try { ws = new WebSocket(wsURL()); } catch (e) { setLink(false); scheduleReconnect(); return; }
     state.ws = ws;
     ws.onopen = function () { state.wsReady = true; state.reconnectDelay = 1000; setLink(true); };
-    ws.onclose = function (ev) { state.wsReady = false; setLink(false); if (ev && ev.code === 4401) { toLogin(); return; } scheduleReconnect(); };
+    ws.onclose = function (ev) { state.wsReady = false; state.busy = false; setLink(false); if (ev && ev.code === 4401) { toLogin(); return; } scheduleReconnect(); };
     ws.onerror = function () { setLink(false); };
     ws.onmessage = function (ev) { try { handleWSEvent(JSON.parse(ev.data)); } catch (e) {} };
   }
@@ -414,12 +414,34 @@
       case 'tool': renderTool(msg); break;
       case 'card': materializeCard(msg.panel, msg.data, msg.where); break;
       case 'open': openLink(msg.url, msg.label); break;
+      case 'run_on_hud': runOnHud(msg.message); break;
       case 'confirmation': renderConfirm(msg.text); break;
       case 'final': if (streamMsg) finalizeStream(streamMsg, msg.text); break;
-      case 'error': removeTyping(); discardEmptyStream(); addAceMessage(msg.text); break;
+      case 'error': removeTyping(); discardEmptyStream(); addAceMessage(msg.text); state.busy = false;
+        if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
       case 'done': discardEmptyStream(); streamMsg = null; activeTool = null; state.busy = false;
         if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
     }
+  }
+
+  /* Voice handed a Google Workspace authoring task to the screen (build_on_screen →
+     backend broadcast). Run it as a normal typed turn so it goes through the full-MCP
+     typed brain and the on-screen confirm flow — while Ace tells Brady, out loud, to
+     watch his screen. Open the chat panel so he sees the work and any confirm question.
+     If a turn is already in flight, wait for it rather than dropping the handoff. */
+  var _hudQueue = [];
+  function runOnHud(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    if (document.hidden) return;   // only the focused HUD runs a handoff — avoids duplicate turns across open devices/tabs
+    setChat(true);
+    if (state.busy) { _hudQueue.push(text); setTimeout(drainHudQueue, 1000); return; }
+    sendMessage(text);
+  }
+  function drainHudQueue() {
+    if (!_hudQueue.length) return;
+    if (state.busy) { setTimeout(drainHudQueue, 1000); return; }
+    runOnHud(_hudQueue.shift());
   }
 
   function sendMessage(text) {
@@ -839,7 +861,7 @@
     if (!state.busy) setOrbState(state.micActive ? 'listening' : 'idle');
   }
 
-  function speak(text) { if (aceMode === 'chat' || !state.voiceOut || !text) return; ttsQueue.push(text); if (!ttsPlaying) playNextTts(); }
+  function speak(text) { if (aceMode === 'chat' || liveConv || !state.voiceOut || !text) return; ttsQueue.push(text); if (!ttsPlaying) playNextTts(); }
   function playNextTts() {
     if (!ttsQueue.length) {
       ttsPlaying = false;

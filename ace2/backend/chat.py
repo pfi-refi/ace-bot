@@ -488,7 +488,11 @@ async def _fast_context() -> str:
         "tools on this call: use display_card to put things on his screen, get_calendar_range / "
         "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
         "delete_calendar_event, capture_item, update_item, add_task, send_email, draft_email, "
-        "search_drive to ACT — actually do these, then tell him it's done. Sending and deleting are "
+        "search_drive to ACT — actually do these, then tell him it's done. For anything you have no "
+        "spoken tool for — CREATING or EDITING a Google Doc, building or updating a Sheet or a "
+        "Slides deck, or making a shareable link — call build_on_screen with the full instruction, "
+        "then tell him in one short sentence to watch his screen; NEVER say you can't do it. "
+        "Sending and deleting are "
         "GATED: the tool will come back asking for confirmation — say in one short sentence exactly "
         "what you're about to do, wait for his yes, then call it again with confirmed true. "
         "Keep spoken replies short and natural — a sentence or two, no lists or markdown. If he's "
@@ -498,7 +502,7 @@ async def _fast_context() -> str:
 
 
 STAGE_TOOLS = [t for t in tools.TOOLS if t["name"] in tools.UI_TOOLS]
-VOICE_TOOLS = [t for t in tools.TOOLS if t["name"] not in _VOICE_TOOL_DENY]
+VOICE_TOOLS = [t for t in tools.TOOLS if t["name"] not in _VOICE_TOOL_DENY] + [tools.BUILD_ON_SCREEN]
 # Picking which card to show is a simple call — run it on Haiku, not Opus, so the stage
 # pass adds minimal cost/latency on top of every voice turn.
 STAGE_MODEL = os.environ.get("ACE2_STAGE_MODEL", "claude-haiku-4-5-20251001")
@@ -567,6 +571,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
     client = _anthropic()
     full_reply = []
     confirmations = []
+    handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
     # One monotonic id per real user turn — the confirm gate uses it to tell "Brady
     # spoke again" from "the model looped inside this same turn." Immune to the
     # transcript cap that a message-count would deadlock on.
@@ -621,6 +626,36 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False):
             tool_results = []
             for block in final.content:
                 if getattr(block, "type", "") != "tool_use":
+                    continue
+                if block.name == "build_on_screen":
+                    # Voice can't author Docs/Sheets/Slides itself — hand the task to the HUD,
+                    # which runs it as a normal typed turn with the full MCP toolset (and the
+                    # usual on-screen confirm flow). Ace just tells Brady to watch his screen.
+                    # Handled here, before any status narration or confirm gate. The spoken
+                    # line MUST match what actually happened, so branch on the real outcome:
+                    # empty request, already-dispatched, no screen connected, or success.
+                    req = (dict(block.input).get("request") or "").strip()
+                    if not req:
+                        result = ("No task text came through. Ask Brady in one short sentence "
+                                  "what he wants built, then call build_on_screen again.")
+                    elif handed_off:
+                        result = ("Already sent that to the screen — just tell Brady to watch "
+                                  "it. Do NOT send it again.")
+                    else:
+                        # emit('handoff') returns how many HUDs received it (openai_compat path).
+                        reached = await emit("handoff", {"message": req})
+                        if reached == 0:
+                            result = ("No screen is connected, so this can't run on the HUD. Tell "
+                                      "Brady in one short sentence to open the Ace app on a screen, "
+                                      "then ask again. Do NOT say it's being built — it isn't.")
+                        else:
+                            handed_off = True
+                            result = ("Sent to the on-screen assistant — it's building this on the "
+                                      "screen now with the full Workspace tools. In ONE short "
+                                      "sentence, tell Brady to watch his screen, and that if it "
+                                      "asks him to confirm anything, to okay it there. Don't do it "
+                                      "yourself or read the request back.")
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 is_ui = block.name in tools.UI_TOOLS
                 # Gate BEFORE any "running" narration — a blocked action must never be

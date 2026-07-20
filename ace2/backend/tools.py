@@ -360,6 +360,40 @@ TOOLS = [
     },
 ]
 
+# Voice-only handoff tool. NOT part of TOOLS (so the typed path, which already has the full
+# MCP surface, never sees it) — chat.py appends it to VOICE_TOOLS only. It lets a live voice
+# turn hand a Google Workspace AUTHORING task (create/edit a Doc, build/update a Sheet or
+# Slides deck, mint a shareable link — the mcp_-only surface voice doesn't carry) to the
+# on-screen assistant, which runs it as a normal typed turn with the full MCP toolset and the
+# usual confirm flow. Keeps voice fast (native-only) without ever losing heavy action.
+BUILD_ON_SCREEN = {
+    "name": "build_on_screen",
+    "description": (
+        "Hand a Google Workspace AUTHORING task to the on-screen assistant, which has the full "
+        "Docs / Sheets / Slides / Drive-sharing toolset. Use this on a VOICE call when Brady asks "
+        "you to CREATE or EDIT a Google Doc, build or update a Sheet or Slides deck, or make a "
+        "shareable link — the things your spoken tools don't cover. Put the COMPLETE instruction "
+        "in `request` (everything the screen needs: title, the full contents, which sheet/range, "
+        "etc.). After calling it, tell Brady in one short sentence to watch his screen. Do NOT use "
+        "this for calendar, tasks, email, Drive search, memory, recall, or the data bank — you do "
+        "those yourself by voice."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "request": {
+                "type": "string",
+                "description": (
+                    "The full authoring instruction to execute on screen, phrased as a complete "
+                    "request, e.g. 'Create a Google Doc titled \"Q3 Refi Pipeline\" with a section "
+                    "per active deal listing borrower, rate, and status.'"
+                ),
+            },
+        },
+        "required": ["request"],
+    },
+}
+
 # Short present-tense labels for the WS `tool` event (the orb shows "◈ CREATING EVENT…")
 TOOL_LABELS = {
     "create_calendar_event": "CREATING EVENT",
@@ -378,6 +412,7 @@ TOOL_LABELS = {
     "update_item": "UPDATING BANK",
     "display_card": "PROJECTING",
     "open_url": "OPENING",
+    "build_on_screen": "SENDING TO SCREEN",
 }
 
 # Tools the harness (chat.py) executes itself — they touch the UI, not Google.
