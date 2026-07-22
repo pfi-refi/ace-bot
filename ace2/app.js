@@ -213,14 +213,39 @@
 
   /* ============================================================ CHAT PANEL (toggle) */
   var chatOpen = localStorage.getItem('ace2_chat') === 'on';
+  /* The conversation is a STAGE CARD (Brady's ask: mirror the chat like the task-list tab),
+     not a full-screen side panel. Toggling on mounts a CONVERSATION card into the stage and
+     moves the live #messages node into it; toggling off parks #messages back in its hidden
+     home (#chat-panel) so the DOM/stream refs survive. The text box stays pinned at the bottom. */
+  function chatCardMount() {
+    if (document.getElementById('chat-card')) { scrollBottom(); return; }
+    var card = document.createElement('div'); card.className = 'card'; card.id = 'chat-card';
+    card.setAttribute('data-panel', 'CONVERSATION');
+    var head = document.createElement('div'); head.className = 'card-head';
+    head.appendChild(document.createTextNode('CONVERSATION'));
+    var x = document.createElement('button'); x.className = 'card-x'; x.textContent = '✕';
+    x.addEventListener('click', function () { setChat(false); });
+    head.appendChild(x);
+    var body = document.createElement('div'); body.className = 'card-body';
+    body.appendChild(messagesEl);          // move the LIVE conversation into the card
+    card.appendChild(head); card.appendChild(body);
+    var slot = slotEl('right');
+    slot.insertBefore(card, slot.firstChild);
+    scrollBottom();
+  }
+  function chatCardUnmount() {
+    var card = document.getElementById('chat-card');
+    if (!card) return;
+    $('chat-panel').appendChild(messagesEl);   // park it back in the hidden home
+    card.remove();
+  }
   function applyChatState() {
-    var panel = $('chat-panel'), btn = $('chat-toggle');
-    $('app').classList.toggle('chat-open', chatOpen);   // shifts content left of the panel (desktop)
+    var btn = $('chat-toggle');
     if (chatOpen) {
-      panel.classList.add('open'); btn.classList.add('active'); btn.classList.remove('has-new');
+      chatCardMount(); btn.classList.add('active'); btn.classList.remove('has-new');
       btn.setAttribute('aria-pressed', 'true'); scrollBottom();
     } else {
-      panel.classList.remove('open'); btn.classList.remove('active'); btn.setAttribute('aria-pressed', 'false');
+      chatCardUnmount(); btn.classList.remove('active'); btn.setAttribute('aria-pressed', 'false');
     }
   }
   function setChat(open) { chatOpen = open; localStorage.setItem('ace2_chat', open ? 'on' : 'off'); applyChatState(); }
@@ -493,21 +518,13 @@
     head.appendChild(x);
     var body = document.createElement('div'); body.className = 'card-body';
     card.appendChild(head); card.appendChild(body);
+    // one card per panel across BOTH slots (so re-placing moves it); cap each slot at 4
+    var dup = document.querySelector('.card[data-panel="' + title + '"]'); if (dup) dup.remove();
     card.setAttribute('data-panel', title);
-    // CHAT MODE: the stage is hidden, so cards flow INLINE in the conversation (append at
-    // the bottom like a message) — Brady sees them without closing anything. Replace a prior
-    // copy of the same panel so re-showing updates in place.
-    if (document.body.classList.contains('mode-chat')) {
-      var prevc = messagesEl.querySelector('.card[data-panel="' + title + '"]');
-      if (prevc) { var w = prevc.closest('.card-msg'); (w || prevc).remove(); }
-      var wrap = document.createElement('div'); wrap.className = 'card-msg'; wrap.appendChild(card);
-      messagesEl.appendChild(wrap); scrollBottom();
-      return body;
-    }
-    // VOICE MODE: one card per panel across BOTH stage slots (re-placing moves it); cap 4.
-    var dup = document.querySelector('#stage .card[data-panel="' + title + '"]'); if (dup) dup.remove();
     host.insertBefore(card, host.firstChild);
-    while (host.children.length > 4) host.removeChild(host.lastChild);
+    // cap DATA cards at 4 per slot — but never evict the pinned CONVERSATION card
+    var kids = Array.prototype.filter.call(host.children, function (el) { return el.id !== 'chat-card'; });
+    while (kids.length > 4) { kids.pop().remove(); }
     return body;
   }
   function empty(body, note) { var d = document.createElement('div'); d.className = 'empty-note'; d.textContent = note; body.appendChild(d); }

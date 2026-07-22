@@ -501,23 +501,15 @@ body {
   text-shadow: none; box-shadow: 0 0 14px -2px rgba(69,255,166,.55); }
 body.mode-chat #mic-btn { display: none; }
 
-/* ---------- Chat mode: DOCKED conversation (no fixed overlay → no close-to-type) ----------
-   Brady's ask: on his phone the chat panel covered the screen, so he closed it to type and
-   reopened it to see the HUD. In chat mode the conversation now lives in the normal page flow
-   (chrome on top, conversation filling the middle, text box pinned below — all visible at once).
-   The stage/orb is hidden and cards flow inline in the thread. VOICE mode is untouched. */
-body.mode-chat #stage { display: none; }
-body.mode-chat #chat-toggle { display: none; }             /* nothing to toggle — always docked */
-body.mode-chat #app.chat-open { padding-right: 22px; }     /* undo the desktop side-panel shove */
-body.mode-chat #chat-panel {
-  position: static; transform: none; width: auto; height: auto; min-height: 0; z-index: auto;
-  background: transparent; box-shadow: none; border: none; border-image: none;
-  backdrop-filter: none; -webkit-backdrop-filter: none; padding: 0; }
-body.mode-chat #chat-head { display: none; }               /* no CONVERSATION/✕ header needed */
-body.mode-chat #chat-panel #messages { width: 100%; }
-/* A card Ace shows lands inline as a full-width block in the thread (see cardShell) */
-.card-msg { align-self: stretch; width: 100%; }
-.card-msg .card { width: 100%; margin: 0; }
+/* ---------- Conversation as a STAGE CARD (Brady: mirror the chat like the task-list tab) ----------
+   The chat is no longer a full-screen side panel that covers the HUD. The chat toggle mounts a
+   CONVERSATION card onto the stage (like tasks/calendar); #messages lives inside it and the text
+   box stays pinned at the bottom of the app. #chat-panel is now just the hidden home for #messages
+   when the card is closed. Works the same in voice and chat mode. */
+#chat-panel { display: none; }
+#chat-card .card-body { padding: 4px 6px 6px; }
+#chat-card #messages { width: 100%; max-height: min(52vh, 460px); }
+@media (max-width: 760px) { #chat-card #messages { max-height: 58vh; } }
 
 /* ---------- Preloaded history in the chat panel ---------- */
 .msg.hist { opacity: .62; }
