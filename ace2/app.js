@@ -493,9 +493,19 @@
     head.appendChild(x);
     var body = document.createElement('div'); body.className = 'card-body';
     card.appendChild(head); card.appendChild(body);
-    // one card per panel across BOTH slots (so re-placing moves it); cap each slot at 4
-    var dup = document.querySelector('.card[data-panel="' + title + '"]'); if (dup) dup.remove();
     card.setAttribute('data-panel', title);
+    // CHAT MODE: the stage is hidden, so cards flow INLINE in the conversation (append at
+    // the bottom like a message) — Brady sees them without closing anything. Replace a prior
+    // copy of the same panel so re-showing updates in place.
+    if (document.body.classList.contains('mode-chat')) {
+      var prevc = messagesEl.querySelector('.card[data-panel="' + title + '"]');
+      if (prevc) { var w = prevc.closest('.card-msg'); (w || prevc).remove(); }
+      var wrap = document.createElement('div'); wrap.className = 'card-msg'; wrap.appendChild(card);
+      messagesEl.appendChild(wrap); scrollBottom();
+      return body;
+    }
+    // VOICE MODE: one card per panel across BOTH stage slots (re-placing moves it); cap 4.
+    var dup = document.querySelector('#stage .card[data-panel="' + title + '"]'); if (dup) dup.remove();
     host.insertBefore(card, host.firstChild);
     while (host.children.length > 4) host.removeChild(host.lastChild);
     return body;

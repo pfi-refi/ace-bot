@@ -495,8 +495,21 @@ def _do_add_task(title, list_name=DEFAULT_TASK_LIST, **_):
 
 def _do_complete_task(task_title, **_):
     try:
-        matched = complete_task(task_title)
-        return f"✅ Completed: {matched}" if matched else f"⚠️ No task matching '{task_title}'"
+        r = complete_task(task_title)
+        status = r.get("status") if isinstance(r, dict) else None
+        if status == "done":
+            return f"✅ Completed: {r['title']}"
+        if status == "ambiguous":
+            opts = "; ".join(r.get("candidates") or [])
+            return (f"⚠️ NOT DONE — more than one open task could be '{task_title}'. Ask Brady "
+                    f"which one, by name: {opts}")
+        if status == "none":
+            openlist = r.get("open") or []
+            if not openlist:
+                return "⚠️ NOT DONE — there are no open tasks to complete right now."
+            return (f"⚠️ NOT DONE — nothing open matches '{task_title}'. Tell Brady what IS open "
+                    f"and ask which he means: {'; '.join(openlist)}")
+        return f"⚠️ Couldn't reach Google Tasks to complete '{task_title}'."
     except Exception as e:
         logger.error("complete_task: %s", e)
         return f"⚠️ Complete task failed: {e}"

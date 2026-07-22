@@ -12,7 +12,9 @@ the text helpers reproduce the exact strings Ace's context expects.
 """
 
 import base64
+import difflib
 import logging
+import re
 from datetime import datetime
 from email.mime.text import MIMEText
 
@@ -203,35 +205,92 @@ def add_task(title: str, list_name: str = DEFAULT_TASK_LIST) -> tuple:
         return False, list_name, False
 
 
-def complete_task(partial_title: str) -> str:
-    """Mark a task complete by fuzzy-matching on title. Returns title or empty string."""
+# Filler/verb words Brady says when asking to complete a task — stripped from the SPOKEN
+# phrase before matching so "mark off the Sienna follow-up" keys on "sienna follow up", not
+# on "mark"/"off"/"the". (Task titles are matched whole; only the query is filtered.)
+_COMPLETE_STOPWORDS = {
+    "the", "a", "an", "to", "of", "for", "my", "off", "that", "this", "task", "item",
+    "mark", "complete", "completed", "done", "finish", "finished", "check", "cross",
+    "please", "can", "you", "and", "with", "re", "up", "on", "it",
+}
+
+
+def _norm_tokens(s: str) -> set:
+    return {w for w in re.sub(r"[^a-z0-9 ]", " ", (s or "").lower()).split() if w}
+
+
+def _match_score(query: str, title: str) -> float:
+    """0..1 — how well the spoken query names this task. Best of: substring (either way),
+    meaningful-token overlap (query stopwords stripped), and overall string similarity."""
+    q, t = (query or "").lower().strip(), (title or "").lower().strip()
+    if not q or not t:
+        return 0.0
+    if q in t or t in q:
+        return 1.0
+    qtok = _norm_tokens(query) - _COMPLETE_STOPWORDS
+    ttok = _norm_tokens(title)
+    overlap = (len(qtok & ttok) / len(qtok)) if qtok else 0.0
+    ratio = difflib.SequenceMatcher(None, q, t).ratio()
+    return max(overlap, ratio)
+
+
+def complete_task(partial_title: str):
+    """Mark a task complete by FORGIVING title match (was: literal substring only, which made
+    Ace 'not find' a task whose title he paraphrased). Returns a dict the caller turns into
+    speech:
+      {status:'done', title}                    — completed exactly one
+      {status:'ambiguous', candidates:[titles]} — several plausible → caller asks which
+      {status:'none', open:[titles]}            — no good match → caller names what's open
+      {status:'error'}                          — Google call failed
+    """
     try:
         creds = get_google_creds()
         service = build("tasks", "v1", credentials=creds)
         task_lists = service.tasklists().list(maxResults=20).execute().get("items", [])
-        search_lower = partial_title.lower().strip()
+        # Gather every open task once (title + ids), then rank against the spoken phrase.
+        open_tasks = []
         for tl in task_lists:
             try:
-                tasks_result = service.tasks().list(
-                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=50,
+                r = service.tasks().list(
+                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=100,
                 ).execute()
             except Exception:
                 continue
-            for task in tasks_result.get("items", []):
+            for task in r.get("items", []):
                 if task.get("status") == "completed":
                     continue
-                title = task.get("title", "").strip()
-                if search_lower in title.lower():
-                    service.tasks().update(
-                        tasklist=tl["id"], task=task["id"],
-                        body={"id": task["id"], "status": "completed"},
-                    ).execute()
-                    logger.info("Task completed: %s", title)
-                    return title
-        return ""
+                title = (task.get("title") or "").strip()
+                if title:
+                    open_tasks.append({"tl": tl["id"], "id": task["id"], "title": title})
+
+        if not open_tasks:
+            return {"status": "none", "open": []}
+
+        scored = sorted(
+            ((_match_score(partial_title, t["title"]), t) for t in open_tasks),
+            key=lambda x: x[0], reverse=True,
+        )
+        best_score, best = scored[0]
+        runner = scored[1][0] if len(scored) > 1 else 0.0
+
+        # Confident AND clearly ahead of the next best → complete it.
+        if best_score >= 0.6 and (best_score - runner) >= 0.15:
+            service.tasks().update(
+                tasklist=best["tl"], task=best["id"],
+                body={"id": best["id"], "status": "completed"},
+            ).execute()
+            logger.info("Task completed: %s (score %.2f)", best["title"], best_score)
+            return {"status": "done", "title": best["title"]}
+
+        # Plausible but no clear winner → let Ace ask which one.
+        if best_score >= 0.35:
+            return {"status": "ambiguous", "candidates": [t["title"] for s, t in scored if s >= 0.35][:4]}
+
+        # Nothing close → hand back what's actually open so Ace names real options.
+        return {"status": "none", "open": [t["title"] for t in open_tasks][:15]}
     except Exception as e:
         logger.error("Complete task error: %s", e)
-        return ""
+        return {"status": "error"}
 
 
 # ── Gmail (ported from bot.py) ───────────────────────────────────────────────────

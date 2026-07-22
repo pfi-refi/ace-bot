@@ -438,7 +438,7 @@ def _format_calendar_window(events: list, now) -> str:
 # `prior`), so we serve those from a background-refreshed cache and format the per-turn
 # string from cache + the LIVE clock: microseconds, zero per-turn network. Primed at startup
 # (main.prime) and kept warm every ~30s.
-_CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "ts": 0.0}
+_CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "tasks": [], "ts": 0.0}
 _CTX_TTL = 45.0
 _ctx_lock: asyncio.Lock = asyncio.Lock()
 _ctx_keepwarm_started = [False]
@@ -458,13 +458,14 @@ async def _refresh_ctx() -> None:
 
 async def _refresh_ctx_inner() -> None:
     try:
-        memory, cal_all, bank, convo, wx = await asyncio.wait_for(
+        memory, cal_all, bank, convo, wx, tasks = await asyncio.wait_for(
             asyncio.gather(
                 asyncio.to_thread(brain.read_memory),
                 asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
                 asyncio.to_thread(daybank.read_items, True),
                 asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat
                 get_weather(),
+                asyncio.to_thread(get_tasks_structured),   # so voice KNOWS his real task titles
                 return_exceptions=True,
             ),
             timeout=20,  # off the critical path now, so it can afford to wait out a slow call
@@ -479,6 +480,7 @@ async def _refresh_ctx_inner() -> None:
             bank=keep(bank, _CTX["bank"]),
             convo=keep(convo, _CTX["convo"]),
             wx=keep(wx, _CTX["wx"]),
+            tasks=keep(tasks, _CTX["tasks"]),
             ts=time.time(),
         )
     except Exception as e:
@@ -535,6 +537,21 @@ async def _fast_context() -> str:
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
     # today's typed turns too — not just its own call and not the stale Telegram window.
     convo_str = _format_thread(_CTX["convo"][-12:])
+    # Open Google Tasks, grouped by list — so voice knows his REAL task titles (without
+    # this, "mark off the Sienna task" was Ace guessing blind → "can't find it").
+    task_items = ok(_CTX["tasks"], [])
+    if task_items:
+        _by_list: dict = {}
+        for t in task_items:
+            _by_list.setdefault(t.get("list", "Tasks"), []).append(t)
+        tasks_str = "\n".join(
+            f"  {lst}: " + ", ".join(
+                (f"{i['title']} (due {i['due']})" if i.get("due") else i["title"]) for i in items
+            )
+            for lst, items in _by_list.items()
+        )
+    else:
+        tasks_str = "(no open tasks)"
     return "\n".join([
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
@@ -551,6 +568,10 @@ async def _fast_context() -> str:
         "DATA BANK (commitments / to-dos / deals you're already tracking for Brady):",
         _format_daybank(ok(bank, [])),
         "",
+        "OPEN TASKS (his REAL Google Tasks, by list — to mark one done, match what he says to a "
+        "title here and call complete_task with that title; it completes the match or asks which):",
+        tasks_str,
+        "",
         "WEATHER RIGHT NOW:",
         _format_weather(ok(wx, {})),
         "",
@@ -563,7 +584,8 @@ async def _fast_context() -> str:
         "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
         "tools on this call: use display_card to put things on his screen, get_calendar_range / "
         "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
-        "delete_calendar_event, capture_item, update_item, add_task, send_email, draft_email, "
+        "delete_calendar_event, capture_item, update_item, add_task, complete_task (mark a task done — "
+        "match his words to a title in OPEN TASKS above), send_email, draft_email, "
         "search_drive to ACT — actually do these, then tell him it's done. For anything you have no "
         "spoken tool for — CREATING or EDITING a Google Doc, building or updating a Sheet or a "
         "Slides deck, or making a shareable link — call build_on_screen with the full instruction, "

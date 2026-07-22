@@ -667,14 +667,14 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # covers any gap. (No status word — nothing happened.)
                 pass
             elif event_type == "tool" and payload.get("status") == "running":
-                # Screen-only tools (display_card/open_url) paint silently. For real tools,
-                # say the status word ONCE PER TOOL PER TURN — a deal sweep that calls
-                # capture_item eight times must not chant "Noting that down…" eight times
-                # (Brady's 8:16 AM transcript). Cap distinct status words at 4 so even a
-                # many-tool sweep is a few beats, not a monologue; the silence guard keeps
-                # the stream alive through the quiet work.
+                # Screen-only tools (display_card/open_url) paint their own card — the card IS
+                # the receipt, so no pill for them.
                 if payload.get("ui"):
                     return
+                # HUD RECEIPT: show a "◈ …" pill for EVERY real tool call, even in an 8-capture
+                # sweep — so Brady can SEE each action land (voice used to show nothing on the
+                # screen). The SPOKEN status below is still deduped so the audio isn't a chant.
+                await publish_stage_event("tool", payload)
                 name = payload.get("name")
                 if name in status_said or len(status_said) >= 4:
                     return
@@ -683,6 +683,15 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 spoken = _SPOKEN_STATUS.get(name, label)
                 spoke["any"] = True
                 await queue.put(("delta", f"{spoken.capitalize()}… "))
+            elif event_type == "tool" and payload.get("status") == "done":
+                # Flip the HUD pill to done (non-ui only; ui tools have no pill).
+                if not payload.get("ui"):
+                    await publish_stage_event("tool", payload)
+            elif event_type == "confirmation":
+                # The action receipt ("✅ Added to Deals: …") chat already shows — mirror it to
+                # the HUD on voice too, so Brady sees proof the spoken action landed. Not spoken
+                # (it's a screen receipt); Ace states the outcome himself in his reply.
+                await publish_stage_event("confirmation", {"text": payload.get("text", "")})
             elif event_type in ("card", "open"):
                 # Voice turn wants to paint the screen → push over the app WebSocket, not the
                 # ElevenLabs audio stream. Same channel the typed path uses.
