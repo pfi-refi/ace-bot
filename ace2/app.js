@@ -241,6 +241,9 @@
   }
   function applyChatState() {
     var btn = $('chat-toggle');
+    // `chatting` lets CSS give the card a DIFFERENT treatment per device: a window beside the
+    // HUD on laptop, a full-screen takeover on phone (see the mobile media query).
+    document.body.classList.toggle('chatting', chatOpen);
     if (chatOpen) {
       chatCardMount(); btn.classList.add('active'); btn.classList.remove('has-new');
       btn.setAttribute('aria-pressed', 'true'); scrollBottom();
