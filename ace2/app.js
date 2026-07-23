@@ -213,31 +213,31 @@
 
   /* ============================================================ CHAT PANEL (toggle) */
   var chatOpen = localStorage.getItem('ace2_chat') === 'on';
-  /* The conversation is a STAGE CARD (Brady's ask: mirror the chat like the task-list tab),
-     not a full-screen side panel. Toggling on mounts a CONVERSATION card into the stage and
-     moves the live #messages node into it; toggling off parks #messages back in its hidden
-     home (#chat-panel) so the DOM/stream refs survive. The text box stays pinned at the bottom. */
+  /* The conversation opens as its OWN FULL SCREEN — a separate "tab", not a floating window
+     (Brady). Opening builds a #chat-view overlay that covers the whole dashboard: its own header
+     with a ✕, the live #messages, and the text box (#input-bar) MOVED into it so you type inside
+     the chat. Closing parks #messages back in its hidden home (#chat-panel) and returns #input-bar
+     to the bottom of #app, then removes the overlay — back to the orb dashboard. Same on both. */
   function chatCardMount() {
-    if (document.getElementById('chat-card')) { scrollBottom(); return; }
-    var card = document.createElement('div'); card.className = 'card'; card.id = 'chat-card';
-    card.setAttribute('data-panel', 'CONVERSATION');
-    var head = document.createElement('div'); head.className = 'card-head';
-    head.appendChild(document.createTextNode('CONVERSATION'));
-    var x = document.createElement('button'); x.className = 'card-x'; x.textContent = '✕';
-    x.addEventListener('click', function () { setChat(false); });
-    head.appendChild(x);
-    var body = document.createElement('div'); body.className = 'card-body';
-    body.appendChild(messagesEl);          // move the LIVE conversation into the card
-    card.appendChild(head); card.appendChild(body);
-    var slot = slotEl('right');
-    slot.insertBefore(card, slot.firstChild);
+    if (document.getElementById('chat-view')) { scrollBottom(); return; }
+    var view = document.createElement('div'); view.id = 'chat-view';
+    var head = document.createElement('div'); head.className = 'chat-view-head';
+    var t = document.createElement('span'); t.className = 'chat-view-title'; t.textContent = 'CONVERSATION';
+    var x = document.createElement('button'); x.className = 'chat-view-x'; x.setAttribute('aria-label', 'Close chat');
+    x.textContent = '✕'; x.addEventListener('click', function () { setChat(false); });
+    head.appendChild(t); head.appendChild(x);
+    view.appendChild(head);
+    view.appendChild(messagesEl);        // the live conversation
+    view.appendChild($('input-bar'));    // move the text box into the chat tab
+    $('app').appendChild(view);
     scrollBottom();
   }
   function chatCardUnmount() {
-    var card = document.getElementById('chat-card');
-    if (!card) return;
-    $('chat-panel').appendChild(messagesEl);   // park it back in the hidden home
-    card.remove();
+    var view = document.getElementById('chat-view');
+    if (!view) return;
+    $('chat-panel').appendChild(messagesEl);   // park conversation back in its hidden home
+    $('app').appendChild($('input-bar'));      // input-bar back to the bottom of #app
+    view.remove();
   }
   function applyChatState() {
     var btn = $('chat-toggle');
@@ -525,9 +525,7 @@
     var dup = document.querySelector('.card[data-panel="' + title + '"]'); if (dup) dup.remove();
     card.setAttribute('data-panel', title);
     host.insertBefore(card, host.firstChild);
-    // cap DATA cards at 4 per slot — but never evict the pinned CONVERSATION card
-    var kids = Array.prototype.filter.call(host.children, function (el) { return el.id !== 'chat-card'; });
-    while (kids.length > 4) { kids.pop().remove(); }
+    while (host.children.length > 4) host.removeChild(host.lastChild);   // cap each slot at 4
     return body;
   }
   function empty(body, note) { var d = document.createElement('div'); d.className = 'empty-note'; d.textContent = note; body.appendChild(d); }
