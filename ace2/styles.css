@@ -483,16 +483,6 @@ body {
   #orb-wrap::after { display: none; }                 /* skip the instrument ring on phones */
   #chat-panel { width: 100vw; }
   #app.chat-open { padding-right: 12px; }
-
-  /* Phone ONLY: opening the conversation takes over the screen like a messaging app — hide
-     the orb and data cards so the thread dominates; the mode toggle stays up top and the text
-     box stays pinned at the bottom. Close the chat to get the HUD/cards back. (Laptop keeps the
-     windowed card beside the HUD — that reversal is exactly what Brady asked for.) */
-  body.chatting #orb-wrap,
-  body.chatting #cards-left,
-  body.chatting #cards > .card:not(#chat-card) { display: none; }
-  body.chatting #chat-card { width: 100%; margin: 0; }
-  body.chatting #chat-card #messages { max-height: 72vh; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 

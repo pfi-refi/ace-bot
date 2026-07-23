@@ -241,8 +241,8 @@
   }
   function applyChatState() {
     var btn = $('chat-toggle');
-    // `chatting` lets CSS give the card a DIFFERENT treatment per device: a window beside the
-    // HUD on laptop, a full-screen takeover on phone (see the mobile media query).
+    // Same treatment on every device: voice/orb is the dashboard, the conversation is its own
+    // windowed card on the stage — no full-screen takeover, no bleed between them.
     document.body.classList.toggle('chatting', chatOpen);
     if (chatOpen) {
       chatCardMount(); btn.classList.add('active'); btn.classList.remove('has-new');
