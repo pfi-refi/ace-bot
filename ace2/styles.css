@@ -507,9 +507,22 @@ body.mode-chat #mic-btn { display: none; }
    box stays pinned at the bottom of the app. #chat-panel is now just the hidden home for #messages
    when the card is closed. Works the same in voice and chat mode. */
 #chat-panel { display: none; }
-#chat-card .card-body { padding: 4px 6px 6px; }
-#chat-card #messages { width: 100%; max-height: min(52vh, 460px); }
-@media (max-width: 760px) { #chat-card #messages { max-height: 58vh; } }
+/* The conversation opens as a FULL window on every device: voice/orb is the dashboard, and
+   clicking the chat button gives the whole dashboard area over to the conversation (chrome/mode
+   toggle stay on top, text box stays pinned at the bottom). Data cards stay on the dashboard —
+   hidden while chatting — so nothing bleeds between the two. Same feel on laptop and phone. */
+body.chatting #orb-wrap,
+body.chatting #cards-left,
+body.chatting #cards > .card:not(#chat-card) { display: none; }
+body.chatting #cards { position: absolute; inset: 4px 8px; width: auto; max-height: none; z-index: 5; }
+#chat-card { display: flex; flex-direction: column; min-height: 0; }
+body.chatting #chat-card { flex: 1 1 auto; }
+#chat-card .card-body { padding: 4px 6px 6px; flex: 1 1 auto; min-height: 0; }
+#chat-card #messages { width: 100%; height: 100%; max-height: none; }
+@media (max-width: 760px) {
+  body.chatting #cards { position: static; inset: auto; }   /* mobile flows; page can scroll */
+  #chat-card #messages { height: auto; max-height: 72vh; }
+}
 
 /* ---------- Preloaded history in the chat panel ---------- */
 .msg.hist { opacity: .62; }
