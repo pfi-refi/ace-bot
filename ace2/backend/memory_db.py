@@ -39,6 +39,7 @@ _CACHE_TTL = 300  # seconds
 _cache = {"ts": 0.0, "corpus": None}
 
 _WORD = re.compile(r"[a-z0-9$][a-z0-9$'/.-]*")
+_HISTORY_SCAN = 5000   # how many recent Postgres turns to pull into the recall corpus
 
 _STOP = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for", "with",
@@ -77,11 +78,27 @@ def _build_corpus() -> list:
     """Normalize every store into [{ts, source, role, text}]. Best-effort per source."""
     corpus = []
 
-    for e in _read_all_history():
-        corpus.append({
-            "ts": e.get("ts", ""), "source": "ace2",
-            "role": e.get("role", ""), "text": e.get("content", ""),
-        })
+    # Ace's OWN conversation history. THE FIX: when the Postgres brain is live, history.append
+    # writes turns to Postgres (backfilled from Drive at cutover) — but this search used to read
+    # ONLY the frozen Drive files, so recall never saw a single Postgres turn ("he can't remember
+    # what we talked about"). Read Postgres directly when it's on; fall back to Drive when dormant.
+    # Additive either way: nothing is dropped, and the Drive-recovered archive is still merged below.
+    try:
+        from . import db
+        if db.enabled():
+            for t in db.recent_turns(_HISTORY_SCAN):
+                corpus.append({
+                    "ts": t.get("ts", ""), "source": "ace2",
+                    "role": t.get("role", ""), "text": t.get("content", ""),
+                })
+        else:
+            for e in _read_all_history():
+                corpus.append({
+                    "ts": e.get("ts", ""), "source": "ace2",
+                    "role": e.get("role", ""), "text": e.get("content", ""),
+                })
+    except Exception as e:
+        logger.warning("memory_db: history read failed: %s", e)
 
     try:
         for m in brain.read_shared_conversation():

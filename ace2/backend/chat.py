@@ -322,8 +322,10 @@ async def _load_messages(user_text: str, prior=None) -> list:
 # individual — the bot going dark can't take Ace's memory with it. Durable state
 # lives in ACE MEMORY (facts) + the DATA BANK (commitments/deals); this raw thread
 # is only the last handful of turns for immediate continuity.
-def _unified_thread(limit: int = 12) -> list:
-    """Recent conversation across voice + chat, from Ace's OWN history only."""
+def _unified_thread(limit: int = 30) -> list:
+    """Recent conversation across voice + chat, from Ace's OWN history only. Widened 12→30
+    (Brady: "I always want him to remember — that's building context"); recall covers anything
+    older than this window."""
     try:
         entries = history.read_recent(2)
     except Exception:
@@ -536,7 +538,7 @@ async def _fast_context() -> str:
     wx = _CTX["wx"]
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
     # today's typed turns too — not just its own call and not the stale Telegram window.
-    convo_str = _format_thread(_CTX["convo"][-12:])
+    convo_str = _format_thread(_CTX["convo"][-24:])   # voice: wider memory window (was 12)
     # Open Google Tasks, grouped by list — so voice knows his REAL task titles (without
     # this, "mark off the Sienna task" was Ace guessing blind → "can't find it").
     task_items = ok(_CTX["tasks"], [])
