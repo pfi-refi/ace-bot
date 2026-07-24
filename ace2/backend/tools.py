@@ -541,9 +541,9 @@ def _do_search_drive(query, **_):
 
 def _do_save_memory(fact, **_):
     try:
-        existing = brain.read_memory()
-        merged = brain.merge_memories([fact], existing)
-        return f"🧠 Noted: {fact}" if brain.write_memory(merged) else "⚠️ Could not save to memory"
+        # add_memory routes to the Postgres brain (uncapped append, dedup) when live, else the
+        # old Drive merge. No more Haiku merge silently dropping facts at the 60-cap.
+        return f"🧠 Noted: {fact}" if brain.add_memory([fact]) else "⚠️ Could not save to memory"
     except Exception as e:
         logger.error("save_memory: %s", e)
         return f"⚠️ Save memory failed: {e}"

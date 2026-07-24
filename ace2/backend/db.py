@@ -72,6 +72,23 @@ def _init_schema():
                 due      TEXT,
                 done_ts  TIMESTAMPTZ
             )""")
+        # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
+        # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
+        # active | archived; a retired fact is set tier='archived' + invalid_at (kept as dated
+        # history, never deleted — Brady's rule). bi-temporal fields support supersede-not-delete.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS facts (
+                id            BIGSERIAL PRIMARY KEY,
+                ts            TIMESTAMPTZ NOT NULL DEFAULT now(),
+                subject       TEXT,
+                kind          TEXT,
+                text          TEXT NOT NULL,
+                tier          TEXT NOT NULL DEFAULT 'active',
+                valid_from    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                invalid_at    TIMESTAMPTZ,
+                superseded_by BIGINT,
+                source        TEXT DEFAULT 'ace2'
+            )""")
 
 
 def ensure_ready():
@@ -113,6 +130,23 @@ def _backfill():
                 logger.info("db backfill: %d turns from Drive", len(rows))
         except Exception as e:
             logger.warning("db backfill turns failed: %s", e)
+
+    # facts: seed once from the Drive memory file (uncapped, all 'active'). Read Drive DIRECTLY
+    # (brain._read_json), not brain.read_memory() which now dispatches back here.
+    with _conn() as c, c.cursor() as cur:
+        cur.execute("SELECT count(*) FROM facts")
+        facts_empty = cur.fetchone()[0] == 0
+    if facts_empty:
+        try:
+            from . import brain
+            facts = brain._read_json(brain.MEMORY_FILE_NAME).get("memories", [])
+            rows = [((f or "").strip(),) for f in facts if isinstance(f, str) and (f or "").strip()]
+            if rows:
+                with _conn() as c, c.cursor() as cur:
+                    cur.executemany("INSERT INTO facts (text) VALUES (%s)", rows)
+                logger.info("db backfill: %d facts from Drive", len(rows))
+        except Exception as e:
+            logger.warning("db backfill facts failed: %s", e)
 
     if bank_empty:
         try:
@@ -208,6 +242,89 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
     except Exception as e:
         logger.error("db add_item failed: %s", e)
         return False, str(e)
+
+
+# ── Durable facts (replaces brain.py's capped, bot-shared Drive ace_memory.json) ─
+def read_facts(include_archived: bool = False) -> list:
+    """Current durable facts as plain strings, core tier first. Archived facts stay in the
+    table as dated history but are excluded from context unless include_archived."""
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            if include_archived:
+                cur.execute("SELECT text FROM facts ORDER BY (tier='core') DESC, id")
+            else:
+                cur.execute("SELECT text FROM facts WHERE tier <> 'archived' AND invalid_at IS NULL "
+                            "ORDER BY (tier='core') DESC, id")
+            return [r[0] for r in cur.fetchall()]
+    except Exception as e:
+        logger.warning("db read_facts failed: %s", e)
+        return []
+
+
+def read_facts_full() -> list:
+    """Full rows (for the stale-fact review UI / archiving). [] on failure."""
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT id, text, tier, ts, invalid_at FROM facts ORDER BY (tier='core') DESC, id")
+            return [{"id": r[0], "text": r[1], "tier": r[2],
+                     "ts": r[3].isoformat() if r[3] else None,
+                     "invalid_at": r[4].isoformat() if r[4] else None} for r in cur.fetchall()]
+    except Exception as e:
+        logger.warning("db read_facts_full failed: %s", e)
+        return []
+
+
+def add_fact(text: str, tier: str = "active", subject: str = None, kind: str = None,
+             source: str = "ace2") -> bool:
+    """Append a durable fact — UNCAPPED (the old 60-cap silently dropped facts). No-ops on an
+    exact case-insensitive duplicate among live facts; smart reconcile/supersede comes later."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    if tier not in ("core", "active", "archived"):
+        tier = "active"
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT 1 FROM facts WHERE lower(text)=lower(%s) AND invalid_at IS NULL LIMIT 1", (text,))
+            if cur.fetchone():
+                return True
+            cur.execute("INSERT INTO facts (subject, kind, text, tier, source) VALUES (%s,%s,%s,%s,%s)",
+                        (subject, kind, text, tier, source))
+        return True
+    except Exception as e:
+        logger.warning("db add_fact failed: %s", e)
+        return False
+
+
+def archive_fact(fact_id: int, superseded_by: int = None) -> bool:
+    """Retire a fact WITHOUT deleting it — tier='archived', invalid_at=now() (Brady's rule:
+    stale facts become searchable history, never gone)."""
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("UPDATE facts SET tier='archived', invalid_at=now(), superseded_by=%s WHERE id=%s",
+                        (superseded_by, fact_id))
+        return True
+    except Exception as e:
+        logger.warning("db archive_fact failed: %s", e)
+        return False
+
+
+def set_fact_tier(fact_id: int, tier: str) -> bool:
+    if tier not in ("core", "active", "archived"):
+        return False
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            inv = "invalid_at = now()" if tier == "archived" else "invalid_at = NULL"
+            cur.execute(f"UPDATE facts SET tier=%s, {inv} WHERE id=%s", (tier, fact_id))
+        return True
+    except Exception as e:
+        logger.warning("db set_fact_tier failed: %s", e)
+        return False
 
 
 def update_item(item_id: str, status: str = None, text: str = None) -> tuple:

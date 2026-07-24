@@ -97,9 +97,39 @@ def _read_json(name: str) -> dict:
         return {}
 
 
-# ── Memory: read + write (shared with the Telegram bot) ─────────────────────────
+# ── Memory: read + write ────────────────────────────────────────────────────────
+# Ace's durable facts now live in his OWN Postgres brain (uncapped, tiered) when it's
+# provisioned — decoupled from the bot and no longer capped at 60. The shared Drive file
+# stays as a frozen pre-migration backup and the dormant-Postgres fallback.
 def read_memory() -> list:
+    try:
+        from . import db
+        if db.enabled():
+            facts = db.read_facts()
+            if facts:
+                return facts
+    except Exception as e:
+        logger.warning("read_memory: Postgres facts failed (%s) — Drive fallback", e)
     return _read_json(MEMORY_FILE_NAME).get("memories", [])
+
+
+def add_memory(new_items: list) -> bool:
+    """Add durable fact(s). Postgres = append UNCAPPED with exact-dup skip (no Haiku merge that
+    silently drops facts). Dormant Postgres = the old Drive read-merge-write."""
+    items = [i.strip() for i in (new_items or []) if isinstance(i, str) and i.strip()]
+    if not items:
+        return True
+    try:
+        from . import db
+        if db.enabled():
+            ok = True
+            for it in items:
+                ok = db.add_fact(it) and ok
+            return ok
+    except Exception as e:
+        logger.warning("add_memory: Postgres failed (%s) — Drive fallback", e)
+    existing = _read_json(MEMORY_FILE_NAME).get("memories", [])
+    return write_memory(merge_memories(items, existing))
 
 
 def write_memory(memories: list) -> bool:
