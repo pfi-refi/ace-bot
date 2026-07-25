@@ -114,22 +114,74 @@ def read_memory() -> list:
 
 
 def add_memory(new_items: list) -> bool:
-    """Add durable fact(s). Postgres = append UNCAPPED with exact-dup skip (no Haiku merge that
-    silently drops facts). Dormant Postgres = the old Drive read-merge-write."""
+    """Add durable fact(s) — COMPOUNDING. Postgres path reconciles each new fact against the
+    current ones (skip if known, supersede-not-pile-up if it updates one, add if new); UNCAPPED,
+    no Haiku merge that silently drops facts. Dormant Postgres = the old Drive read-merge-write."""
     items = [i.strip() for i in (new_items or []) if isinstance(i, str) and i.strip()]
     if not items:
         return True
     try:
         from . import db
         if db.enabled():
-            ok = True
             for it in items:
-                ok = db.add_fact(it) and ok
-            return ok
+                _reconcile_and_store(it, db)
+            return True
     except Exception as e:
         logger.warning("add_memory: Postgres failed (%s) — Drive fallback", e)
     existing = _read_json(MEMORY_FILE_NAME).get("memories", [])
     return write_memory(merge_memories(items, existing))
+
+
+def _reconcile_and_store(text: str, db) -> None:
+    """Decide NOOP / UPDATE / ADD for one new fact and act. UPDATE archives the superseded fact
+    (kept as history — Brady's rule) and adds the fresh one, so memory compounds instead of piling."""
+    active = [f for f in db.read_facts_full()
+              if not f.get("invalid_at") and f.get("tier") != "archived"]
+    decision, target = _reconcile_fact(text, active)
+    if decision == "noop":
+        return
+    if decision == "update" and target is not None:
+        db.add_fact(text)
+        db.archive_fact(target)
+        return
+    db.add_fact(text)
+
+
+def _reconcile_fact(text: str, active_facts: list):
+    """Ask Haiku whether `text` is already known, updates an existing fact, or is new.
+    → ('noop', None) | ('update', fact_id) | ('add', None). Safe-adds on any error."""
+    if not active_facts:
+        return ("add", None)
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        numbered = "\n".join(f"{i}. {f['text']}" for i, f in enumerate(active_facts))
+        prompt = (
+            "You maintain durable memory about Brady. CURRENT facts:\n"
+            f"{numbered}\n\n"
+            f"NEW fact to file: \"{text}\"\n\n"
+            "Reply with ONE token only:\n"
+            "- NOOP  if it's already covered by an existing fact.\n"
+            "- UPDATE <n>  if it clearly REPLACES/supersedes existing fact number <n> "
+            "(the same specific thing in a newer state). Only when it plainly replaces that one.\n"
+            "- ADD  if it's genuinely new info or a new aspect not above.\n"
+            "Answer: NOOP | ADD | UPDATE <n>"
+        )
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=12,
+            messages=[{"role": "user", "content": prompt}])
+        out = (resp.content[0].text or "").strip().upper()
+        if out.startswith("NOOP"):
+            return ("noop", None)
+        if out.startswith("UPDATE"):
+            import re
+            m = re.search(r"\d+", out)
+            if m and 0 <= int(m.group()) < len(active_facts):
+                return ("update", active_facts[int(m.group())]["id"])
+        return ("add", None)
+    except Exception as e:
+        logger.warning("_reconcile_fact failed (%s) — adding as new", e)
+        return ("add", None)
 
 
 def write_memory(memories: list) -> bool:
