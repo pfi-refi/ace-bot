@@ -49,7 +49,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import chat, daybank, history, voice
+from . import chat, daybank, db, history, voice
 from .brain import (
     google_ready,
     read_memory,
@@ -326,6 +326,54 @@ async def inbox(n: int = 6):
 @app.get("/memory", dependencies=[Depends(require_auth)])
 async def memory():
     return {"memories": await asyncio.to_thread(read_memory)}
+
+
+@app.get("/memory/facts", dependencies=[Depends(require_auth)])
+async def memory_facts():
+    """Full fact rows (id, text, tier, ts, invalid_at) for curation/review. Postgres only."""
+    if not db.enabled():
+        return {"facts": [], "postgres": False}
+    return {"facts": await asyncio.to_thread(db.read_facts_full), "postgres": True}
+
+
+class CurateReq(BaseModel):
+    archive: list = []   # substrings — any LIVE fact containing one is archived (kept as history)
+    core: list = []      # substrings — matching facts promoted to tier 'core' (always pinned)
+    add: list = []       # [{"text":..., "tier":"core|active"}] new facts to add
+
+
+@app.post("/memory/curate", dependencies=[Depends(require_auth)])
+async def memory_curate(req: CurateReq):
+    """Curate durable facts: archive-not-delete stale ones, pin core ones, add fresh ones.
+    Archiving sets tier='archived' + invalid_at (searchable history, never deleted)."""
+    if not db.enabled():
+        raise HTTPException(status_code=400, detail="Postgres brain not enabled")
+
+    def _run():
+        facts = db.read_facts_full()
+        archived, cored = [], []
+        arch = [s.lower() for s in (req.archive or []) if s]
+        core = [s.lower() for s in (req.core or []) if s]
+        for f in facts:
+            low = (f.get("text") or "").lower()
+            if f.get("invalid_at"):
+                continue  # already archived
+            if arch and any(s in low for s in arch):
+                if db.archive_fact(f["id"]):
+                    archived.append(f["text"])
+            elif core and any(s in low for s in core):
+                if db.set_fact_tier(f["id"], "core"):
+                    cored.append(f["text"])
+        added = []
+        for a in (req.add or []):
+            txt = (a.get("text") if isinstance(a, dict) else str(a)) or ""
+            tier = (a.get("tier") if isinstance(a, dict) else "active") or "active"
+            if txt.strip() and db.add_fact(txt.strip(), tier=tier):
+                added.append(txt.strip())
+        return {"archived": archived, "cored": cored, "added": added,
+                "current_count": len(db.read_facts())}
+
+    return await asyncio.to_thread(_run)
 
 
 @app.get("/weather", dependencies=[Depends(require_auth)])
