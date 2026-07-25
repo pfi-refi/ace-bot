@@ -242,6 +242,9 @@ async def _live_context() -> str:
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
         "",
+        "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
+        _recap_block(),
+        "",
         "TODAY'S SCHEDULE (relative to the current time above):",
         today_sched,
         "",
@@ -440,8 +443,10 @@ def _format_calendar_window(events: list, now) -> str:
 # `prior`), so we serve those from a background-refreshed cache and format the per-turn
 # string from cache + the LIVE clock: microseconds, zero per-turn network. Primed at startup
 # (main.prime) and kept warm every ~30s.
-_CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "tasks": [], "ts": 0.0}
+_CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "tasks": [], "recap": "", "ts": 0.0}
 _CTX_TTL = 45.0
+_RECAP_TTL = 3 * 3600.0   # regenerate the "where we left off" recap at most every ~3h
+_recap_running = [False]
 _ctx_lock: asyncio.Lock = asyncio.Lock()
 _ctx_keepwarm_started = [False]
 
@@ -487,6 +492,11 @@ async def _refresh_ctx_inner() -> None:
         )
     except Exception as e:
         logger.warning("voice ctx refresh failed: %s", e)
+    # Keep the "where we left off" recap warm + regenerate if stale — background, never blocking.
+    try:
+        asyncio.create_task(_refresh_recap())
+    except Exception:
+        pass
 
 
 async def prime_ctx() -> None:
@@ -506,6 +516,67 @@ async def _ctx_keepwarm() -> None:
             break
         except Exception:
             pass
+
+
+async def _refresh_recap() -> None:
+    """Keep the 'where we left off' recap warm in _CTX, and REGENERATE it (compaction) when it's
+    stale and there are newer turns. So context COMPOUNDS: he opens every conversation knowing
+    the decisions, open loops, and what's pending — never a cold reload. Background only; never
+    on a turn's hot path. One at a time (_recap_running)."""
+    if _recap_running[0]:
+        return
+    _recap_running[0] = True
+    try:
+        from . import db
+        if not db.enabled():
+            return
+        latest = await asyncio.to_thread(db.latest_summary, "recap")
+        if latest.get("text"):
+            _CTX["recap"] = latest["text"]        # keep the current recap warm for voice
+        fresh = False
+        if latest.get("ts"):
+            try:
+                age = (datetime.now(EASTERN) - datetime.fromisoformat(latest["ts"])).total_seconds()
+                fresh = age < _RECAP_TTL
+            except Exception:
+                fresh = False
+        if fresh:
+            return
+        turns = await asyncio.to_thread(db.recent_turns, 60)
+        if not turns or len(turns) < 4:
+            return
+        convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:300]}" for t in turns[-50:])
+        client = _anthropic()
+        resp = await client.messages.create(
+            model=VOICE_MODEL, max_tokens=420,
+            messages=[{"role": "user", "content": (
+                "From this recent conversation, write Brady's assistant a tight 'where we left off' "
+                "brief so he can pick up seamlessly. Cover: decisions made, what's IN PROGRESS or "
+                "waiting on someone, open loops / promised follow-ups, and anything Brady said he "
+                "finished. 4-8 short concrete bullet lines (names, deals). No preamble.\n\n"
+                f"CONVERSATION:\n{convo}")}])
+        recap = "".join(getattr(b, "text", "") for b in resp.content).strip()
+        if recap:
+            await asyncio.to_thread(db.add_summary, recap, "recap")
+            _CTX["recap"] = recap
+            logger.info("recap regenerated (%d chars)", len(recap))
+    except Exception as e:
+        logger.warning("recap refresh failed: %s", e)
+    finally:
+        _recap_running[0] = False
+
+
+def _recap_block() -> str:
+    """The current recap for context (prefers the warm _CTX copy; falls back to a Postgres read)."""
+    recap = _CTX.get("recap") or ""
+    if not recap:
+        try:
+            from . import db
+            if db.enabled():
+                recap = (db.latest_summary("recap") or {}).get("text", "")
+        except Exception:
+            recap = ""
+    return recap or "(no recap yet — this builds after your next few conversations)"
 
 
 async def _fast_context() -> str:
@@ -559,6 +630,9 @@ async def _fast_context() -> str:
         "",
         "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
+        "",
+        "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
+        _recap_block(),
         "",
         "TODAY'S SCHEDULE (relative to the current time above):",
         _format_today_schedule(today_events, now),

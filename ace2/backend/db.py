@@ -89,6 +89,15 @@ def _init_schema():
                 superseded_by BIGINT,
                 source        TEXT DEFAULT 'ace2'
             )""")
+        # Compaction: rolling "where we left off" recaps distilled from recent conversation, so
+        # context COMPOUNDS and Ace never cold-reloads. One current recap is injected every turn.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS summaries (
+                id    BIGSERIAL PRIMARY KEY,
+                ts    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                kind  TEXT NOT NULL DEFAULT 'recap',
+                text  TEXT NOT NULL
+            )""")
 
 
 def ensure_ready():
@@ -324,6 +333,33 @@ def set_fact_tier(fact_id: int, tier: str) -> bool:
         return True
     except Exception as e:
         logger.warning("db set_fact_tier failed: %s", e)
+        return False
+
+
+# ── Compaction recaps (the "where we left off" memory) ───────────────────────────
+def latest_summary(kind: str = "recap") -> dict:
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT ts, text FROM summaries WHERE kind=%s ORDER BY id DESC LIMIT 1", (kind,))
+            r = cur.fetchone()
+        return {"ts": r[0].isoformat(), "text": r[1]} if r else {}
+    except Exception as e:
+        logger.warning("db latest_summary failed: %s", e)
+        return {}
+
+
+def add_summary(text: str, kind: str = "recap") -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("INSERT INTO summaries (kind, text) VALUES (%s, %s)", (kind, text))
+        return True
+    except Exception as e:
+        logger.warning("db add_summary failed: %s", e)
         return False
 
 
