@@ -119,9 +119,18 @@ def _build_corpus() -> list:
         logger.warning("memory_db: recovered read failed: %s", e)
 
     try:
-        for fact in brain.read_memory():
-            corpus.append({"ts": "", "source": "memory", "role": "fact",
-                           "text": fact if isinstance(fact, str) else json.dumps(fact)})
+        from . import db
+        if db.enabled():
+            # Include ARCHIVED facts here (not in live context) so recall can still surface
+            # retired facts as history — "at least he knows about it if asked" (Brady).
+            for f in db.read_facts_full():
+                tag = " [archived/history]" if (f.get("invalid_at") or f.get("tier") == "archived") else ""
+                corpus.append({"ts": f.get("ts", ""), "source": "memory", "role": "fact",
+                               "text": (f.get("text", "") or "") + tag})
+        else:
+            for fact in brain.read_memory():
+                corpus.append({"ts": "", "source": "memory", "role": "fact",
+                               "text": fact if isinstance(fact, str) else json.dumps(fact)})
     except Exception as e:
         logger.warning("memory_db: memory read failed: %s", e)
 
