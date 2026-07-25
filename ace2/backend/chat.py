@@ -500,11 +500,75 @@ async def _refresh_ctx_inner() -> None:
 
 
 async def prime_ctx() -> None:
-    """Warm the cache at startup and start the keep-warm loop (called once from main.py)."""
+    """Warm the cache at startup and start the background loops (called once from main.py):
+    the context keep-warm AND the learning sweep (Ace teaching himself from conversations)."""
     await _refresh_ctx()
     if not _ctx_keepwarm_started[0]:
         _ctx_keepwarm_started[0] = True
         asyncio.create_task(_ctx_keepwarm())
+        asyncio.create_task(_learn_loop())
+
+
+# ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───
+# himself — auto-extracting new durable facts (not only when he remembered to save one), on a
+# schedule, OFF the live conversation loop so he stays fast. This is "he builds himself" (Brady).
+_LEARN_INTERVAL = 25 * 60.0   # sweep ~every 25 min
+_learn_running = [False]
+_learn_state = {"last_hash": None}
+
+
+async def _learn_sweep_once() -> None:
+    if _learn_running[0]:
+        return
+    _learn_running[0] = True
+    try:
+        from . import db
+        if not db.enabled():
+            return
+        turns = await asyncio.to_thread(db.recent_turns, 40)
+        if not turns or len(turns) < 4:
+            return
+        convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:400]}" for t in turns)
+        h = hash(convo)
+        if h == _learn_state.get("last_hash"):
+            return   # nothing new since the last sweep — don't burn a call
+        _learn_state["last_hash"] = h
+        existing = await asyncio.to_thread(brain.read_memory)
+        client = _anthropic()
+        resp = await client.messages.create(
+            model=VOICE_MODEL, max_tokens=500,
+            messages=[{"role": "user", "content": (
+                "You are Ace's background LEARNING sweep. From this recent conversation with Brady, "
+                "extract any NEW durable facts worth remembering long-term: goals, a deal or "
+                "person's status/change, commitments he made, preferences, decisions. LASTING facts "
+                "ONLY — skip small talk, one-off logistics, and anything already in KNOWN FACTS. "
+                "Absolute dates. One fact per line, ~15 words, no bullets. If nothing is genuinely "
+                "new, reply with the single word NONE.\n\n"
+                "KNOWN FACTS:\n" + ("\n".join(f"- {m}" for m in (existing or [])[:80]) or "(none)")
+                + f"\n\nCONVERSATION:\n{convo}")}])
+        text = "".join(getattr(b, "text", "") for b in resp.content).strip()
+        if not text or text.upper().startswith("NONE"):
+            return
+        facts = [ln.strip("-•* ").strip() for ln in text.split("\n")
+                 if len(ln.strip()) > 8 and not ln.strip().upper().startswith("NONE")]
+        if facts:
+            await asyncio.to_thread(brain.add_memory, facts, "sweep")
+            logger.info("learn sweep: filed %d candidate fact(s)", len(facts))
+    except Exception as e:
+        logger.warning("learn sweep failed: %s", e)
+    finally:
+        _learn_running[0] = False
+
+
+async def _learn_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(_LEARN_INTERVAL)
+            await _learn_sweep_once()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
 
 
 async def _ctx_keepwarm() -> None:

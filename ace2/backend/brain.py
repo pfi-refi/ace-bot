@@ -113,10 +113,11 @@ def read_memory() -> list:
     return _read_json(MEMORY_FILE_NAME).get("memories", [])
 
 
-def add_memory(new_items: list) -> bool:
+def add_memory(new_items: list, source: str = "ace2") -> bool:
     """Add durable fact(s) — COMPOUNDING. Postgres path reconciles each new fact against the
     current ones (skip if known, supersede-not-pile-up if it updates one, add if new); UNCAPPED,
-    no Haiku merge that silently drops facts. Dormant Postgres = the old Drive read-merge-write."""
+    no Haiku merge that silently drops facts. `source` tags where it came from ('sweep' = the
+    background learning agent, so auto-learned facts are reviewable). Dormant Postgres = Drive."""
     items = [i.strip() for i in (new_items or []) if isinstance(i, str) and i.strip()]
     if not items:
         return True
@@ -124,7 +125,7 @@ def add_memory(new_items: list) -> bool:
         from . import db
         if db.enabled():
             for it in items:
-                _reconcile_and_store(it, db)
+                _reconcile_and_store(it, db, source)
             return True
     except Exception as e:
         logger.warning("add_memory: Postgres failed (%s) — Drive fallback", e)
@@ -132,7 +133,7 @@ def add_memory(new_items: list) -> bool:
     return write_memory(merge_memories(items, existing))
 
 
-def _reconcile_and_store(text: str, db) -> None:
+def _reconcile_and_store(text: str, db, source: str = "ace2") -> None:
     """Decide NOOP / UPDATE / ADD for one new fact and act. UPDATE archives the superseded fact
     (kept as history — Brady's rule) and adds the fresh one, so memory compounds instead of piling."""
     active = [f for f in db.read_facts_full()
@@ -141,10 +142,10 @@ def _reconcile_and_store(text: str, db) -> None:
     if decision == "noop":
         return
     if decision == "update" and target is not None:
-        db.add_fact(text)
+        db.add_fact(text, source=source)
         db.archive_fact(target)
         return
-    db.add_fact(text)
+    db.add_fact(text, source=source)
 
 
 def _reconcile_fact(text: str, active_facts: list):
