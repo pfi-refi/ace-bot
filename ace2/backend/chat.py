@@ -58,6 +58,11 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
 VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
+# The background LEARNING/TRIAGE sweep is NOT latency-bound — it runs every ~25 min off the
+# live path — so it gets Ace's REAL brain (Opus), not the fast voice model. Haiku was badly
+# under-reading dense brain dumps (a long Saturday dump → 0 facts, 5 tasks, most of it dropped).
+# Override with ACE2_LEARN_MODEL to trade cost for depth (e.g. claude-sonnet-5).
+LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", MODEL)
 # On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
 # confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
 # says yes, only then does the second call actually send). Built once for cache stability.
@@ -530,7 +535,10 @@ async def _learn_sweep_once(force: bool = False) -> dict:
         turns = await asyncio.to_thread(db.recent_turns, 40)
         if not turns or len(turns) < 4:
             return {"skipped": "too few turns"}
-        convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:400]}" for t in turns)
+        # Keep near-full turns: Brady's brain-dump turns run 1000-1600 chars and the old 400-char
+        # cap silently dropped the SECOND half of every long turn (where most deals/people/status
+        # updates lived) — a primary reason the sweep under-captured. Opus can hold the whole thing.
+        convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:2000]}" for t in turns)
         h = hash(convo)
         if not force and h == _learn_state.get("last_hash"):
             return {"skipped": "no change"}   # nothing new since the last sweep — don't burn a call
@@ -538,14 +546,22 @@ async def _learn_sweep_once(force: bool = False) -> dict:
         existing = await asyncio.to_thread(brain.read_memory)
         client = _anthropic()
         resp = await client.messages.create(
-            model=VOICE_MODEL, max_tokens=500,
+            model=LEARN_MODEL, max_tokens=1500,
             messages=[{"role": "user", "content": (
-                "You are Ace's background LEARNING sweep. From this recent conversation with Brady, "
-                "extract any NEW durable facts worth remembering long-term: goals, a deal or "
-                "person's status/change, commitments he made, preferences, decisions. LASTING facts "
-                "ONLY — skip small talk, one-off logistics, and anything already in KNOWN FACTS. "
-                "Absolute dates. One fact per line, ~15 words, no bullets. If nothing is genuinely "
-                "new, reply with the single word NONE.\n\n"
+                "You are Ace's background LEARNING sweep — Brady's second brain. Read this whole "
+                "conversation and extract EVERY new durable fact worth remembering. Be THOROUGH, "
+                "not conservative: he is brain-dumping and trusts you to catch all of it. Capture "
+                "each of these when present:\n"
+                "- a NEW person/prospect/agent and who they are (e.g. 'Vicks — 65, retired buggy "
+                "operator at the port, new prospect')\n"
+                "- any change in a deal's or person's STATUS (e.g. 'Corrine leaving the company "
+                "after the Kiana Wiggins deal closes')\n"
+                "- commitments, plans, splits, reschedules (e.g. 'Walter splitting his past deals "
+                "50/50 with Brady'), and decisions\n"
+                "Rules: skip pure small talk and things ALREADY covered by KNOWN FACTS. Convert "
+                "relative dates to absolute. One fact per line, ~20 words, no bullets/numbering. "
+                "Err toward capturing — a missed fact is worse than a slightly redundant one. "
+                "If truly nothing new, reply with the single word NONE.\n\n"
                 "KNOWN FACTS:\n" + ("\n".join(f"- {m}" for m in (existing or [])[:80]) or "(none)")
                 + f"\n\nCONVERSATION:\n{convo}")}])
         text = "".join(getattr(b, "text", "") for b in resp.content).strip()
@@ -573,13 +589,17 @@ async def _learn_sweep_once(force: bool = False) -> dict:
             current = "\n".join(f"- [{l.get('list')}] {t.get('title')}"
                                 for l in lists for t in l.get("tasks", []))
             resp2 = await client.messages.create(
-                model=VOICE_MODEL, max_tokens=500,
+                model=LEARN_MODEL, max_tokens=1200,
                 messages=[{"role": "user", "content": (
-                    "You are Ace's background triage. From this recent conversation, extract the "
-                    "ACTIONABLE to-dos Brady needs to DO or follow up on — concrete next actions "
-                    "ONLY. Skip pure facts/status notes and anything ALREADY on his lists. Assign "
-                    "each to the single best-fitting list. One per line, EXACTLY: LIST :: task "
-                    "title. If none, reply with the single word NONE.\n\n"
+                    "You are Ace's background triage — Brady's safety net so nothing he says slips. "
+                    "From this whole conversation, extract EVERY actionable to-do or follow-up he "
+                    "needs to DO — be thorough. Include concrete next actions AND soft follow-ups "
+                    "(e.g. 'respond to Nikki T's text', 'touch base with the wedding couple midweek', "
+                    "'meet new agent Wednesday 2 PM', 'business cards for grandfather'). Keep each "
+                    "title specific and self-contained (name + what + any date). Skip anything "
+                    "ALREADY on his lists and pure status notes with no action. Put each on the "
+                    "single best-fitting list. One per line, EXACTLY: LIST :: task title. A missed "
+                    "to-do is worse than a slightly redundant one. If truly none, reply NONE.\n\n"
                     "HIS LISTS: " + ", ".join(names) + "\n\n"
                     "ALREADY ON HIS LISTS:\n" + (current or "(none)") + "\n\n"
                     f"CONVERSATION:\n{convo}")}])
