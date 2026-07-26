@@ -948,6 +948,15 @@
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-msg]'), function (btn) {
     btn.addEventListener('click', function () { sendMessage(btn.getAttribute('data-msg')); });
   });
+  // "Plan my week" — the marquee ritual. Force CHAT (his DEEP brain = Opus, and silent so he
+  // reads Ace's questions instead of hearing them), OPEN the conversation tab so the back-and-forth
+  // is visible, then fire the trigger phrase that lights up rule 14 (ask clarifying questions first,
+  // then build the day-by-day plan). Not a data-msg button on purpose — it needs this extra setup.
+  $('plan-week-btn').addEventListener('click', function () {
+    setMode('chat');            // kills voice/TTS, opens the conversation (no-op if already chat)
+    setChat(true);              // ...ensure it's open even if he was already in chat mode
+    sendMessage('Plan my week');
+  });
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

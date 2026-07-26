@@ -406,6 +406,16 @@ body {
     linear-gradient(180deg, rgba(12,30,25,.7), rgba(6,16,17,.5)) padding-box,
     linear-gradient(180deg, var(--aurora-40), rgba(83,231,255,.15)) border-box; }
 .qa:focus-visible { outline: 2px solid var(--aurora); outline-offset: 2px; }
+/* "Plan my week" — the marquee quick-action: aurora-lit fill + text so it stands out from the daily three. */
+.qa-plan { color: var(--aurora);
+  background:
+    linear-gradient(180deg, rgba(69,255,166,.18), rgba(69,255,166,.06)) padding-box,
+    linear-gradient(180deg, var(--aurora-40), rgba(69,255,166,.18)) border-box;
+  box-shadow: 0 0 14px -4px var(--aurora-25); }
+.qa-plan:hover { color: #eafff6;
+  background:
+    linear-gradient(180deg, rgba(69,255,166,.28), rgba(69,255,166,.1)) padding-box,
+    linear-gradient(180deg, var(--aurora), rgba(83,231,255,.2)) border-box; }
 
 #input-bar { width: min(720px, 92vw); justify-self: center; display: flex; align-items: center; gap: 10px;
   padding: 10px 12px; border-radius: var(--r-lg);
