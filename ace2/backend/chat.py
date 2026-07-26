@@ -43,7 +43,8 @@ from .integrations.calendar_api import (
 )
 from .integrations import mcp_client
 from .integrations.tasks_api import (
-    get_gmail_summary, get_inbox_structured, get_task_lists_grouped, get_tasks, get_tasks_structured,
+    add_task, get_gmail_summary, get_inbox_structured, get_task_lists_grouped, get_tasks,
+    get_tasks_structured,
 )
 from .integrations.weather import get_weather
 from .system_prompt import build_system_prompt
@@ -554,6 +555,44 @@ async def _learn_sweep_once() -> None:
         if facts:
             await asyncio.to_thread(brain.add_memory, facts, "sweep")
             logger.info("learn sweep: filed %d candidate fact(s)", len(facts))
+
+        # TRIAGE half of the sweep: also route ACTIONABLE to-dos from the conversation into his
+        # Google Tasks lists — the reliable "brain dump → checklist" catcher (live Ace often
+        # narrates "locked in" without actually creating them). Deduped against what's already on
+        # his lists; the model picks the right list by name. NO TOUCH lists are excluded.
+        try:
+            lists = await asyncio.to_thread(get_task_lists_grouped)
+            names = [l.get("list", "") for l in lists
+                     if l.get("list") and "NO TOUCH" not in l.get("list", "").upper()]
+            current = "\n".join(f"- [{l.get('list')}] {t.get('title')}"
+                                for l in lists for t in l.get("tasks", []))
+            resp2 = await client.messages.create(
+                model=VOICE_MODEL, max_tokens=500,
+                messages=[{"role": "user", "content": (
+                    "You are Ace's background triage. From this recent conversation, extract the "
+                    "ACTIONABLE to-dos Brady needs to DO or follow up on — concrete next actions "
+                    "ONLY. Skip pure facts/status notes and anything ALREADY on his lists. Assign "
+                    "each to the single best-fitting list. One per line, EXACTLY: LIST :: task "
+                    "title. If none, reply with the single word NONE.\n\n"
+                    "HIS LISTS: " + ", ".join(names) + "\n\n"
+                    "ALREADY ON HIS LISTS:\n" + (current or "(none)") + "\n\n"
+                    f"CONVERSATION:\n{convo}")}])
+            t2 = "".join(getattr(b, "text", "") for b in resp2.content).strip()
+            if t2 and not t2.upper().startswith("NONE"):
+                routed = 0
+                for ln in t2.split("\n"):
+                    if "::" not in ln:
+                        continue
+                    lst, title = ln.split("::", 1)
+                    lst, title = lst.strip("-•* ").strip(), title.strip()
+                    if len(title) > 4 and lst:
+                        ok, _, dup = await asyncio.to_thread(add_task, title, lst)
+                        if ok and not dup:
+                            routed += 1
+                if routed:
+                    logger.info("triage sweep: routed %d to-do(s) to Google Tasks", routed)
+        except Exception as e:
+            logger.warning("triage sweep (tasks) failed: %s", e)
     except Exception as e:
         logger.warning("learn sweep failed: %s", e)
     finally:
