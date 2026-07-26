@@ -47,7 +47,7 @@ def get_tasks_structured(skip_reference: bool = False) -> list:
                 continue
             try:
                 tasks_result = service.tasks().list(
-                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=20,
+                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=100,
                 ).execute()
                 for task in tasks_result.get("items", []):
                     if task.get("status") == "completed":
@@ -89,7 +89,7 @@ def get_tasks(skip_reference: bool = False) -> str:
                 continue
             try:
                 tasks_result = service.tasks().list(
-                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=20,
+                    tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=100,
                 ).execute()
                 for task in tasks_result.get("items", []):
                     if task.get("status") == "completed":
