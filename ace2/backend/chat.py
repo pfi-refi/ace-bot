@@ -549,10 +549,14 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                 "KNOWN FACTS:\n" + ("\n".join(f"- {m}" for m in (existing or [])[:80]) or "(none)")
                 + f"\n\nCONVERSATION:\n{convo}")}])
         text = "".join(getattr(b, "text", "") for b in resp.content).strip()
+        # No NEW facts is fine — but the two halves are INDEPENDENT. A bare `return` here
+        # (the old bug) skipped task-triage entirely whenever nothing new was learnable, which
+        # is the common case once a day's facts are already filed. Fall through to triage.
         if not text or text.upper().startswith("NONE"):
-            return
-        facts = [ln.strip("-•* ").strip() for ln in text.split("\n")
-                 if len(ln.strip()) > 8 and not ln.strip().upper().startswith("NONE")]
+            facts = []
+        else:
+            facts = [ln.strip("-•* ").strip() for ln in text.split("\n")
+                     if len(ln.strip()) > 8 and not ln.strip().upper().startswith("NONE")]
         if facts:
             await asyncio.to_thread(brain.add_memory, facts, "sweep")
             filed = len(facts)
