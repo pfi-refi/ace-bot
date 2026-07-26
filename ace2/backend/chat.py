@@ -518,21 +518,22 @@ _learn_running = [False]
 _learn_state = {"last_hash": None}
 
 
-async def _learn_sweep_once() -> None:
+async def _learn_sweep_once(force: bool = False) -> dict:
     if _learn_running[0]:
-        return
+        return {"skipped": "busy"}
     _learn_running[0] = True
+    filed, routed = 0, 0
     try:
         from . import db
         if not db.enabled():
-            return
+            return {"skipped": "no db"}
         turns = await asyncio.to_thread(db.recent_turns, 40)
         if not turns or len(turns) < 4:
-            return
+            return {"skipped": "too few turns"}
         convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:400]}" for t in turns)
         h = hash(convo)
-        if h == _learn_state.get("last_hash"):
-            return   # nothing new since the last sweep — don't burn a call
+        if not force and h == _learn_state.get("last_hash"):
+            return {"skipped": "no change"}   # nothing new since the last sweep — don't burn a call
         _learn_state["last_hash"] = h
         existing = await asyncio.to_thread(brain.read_memory)
         client = _anthropic()
@@ -554,7 +555,8 @@ async def _learn_sweep_once() -> None:
                  if len(ln.strip()) > 8 and not ln.strip().upper().startswith("NONE")]
         if facts:
             await asyncio.to_thread(brain.add_memory, facts, "sweep")
-            logger.info("learn sweep: filed %d candidate fact(s)", len(facts))
+            filed = len(facts)
+            logger.info("learn sweep: filed %d candidate fact(s)", filed)
 
         # TRIAGE half of the sweep: also route ACTIONABLE to-dos from the conversation into his
         # Google Tasks lists — the reliable "brain dump → checklist" catcher (live Ace often
@@ -593,8 +595,10 @@ async def _learn_sweep_once() -> None:
                     logger.info("triage sweep: routed %d to-do(s) to Google Tasks", routed)
         except Exception as e:
             logger.warning("triage sweep (tasks) failed: %s", e)
+        return {"facts": filed, "tasks": routed}
     except Exception as e:
         logger.warning("learn sweep failed: %s", e)
+        return {"error": str(e)}
     finally:
         _learn_running[0] = False
 

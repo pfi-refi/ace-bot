@@ -342,6 +342,13 @@ class CurateReq(BaseModel):
     add: list = []       # [{"text":..., "tier":"core|active"}] new facts to add
 
 
+@app.post("/memory/sweep", dependencies=[Depends(require_auth)])
+async def memory_sweep():
+    """Run the learning + triage sweep NOW (extract new facts to memory + route actionable
+    to-dos from recent conversation into the right Google Tasks list). Returns what it did."""
+    return await chat._learn_sweep_once(force=True)
+
+
 @app.post("/memory/curate", dependencies=[Depends(require_auth)])
 async def memory_curate(req: CurateReq):
     """Curate durable facts: archive-not-delete stale ones, pin core ones, add fresh ones.
