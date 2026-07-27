@@ -578,10 +578,14 @@ async def _learn_sweep_once(force: bool = False) -> dict:
             filed = len(facts)
             logger.info("learn sweep: filed %d candidate fact(s)", filed)
 
-        # TRIAGE half of the sweep: also route ACTIONABLE to-dos from the conversation into his
-        # Google Tasks lists — the reliable "brain dump → checklist" catcher (live Ace often
-        # narrates "locked in" without actually creating them). Deduped against what's already on
-        # his lists; the model picks the right list by name. NO TOUCH lists are excluded.
+        # TRIAGE → Google Tasks: DISABLED 2026-07-27. Writing to Google Tasks caused DUPLICATION
+        # and RESURRECTION — the dedup only checked OPEN tasks, so a task Brady completed was no
+        # longer "on the list" and the next sweep re-added it (and reworded near-dupes slipped past
+        # exact-match dedup). Business to-dos are moving to Ace's OWN data bank: id-based completion,
+        # cannot resurrect. Early-return here so the sweep still learns FACTS but never touches
+        # Google Tasks. The block below is now unreachable — kept for reference until it's rewritten
+        # to write into the data bank with dedup against open AND done items.
+        return {"facts": filed, "tasks": routed}
         try:
             lists = await asyncio.to_thread(get_task_lists_grouped)
             names = [l.get("list", "") for l in lists
