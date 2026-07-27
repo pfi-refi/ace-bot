@@ -278,6 +278,20 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
         return False, str(e)
 
 
+def set_item_tags(item_id: str, tags: list) -> bool:
+    """Replace an item's tags (used to backfill/repair categories). True on success."""
+    ensure_ready()
+    try:
+        import json
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("UPDATE daybank_items SET tags = %s::jsonb WHERE id = %s",
+                        (json.dumps(tags or []), item_id))
+        return True
+    except Exception as e:
+        logger.warning("db set_item_tags failed: %s", e)
+        return False
+
+
 # ── Durable facts (replaces brain.py's capped, bot-shared Drive ace_memory.json) ─
 def read_facts(include_archived: bool = False) -> list:
     """Current durable facts as plain strings, core tier first. Archived facts stay in the

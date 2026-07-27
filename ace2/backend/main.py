@@ -483,6 +483,41 @@ async def daybank_migrate(req: MigrateReq):
     }
 
 
+@app.post("/daybank/categorize", dependencies=[Depends(require_auth)])
+async def daybank_categorize():
+    """One-time backfill: give a category tag to any open item that lacks one, so the Command
+    panel's Pipeline view groups everything correctly."""
+    import re
+    from . import chat, db as _db
+    CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
+    items = await asyncio.to_thread(daybank.read_items, False)
+    untagged = [it for it in items if it.get("status") != "done"
+                and not any(t in CATS for t in (it.get("tags") or []))]
+    if not untagged:
+        return {"categorized": 0, "of": 0}
+    numbered = "\n".join(f"{i}. {it.get('text', '')}" for i, it in enumerate(untagged))
+    client = chat._anthropic()
+    resp = await client.messages.create(
+        model=chat.LEARN_MODEL, max_tokens=1500,
+        messages=[{"role": "user", "content": (
+            "Assign each of Brady's business tasks a single CATEGORY from exactly: Deals, Agents, "
+            "Admin, Networking, Business, Tech. Reply one per line, EXACTLY: <number>. <Category>\n\n"
+            + numbered)}])
+    out = "".join(getattr(b, "text", "") for b in resp.content)
+    done = 0
+    for ln in out.split("\n"):
+        m = re.match(r"\s*(\d+)\.\s*([A-Za-z]+)", ln)
+        if not m:
+            continue
+        idx, cat = int(m.group(1)), m.group(2).capitalize()
+        if 0 <= idx < len(untagged) and cat in CATS:
+            it = untagged[idx]
+            newtags = [t for t in (it.get("tags") or []) if t not in CATS] + [cat]
+            if await asyncio.to_thread(_db.set_item_tags, it["id"], newtags):
+                done += 1
+    return {"categorized": done, "of": len(untagged)}
+
+
 @app.post("/daybank/update", dependencies=[Depends(require_auth)])
 async def daybank_update(req: DaybankUpdateReq):
     """Toggle an item from the HUD checkbox. Mutates Ace's OWN private data-bank
