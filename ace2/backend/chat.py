@@ -595,7 +595,7 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                     "T's text', 'touch base with the wedding couple midweek', 'meet new agent "
                     "Wednesday 2 PM'). Keep each title specific and self-contained (name + what + any "
                     "date). Skip pure status notes and anything ALREADY tracked below. Give each a "
-                    "short CATEGORY from: Deals, Agents, Business, Networking, Personal, Admin. "
+                    "short CATEGORY from: Deals, Agents, Admin, Networking, Business, Tech. "
                     "One per line, EXACTLY: CATEGORY :: task title. If none, reply NONE.\n\n"
                     "ALREADY TRACKED:\n" + (tracked or "(none)") + "\n\n"
                     f"CONVERSATION:\n{convo}")}])

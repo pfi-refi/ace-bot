@@ -389,13 +389,31 @@ async def weather():
 
 
 @app.get("/daybank", dependencies=[Depends(require_auth)])
-async def daybank_read():
-    return {"items": await asyncio.to_thread(daybank.read_items, True)}
+async def daybank_read(all: bool = False):
+    # all=true also returns done items across days (for the panel's "Done" lens); default is the
+    # active view (open items + anything touched today).
+    return {"items": await asyncio.to_thread(daybank.read_items, not all)}
 
 
 class DaybankUpdateReq(BaseModel):
     id: str = ""
     status: str = ""  # "open" | "done"
+
+
+class DaybankAddReq(BaseModel):
+    text: str = ""
+    category: str = ""   # Deals | Agents | Admin | Networking | Business | Tech
+
+
+@app.post("/daybank/add", dependencies=[Depends(require_auth)])
+async def daybank_add(req: DaybankAddReq):
+    """Add a task from the Command panel into Ace's OWN store (deduped against open AND done, so
+    no twins and no resurrection). Category rides as a tag for grouping/filtering."""
+    tags = [req.category] if (req.category or "").strip() else None
+    ok, res = await asyncio.to_thread(daybank.add_item, "todo", req.text, None, tags)
+    dup = bool(isinstance(res, dict) and res.get("dup"))
+    items = await asyncio.to_thread(daybank.read_items, True)
+    return {"ok": ok, "dup": dup, "items": items}
 
 
 @app.post("/daybank/update", dependencies=[Depends(require_auth)])
