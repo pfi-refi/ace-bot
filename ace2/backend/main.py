@@ -416,6 +416,73 @@ async def daybank_add(req: DaybankAddReq):
     return {"ok": ok, "dup": dup, "items": items}
 
 
+class MigrateReq(BaseModel):
+    dry_run: bool = True
+
+
+@app.post("/daybank/migrate", dependencies=[Depends(require_auth)])
+async def daybank_migrate(req: MigrateReq):
+    """One-time migration: reconcile Brady's BUSINESS Google Tasks against what's already in Ace's
+    store and import only what's genuinely MISSING — treating reworded/paraphrased versions as
+    duplicates so nothing double-adds. ADDITIVE ONLY: never deletes anything from Google Tasks.
+    dry_run=true (default) reports what WOULD import without writing a thing."""
+    from .integrations.tasks_api import get_task_lists_grouped
+    from . import chat
+    SKIP = ("personal", "goal", "no touch")   # these stay in Google Tasks
+    grouped = await asyncio.to_thread(get_task_lists_grouped)
+    g_items = []
+    for l in grouped:
+        name = (l.get("list") or "")
+        if any(s in name.lower() for s in SKIP):
+            continue
+        for t in l.get("tasks", []):
+            title = (t.get("title") or "").strip()
+            if title:
+                g_items.append(f"[{name}] {title}")
+    existing = await asyncio.to_thread(daybank.read_items, False)
+    have = "\n".join(f"- {it.get('text', '')}" for it in existing)
+    gtxt = "\n".join(f"- {g}" for g in g_items)
+    client = chat._anthropic()
+    resp = await client.messages.create(
+        model=chat.LEARN_MODEL, max_tokens=2500,
+        messages=[{"role": "user", "content": (
+            "Migrate Brady's business tasks from Google Tasks into Ace's store. Two lists follow: "
+            "what's ALREADY IN ACE, and what's in GOOGLE (business lists). Return ONLY the Google "
+            "tasks that are genuinely NOT already represented in Ace. CRITICAL: treat reworded, "
+            "paraphrased, or shorthand versions of the same task as DUPLICATES and DROP them — both "
+            "against Ace's list AND against each other (Google itself has reworded dupes). When "
+            "unsure whether two refer to the same real task, treat them as the SAME (drop it) rather "
+            "than risk a double-add. Assign each kept task a CATEGORY from: Deals, Agents, Admin, "
+            "Networking, Business, Tech. One per line, EXACTLY: CATEGORY :: task title. If every "
+            "Google task is already covered, reply NONE.\n\n"
+            "ALREADY IN ACE:\n" + (have or "(none)") + "\n\n"
+            "IN GOOGLE (business lists):\n" + (gtxt or "(none)"))}])
+    out = "".join(getattr(b, "text", "") for b in resp.content).strip()
+    proposed = []
+    for ln in out.split("\n"):
+        if "::" not in ln:
+            continue
+        cat, title = ln.split("::", 1)
+        cat, title = cat.strip("-•* ").strip(), title.strip()
+        if len(title) > 3:
+            proposed.append({"category": cat, "title": title})
+    imported = 0
+    if not req.dry_run:
+        for p in proposed:
+            ok, res = await asyncio.to_thread(
+                daybank.add_item, "todo", p["title"], None, [p["category"], "migrated"])
+            if ok and not (isinstance(res, dict) and res.get("dup")):
+                imported += 1
+    return {
+        "dry_run": req.dry_run,
+        "google_business_tasks": len(g_items),
+        "already_in_ace": len(existing),
+        "proposed_new": proposed,
+        "proposed_count": len(proposed),
+        "imported": imported,
+    }
+
+
 @app.post("/daybank/update", dependencies=[Depends(require_auth)])
 async def daybank_update(req: DaybankUpdateReq):
     """Toggle an item from the HUD checkbox. Mutates Ace's OWN private data-bank
