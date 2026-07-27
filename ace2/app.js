@@ -939,6 +939,78 @@
     } catch (e) { ttsPlaying = false; }
   }
 
+  /* ============================================================ COMMAND PANEL
+     Ace's OWN task/pipeline surface — replaces Google Tasks. A summonable full-screen
+     overlay that collapses to a clean orb; reads/writes the data bank via /daybank. */
+  var CMD_CATS = { Deals:'#45ffa6', Agents:'#53e7ff', Admin:'#ffce7a', Networking:'#b79dff', Business:'#ff9e7a', Tech:'#7aa2ff' };
+  var CMD_ORDER = ['Deals','Agents','Admin','Networking','Business','Tech'];
+  var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[] };
+  function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
+  function cmdFetch(){
+    return fetch(API+'/daybank?all=true',{headers:headers()})
+      .then(function(r){ if(r.status===401){toLogin();throw 0;} return r.json(); })
+      .then(function(d){ cmd.items=(d.items||[]); });
+  }
+  function cmdOpen(){
+    cmd.open=true; cmd.min=false;
+    var v=document.getElementById('command-view');
+    if(!v){ v=document.createElement('div'); v.id='command-view'; $('app').appendChild(v); }
+    v.style.display='flex'; v.innerHTML='<div class="cmd-empty">loading…</div>';
+    cmdFetch().then(cmdRender).catch(function(){});
+  }
+  function cmdClose(){ cmd.open=false; var v=document.getElementById('command-view'); if(v) v.style.display='none'; }
+  function cmdRow(it){
+    var c=cmdCatOf(it), done=it.status==='done';
+    return '<div class="cmd-row '+(done?'done':'')+'" data-id="'+it.id+'"><div class="cmd-box"></div>'
+      +'<div class="cmd-b"><div class="cmd-t">'+cmdEsc(it.text)+'</div><div class="cmd-m">'
+      +'<span class="cmd-tag"><span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>'+c+'</span>'
+      +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')+'</div></div></div>';
+  }
+  function cmdRender(){
+    var v=document.getElementById('command-view'); if(!v) return;
+    if(cmd.min){
+      var nx=cmd.items.filter(function(x){return x.status!=='done';})[0];
+      v.innerHTML='<div class="cmd-clean"><div class="cmd-orb-big" id="cmd-orb-big"></div>'
+        +'<div class="cmd-cap">tap the orb to open <b>Command</b></div>'
+        +(nx?'<div class="cmd-up">Next: <span>'+cmdEsc(nx.text)+'</span></div>':'')+'</div>';
+      var o=v.querySelector('#cmd-orb-big'); if(o) o.onclick=function(){ cmd.min=false; cmdRender(); };
+      return;
+    }
+    var chips=['All'].concat(CMD_ORDER).map(function(c){
+      var dot=c==='All'?'':'<span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>';
+      return '<button class="cmd-chip '+(c===cmd.cat?'on':'')+'" data-cat="'+c+'">'+dot+c+'</button>';
+    }).join('');
+    var LN={pipeline:'Pipeline',all:'All',done:'Done'};
+    var lenses=['pipeline','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
+    var items=cmd.items.filter(function(x){ return cmd.cat==='All'||cmdCatOf(x)===cmd.cat; });
+    var body='';
+    if(cmd.lens==='done'){ body=items.filter(function(x){return x.status==='done';}).map(cmdRow).join(''); }
+    else if(cmd.lens==='all'){ body=items.filter(function(x){return x.status!=='done';}).map(cmdRow).join(''); }
+    else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status!=='done';}); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
+    if(!body) body='<div class="cmd-empty">— clear —</div>';
+    var addCat=cmd.cat==='All'?'Deals':cmd.cat;
+    v.innerHTML='<div class="cmd-hd"><div class="cmd-orb"></div><div class="cmd-ttl">COMMAND</div>'
+      +'<button class="cmd-ic" id="cmd-min" title="Clean view">⌄</button><button class="cmd-ic" id="cmd-x" title="Close">✕</button></div>'
+      +'<div class="cmd-lens">'+lenses+'</div><div class="cmd-chips">'+chips+'</div>'
+      +'<div class="cmd-list">'+body+'</div>'
+      +'<form class="cmd-add" id="cmd-add"><span class="cmd-plus">+</span><input id="cmd-input" placeholder="Add to '+addCat+'…" autocomplete="off"></form>';
+    v.querySelector('#cmd-x').onclick=cmdClose;
+    v.querySelector('#cmd-min').onclick=function(){ cmd.min=true; cmdRender(); };
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-chip'), function(b){ b.onclick=function(){ cmd.cat=b.getAttribute('data-cat'); cmdRender(); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=function(){
+      var id=b.parentNode.getAttribute('data-id');
+      var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
+      var ns=it.status==='done'?'open':'done'; it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
+      fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:ns})}).catch(function(){});
+    }; });
+    var f=v.querySelector('#cmd-add');
+    if(f) f.onsubmit=function(e){ e.preventDefault(); var inp=v.querySelector('#cmd-input'); var t=(inp.value||'').trim(); if(!t) return; inp.value='';
+      fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat})})
+        .then(function(){ return cmdFetch(); }).then(cmdRender).catch(function(){}); };
+  }
+
   /* ============================================================ WIRING */
   // Chat panel stays hidden until Brady toggles it — sends never auto-open it. Every reply
   // still glows the toggle (markUnread) so he knows one landed, and Ace speaks it; cards render
@@ -957,6 +1029,8 @@
     setChat(true);              // ...ensure it's open even if he was already in chat mode
     sendMessage('Plan my week');
   });
+  // "Command" — summon Ace's own task/pipeline board (his store, not Google Tasks).
+  $('command-btn').addEventListener('click', cmdOpen);
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });
