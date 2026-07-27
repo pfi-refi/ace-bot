@@ -227,7 +227,19 @@ def read_items(active_only: bool = True) -> list:
         return []
 
 
-def add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
+_ITEM_STOP = {"the", "a", "an", "to", "for", "of", "and", "on", "in", "at", "with", "i", "my",
+              "me", "he", "him", "his", "her", "we", "us", "get", "got", "need", "needs", "needto",
+              "follow", "followup", "up", "w", "re", "this", "that", "is", "are", "be", "do", "by"}
+
+
+def _norm_item(text: str):
+    """Token set for near-duplicate detection: lowercased alnum words minus stopwords."""
+    import re
+    toks = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return frozenset(t for t in toks if len(t) > 1 and t not in _ITEM_STOP)
+
+
+def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True) -> tuple:
     text = (text or "").strip()
     if not text:
         return False, "empty text"
@@ -235,6 +247,19 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
     if kind not in KINDS:
         kind = "note"
     ensure_ready()
+    # Dedup against OPEN *and* DONE items so nothing duplicates or resurrects (the Google Tasks
+    # bug in reverse): a near-match returns the existing item flagged {"dup": True} instead of
+    # inserting a twin. Data bank is small, so the full scan is cheap.
+    if dedup:
+        norm = _norm_item(text)
+        if norm:
+            for it in read_items(active_only=False):
+                other = _norm_item(it.get("text", ""))
+                if not other:
+                    continue
+                inter = len(norm & other)
+                if other == norm or (inter >= 2 and inter / min(len(norm), len(other)) >= 0.8):
+                    return True, {**it, "dup": True}
     item = {
         "id": uuid.uuid4().hex[:8], "ts": datetime.now(EASTERN).isoformat(),
         "kind": kind, "text": text, "status": "open", "tags": tags or [],

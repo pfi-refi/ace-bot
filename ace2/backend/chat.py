@@ -578,51 +578,43 @@ async def _learn_sweep_once(force: bool = False) -> dict:
             filed = len(facts)
             logger.info("learn sweep: filed %d candidate fact(s)", filed)
 
-        # TRIAGE → Google Tasks: DISABLED 2026-07-27. Writing to Google Tasks caused DUPLICATION
-        # and RESURRECTION — the dedup only checked OPEN tasks, so a task Brady completed was no
-        # longer "on the list" and the next sweep re-added it (and reworded near-dupes slipped past
-        # exact-match dedup). Business to-dos are moving to Ace's OWN data bank: id-based completion,
-        # cannot resurrect. Early-return here so the sweep still learns FACTS but never touches
-        # Google Tasks. The block below is now unreachable — kept for reference until it's rewritten
-        # to write into the data bank with dedup against open AND done items.
-        return {"facts": filed, "tasks": routed}
+        # TRIAGE → Ace's OWN data bank (not Google Tasks, as of 2026-07-27). Google Tasks writes
+        # caused duplication + resurrection (dedup only saw OPEN tasks, so completed items got
+        # re-added). The data bank dedups against OPEN *and* DONE items and completes by id, so
+        # nothing duplicates or comes back. A short CATEGORY rides along as a tag for the portal.
         try:
-            lists = await asyncio.to_thread(get_task_lists_grouped)
-            names = [l.get("list", "") for l in lists
-                     if l.get("list") and "NO TOUCH" not in l.get("list", "").upper()]
-            current = "\n".join(f"- [{l.get('list')}] {t.get('title')}"
-                                for l in lists for t in l.get("tasks", []))
+            from . import daybank
+            existing = await asyncio.to_thread(daybank.read_items, False)
+            tracked = "\n".join(f"- {it.get('text', '')}" for it in existing[:150])
             resp2 = await client.messages.create(
                 model=LEARN_MODEL, max_tokens=1200,
                 messages=[{"role": "user", "content": (
                     "You are Ace's background triage — Brady's safety net so nothing he says slips. "
                     "From this whole conversation, extract EVERY actionable to-do or follow-up he "
-                    "needs to DO — be thorough. Include concrete next actions AND soft follow-ups "
-                    "(e.g. 'respond to Nikki T's text', 'touch base with the wedding couple midweek', "
-                    "'meet new agent Wednesday 2 PM', 'business cards for grandfather'). Keep each "
-                    "title specific and self-contained (name + what + any date). Skip anything "
-                    "ALREADY on his lists and pure status notes with no action. Put each on the "
-                    "single best-fitting list. One per line, EXACTLY: LIST :: task title. A missed "
-                    "to-do is worse than a slightly redundant one. If truly none, reply NONE.\n\n"
-                    "HIS LISTS: " + ", ".join(names) + "\n\n"
-                    "ALREADY ON HIS LISTS:\n" + (current or "(none)") + "\n\n"
+                    "needs to DO — concrete next actions AND soft follow-ups (e.g. 'respond to Nikki "
+                    "T's text', 'touch base with the wedding couple midweek', 'meet new agent "
+                    "Wednesday 2 PM'). Keep each title specific and self-contained (name + what + any "
+                    "date). Skip pure status notes and anything ALREADY tracked below. Give each a "
+                    "short CATEGORY from: Deals, Agents, Business, Networking, Personal, Admin. "
+                    "One per line, EXACTLY: CATEGORY :: task title. If none, reply NONE.\n\n"
+                    "ALREADY TRACKED:\n" + (tracked or "(none)") + "\n\n"
                     f"CONVERSATION:\n{convo}")}])
             t2 = "".join(getattr(b, "text", "") for b in resp2.content).strip()
             if t2 and not t2.upper().startswith("NONE"):
-                routed = 0
                 for ln in t2.split("\n"):
                     if "::" not in ln:
                         continue
-                    lst, title = ln.split("::", 1)
-                    lst, title = lst.strip("-•* ").strip(), title.strip()
-                    if len(title) > 4 and lst:
-                        ok, _, dup = await asyncio.to_thread(add_task, title, lst)
-                        if ok and not dup:
+                    cat, title = ln.split("::", 1)
+                    cat, title = cat.strip("-•* ").strip(), title.strip()
+                    if len(title) > 4:
+                        ok, res = await asyncio.to_thread(
+                            daybank.add_item, "todo", title, None, [cat] if cat else None)
+                        if ok and not (isinstance(res, dict) and res.get("dup")):
                             routed += 1
                 if routed:
-                    logger.info("triage sweep: routed %d to-do(s) to Google Tasks", routed)
+                    logger.info("triage sweep: captured %d to-do(s) into the data bank", routed)
         except Exception as e:
-            logger.warning("triage sweep (tasks) failed: %s", e)
+            logger.warning("triage sweep (data bank) failed: %s", e)
         return {"facts": filed, "tasks": routed}
     except Exception as e:
         logger.warning("learn sweep failed: %s", e)
