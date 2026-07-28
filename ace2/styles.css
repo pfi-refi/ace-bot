@@ -495,7 +495,7 @@ body {
 
 /* ---------- Login ---------- */
 #login { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(100% 80% at 50% 30%, rgba(4,16,20,.55) 0%, rgba(1,3,4,.96) 70%);
+  background: radial-gradient(100% 80% at 50% 30%, rgba(4,16,20,.42) 0%, rgba(1,3,4,.72) 74%);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 #login .box { width: 360px; padding: 38px 30px; text-align: center; border-radius: 20px;
   border: 1px solid transparent;
