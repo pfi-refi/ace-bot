@@ -483,6 +483,33 @@ async def daybank_migrate(req: MigrateReq):
     }
 
 
+@app.post("/daybank/import_personal_goals", dependencies=[Depends(require_auth)])
+async def daybank_import_personal_goals(req: MigrateReq):
+    """One-time: bring Brady's Google PERSONAL + GOALS lists into Ace's store (tagged Personal /
+    Goals) so EVERYTHING lives in Ace. Deterministic — no LLM; add_item's dedup blocks twins.
+    Additive only; Google is never modified."""
+    from .integrations.tasks_api import get_task_lists_grouped
+    grouped = await asyncio.to_thread(get_task_lists_grouped)
+    proposed, imported = [], 0
+    for l in grouped:
+        low = (l.get("list") or "").lower()
+        if "no touch" in low or not ("personal" in low or "goal" in low):
+            continue
+        cat = "Goals" if "goal" in low else "Personal"
+        for t in l.get("tasks", []):
+            title = (t.get("title") or "").strip()
+            if title:
+                proposed.append({"category": cat, "title": title})
+    if not req.dry_run:
+        for p in proposed:
+            ok, res = await asyncio.to_thread(
+                daybank.add_item, "todo", p["title"], None, [p["category"], "migrated"])
+            if ok and not (isinstance(res, dict) and res.get("dup")):
+                imported += 1
+    return {"dry_run": req.dry_run, "proposed_count": len(proposed),
+            "proposed": proposed, "imported": imported}
+
+
 @app.post("/daybank/categorize", dependencies=[Depends(require_auth)])
 async def daybank_categorize():
     """One-time backfill: give a category tag to any open item that lacks one, so the Command

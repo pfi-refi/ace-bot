@@ -97,9 +97,9 @@ TOOLS = [
     {
         "name": "add_task",
         "description": (
-            "Add a task to Brady's Google Tasks. Use when Brady asks to add, create, "
-            "remember, or track a task, action item, or follow-up. "
-            f"Default list: '{DEFAULT_TASK_LIST}' unless Brady names another."
+            "LEGACY — add a task to Google Tasks (being retired). Do NOT use for normal "
+            "tasks; those go on Brady's task board via capture_item. Only use this if "
+            "Brady EXPLICITLY says to put something in Google Tasks."
         ),
         "input_schema": {
             "type": "object",
@@ -113,8 +113,9 @@ TOOLS = [
     {
         "name": "complete_task",
         "description": (
-            "Mark an existing task complete in Google Tasks. Use when Brady says a task "
-            "is done, finished, or handled."
+            "LEGACY — complete a task in Google Tasks (being retired). Normal completions "
+            "happen on Brady's task board via update_item with the item's id from context. "
+            "Only use this if the task genuinely lives in Google and he says so."
         ),
         "input_schema": {
             "type": "object",
@@ -319,13 +320,12 @@ TOOLS = [
     {
         "name": "capture_item",
         "description": (
-            "Capture something into Brady's DATA BANK — his running second brain and "
-            "to-do surface. Do this ON YOUR OWN, without being asked, whenever something "
-            "worth not forgetting surfaces in conversation: a commitment he made, a "
-            "follow-up, a 'don't forget to…', a loose task, or a note. This is how you "
-            "manage his to-dos so he doesn't have to live in Google Tasks — capture it "
-            "here, and he'll see it on screen. (For a hard-dated appointment, also create "
-            "a calendar event; for a note-to-self, just capture it.) One item per call."
+            "Add an item to Brady's TASK BOARD — Ace's OWN store, THE task & pipeline system "
+            "(what Brady sees in his Command panel). This is the ONLY place tasks go. Do this "
+            "ON YOUR OWN, without being asked, whenever something worth not forgetting surfaces "
+            "in conversation: a commitment he made, a follow-up, a 'don't forget to…', a loose "
+            "task, or a note. Always pick the best-fitting category. (For a hard-dated "
+            "appointment, also create a calendar event.) One item per call."
         ),
         "input_schema": {
             "type": "object",
@@ -337,6 +337,11 @@ TOOLS = [
                 },
                 "text": {"type": "string", "description": "The item, phrased tightly (~one line)"},
                 "due": {"type": "string", "description": "Optional due date/time in plain words (e.g. 'today 5pm', 'Fri')"},
+                "category": {
+                    "type": "string",
+                    "enum": ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"],
+                    "description": "Which board column this belongs on (pick the best fit)",
+                },
             },
             "required": ["kind", "text"],
         },
@@ -549,11 +554,15 @@ def _do_save_memory(fact, **_):
         return f"⚠️ Save memory failed: {e}"
 
 
-def _do_capture_item(kind="note", text="", due=None, **_):
-    ok, res = daybank.add_item(kind, text, due=due)
+def _do_capture_item(kind="note", text="", due=None, category=None, **_):
+    tags = [category] if category else None
+    ok, res = daybank.add_item(kind, text, due=due, tags=tags)
     if ok:
+        if isinstance(res, dict) and res.get("dup"):
+            return f"◆ Already on your board: {res.get('text', text)}"
         tail = f" (due {due})" if due else ""
-        return f"◆ Captured to your data bank: {res['text']}{tail}"
+        cat = f" [{category}]" if category else ""
+        return f"◆ Added to your board{cat}: {res['text']}{tail}"
     return f"⚠️ Could not capture: {res}"
 
 

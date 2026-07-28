@@ -64,12 +64,16 @@
     <div id="messages"></div>
   </aside>
 
+  <!-- The DOCK: one menu housing every surface. Clean stage by default — tap to summon
+       a window, tap again to dismiss it. Ace opens the same windows himself when asked. -->
   <div id="quick">
     <button class="qa qa-cmd" id="command-btn" title="Your tasks & pipeline — Ace's own board">◧ Command</button>
+    <button class="qa" data-panel="timeline" title="Today's schedule">Schedule</button>
+    <button class="qa" data-panel="inbox" title="Priority inbox">Inbox</button>
+    <button class="qa" data-panel="weather" title="Weather">Weather</button>
+    <button class="qa" data-panel="memory" title="What Ace knows">Memory</button>
     <button class="qa qa-plan" id="plan-week-btn" title="Ace asks you a few questions, then builds your week">◈ Plan my week</button>
-    <button class="qa" data-msg="Give me my morning brief.">Morning brief</button>
-    <button class="qa" data-msg="Show me my calendar and walk me through today.">Today</button>
-    <button class="qa" data-msg="Show me my tasks and tell me what matters most.">Tasks</button>
+    <button class="qa" data-msg="Give me my morning brief.">Brief</button>
   </div>
 
   <div id="input-bar">

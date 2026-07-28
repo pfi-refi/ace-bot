@@ -662,14 +662,14 @@
       });
     }
   }
-  // Dashboard: auto-load the always-on panels on startup so the HUD is a live command
-  // center at a glance (orb stays the centerpiece). Each is best-effort and independent.
+  // CLEAN BY DEFAULT (Brady's call): no auto-cards on startup — the stage is the orb.
+  // The dock summons surfaces on demand; Ace materializes cards himself when asked.
+  // We still fetch today's events silently so the always-on up-next strip stays live.
   function loadDashboard() {
-    var g = function (url) { return fetch(API + url, { headers: headers() }).then(function (r) { return r.ok ? r.json() : null; }); };
-    g('/calendar?days=1').then(function (d) { if (d) materializeCard('timeline', { events: d.events || [] }, 'left'); }).catch(function () {});
-    g('/tasks').then(function (d) { if (d) materializeCard('tasks', { tasks: d.tasks || [], lists: d.lists || null }, 'left'); }).catch(function () {});
-    g('/inbox').then(function (d) { if (d) materializeCard('inbox', { emails: d.emails || [] }, 'right'); }).catch(function () {});
-    g('/weather').then(function (d) { if (d) materializeCard('weather', d, 'right'); }).catch(function () {});
+    fetch(API + '/calendar?days=1', { headers: headers() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d) { todayEvents = d.events || []; todayLoaded = true; renderUpNext(); } })
+      .catch(function () {});
   }
   function toggleBankItem(id, status) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
@@ -1031,6 +1031,25 @@
   });
   // "Command" — summon Ace's own task/pipeline board (his store, not Google Tasks).
   $('command-btn').addEventListener('click', cmdOpen);
+  // THE DOCK — tap a surface to summon its window, tap again to dismiss (clean by default).
+  // Same materializeCard machinery Ace uses, driven client-side so it's instant.
+  var DOCK = {
+    timeline: { title: 'TODAY',          url: '/calendar?days=1', shape: function (d) { return { events: d.events || [] }; } },
+    inbox:    { title: 'PRIORITY INBOX', url: '/inbox',           shape: function (d) { return { emails: d.emails || [] }; } },
+    weather:  { title: 'WEATHER',        url: '/weather',         shape: function (d) { return d; } },
+    memory:   { title: 'MEMORY',         url: '/memory',          shape: function (d) { return { memories: d.memories || [] }; } }
+  };
+  Array.prototype.forEach.call(document.querySelectorAll('.qa[data-panel]'), function (btn) {
+    btn.addEventListener('click', function () {
+      var p = btn.getAttribute('data-panel'), cfg = DOCK[p]; if (!cfg) return;
+      var open = document.querySelector('.card[data-panel="' + cfg.title + '"]');
+      if (open) { open.remove(); return; }   // toggle off → back to the clean stage
+      fetch(API + cfg.url, { headers: headers() })
+        .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.ok ? r.json() : null; })
+        .then(function (d) { if (d) materializeCard(p, cfg.shape(d)); })
+        .catch(function () {});
+    });
+  });
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

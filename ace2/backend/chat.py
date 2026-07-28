@@ -221,10 +221,9 @@ def _anthropic() -> AsyncAnthropic:
 async def _live_context() -> str:
     """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
     + data bank concurrently."""
-    memory, cal_all, tasks, bank, inbox, wx = await asyncio.gather(
+    memory, cal_all, bank, inbox, wx = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
         asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
-        asyncio.to_thread(get_tasks),
         asyncio.to_thread(daybank.read_items, True),
         asyncio.to_thread(get_gmail_summary),
         get_weather(),
@@ -264,11 +263,10 @@ async def _live_context() -> str:
         "WEATHER RIGHT NOW (factor it into his day when it matters):",
         _format_weather(ok(wx, {})),
         "",
-        "OPEN TASKS:",
-        ok(tasks, "(unavailable)") or "(inbox zero)",
-        "",
-        "DATA BANK (what you're already tracking for Brady — his to-dos/commitments/"
-        "notes; each has an id you pass to update_item to complete it):",
+        "YOUR TASK BOARD (Ace's OWN store — THE task & pipeline system; Brady sees this as his "
+        "Command panel, organized by category. Each item has an id: complete/reopen with "
+        "update_item, capture new ones with capture_item. Google Tasks is retired — never route "
+        "tasks there unless Brady explicitly says 'Google'):",
         bank_str,
     ]
     return "\n".join(parts)
@@ -298,10 +296,18 @@ def _format_daybank(items: list) -> str:
         return "(nothing captured yet)"
     open_items = [it for it in items if it.get("status") == "open"]
     done_today = [it for it in items if it.get("status") == "done"]
+    _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
+
+    def _cat(it):
+        for t in (it.get("tags") or []):
+            if t in _CATS:
+                return f" [{t}]"
+        return ""
+
     lines = []
     for it in open_items:
         due = f" (due {it['due']})" if it.get("due") else ""
-        lines.append(f"- [{it.get('id','?')}] {it.get('kind','note')}: {it.get('text','')}{due}")
+        lines.append(f"- [{it.get('id','?')}]{_cat(it)} {it.get('kind','note')}: {it.get('text','')}{due}")
     for it in done_today:
         lines.append(f"- [{it.get('id','?')}] ✓ done: {it.get('text','')}")
     return "\n".join(lines)
@@ -471,14 +477,13 @@ async def _refresh_ctx() -> None:
 
 async def _refresh_ctx_inner() -> None:
     try:
-        memory, cal_all, bank, convo, wx, tasks = await asyncio.wait_for(
+        memory, cal_all, bank, convo, wx = await asyncio.wait_for(
             asyncio.gather(
                 asyncio.to_thread(brain.read_memory),
                 asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
-                asyncio.to_thread(daybank.read_items, True),
+                asyncio.to_thread(daybank.read_items, True),   # HIS task board — voice's task titles
                 asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat
                 get_weather(),
-                asyncio.to_thread(get_tasks_structured),   # so voice KNOWS his real task titles
                 return_exceptions=True,
             ),
             timeout=20,  # off the critical path now, so it can afford to wait out a slow call
@@ -493,7 +498,6 @@ async def _refresh_ctx_inner() -> None:
             bank=keep(bank, _CTX["bank"]),
             convo=keep(convo, _CTX["convo"]),
             wx=keep(wx, _CTX["wx"]),
-            tasks=keep(tasks, _CTX["tasks"]),
             ts=time.time(),
         )
     except Exception as e:
@@ -738,21 +742,6 @@ async def _fast_context() -> str:
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
     # today's typed turns too — not just its own call and not the stale Telegram window.
     convo_str = _format_thread(_CTX["convo"][-24:])   # voice: wider memory window (was 12)
-    # Open Google Tasks, grouped by list — so voice knows his REAL task titles (without
-    # this, "mark off the Sienna task" was Ace guessing blind → "can't find it").
-    task_items = ok(_CTX["tasks"], [])
-    if task_items:
-        _by_list: dict = {}
-        for t in task_items:
-            _by_list.setdefault(t.get("list", "Tasks"), []).append(t)
-        tasks_str = "\n".join(
-            f"  {lst}: " + ", ".join(
-                (f"{i['title']} (due {i['due']})" if i.get("due") else i["title"]) for i in items
-            )
-            for lst, items in _by_list.items()
-        )
-    else:
-        tasks_str = "(no open tasks)"
     return "\n".join([
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
@@ -769,12 +758,10 @@ async def _fast_context() -> str:
         "upcoming for planning; answer range questions from this directly):",
         _format_calendar_window(events, now),
         "",
-        "DATA BANK (commitments / to-dos / deals you're already tracking for Brady):",
+        "HIS TASK BOARD (Ace's OWN store — THE task & pipeline system, what Brady sees in his "
+        "Command panel. To mark one done, match what he says to an item below and call "
+        "update_item with its id; capture new tasks with capture_item):",
         _format_daybank(ok(bank, [])),
-        "",
-        "OPEN TASKS (his REAL Google Tasks, by list — to mark one done, match what he says to a "
-        "title here and call complete_task with that title; it completes the match or asks which):",
-        tasks_str,
         "",
         "WEATHER RIGHT NOW:",
         _format_weather(ok(wx, {})),
@@ -788,8 +775,8 @@ async def _fast_context() -> str:
         "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
         "tools on this call: use display_card to put things on his screen, get_calendar_range / "
         "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
-        "delete_calendar_event, capture_item, update_item, add_task, complete_task (mark a task done — "
-        "match his words to a title in OPEN TASKS above), send_email, draft_email, "
+        "delete_calendar_event, capture_item (add to his task board), update_item (mark a board "
+        "item done — match his words to an id in HIS TASK BOARD above), send_email, draft_email, "
         "search_drive to ACT — actually do these, then tell him it's done. For anything you have no "
         "spoken tool for — CREATING or EDITING a Google Doc, building or updating a Sheet or a "
         "Slides deck, or making a shareable link — call build_on_screen with the full instruction, "
