@@ -8,7 +8,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v35';   // v35: NETWORK-FIRST shell — deploys always land; atmosphere + rail + viewfinder
+const CACHE_VERSION = 'ace2-shell-v36';   // v36: phone push (push + notificationclick); v35 NETWORK-FIRST shell
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 
@@ -58,5 +58,42 @@ self.addEventListener('fetch', (e) => {
       caches.open(CACHE_VERSION).then((c) => c.put(url.pathname, copy));
       return res;
     }).catch(() => caches.match(cacheKey).then((hit) => hit || net))
+  );
+});
+
+/* PHONE PUSH — how Ace reaches Brady with the app CLOSED. The backend sends a JSON
+   payload {title, body, url}; anything unparseable still shows as plain text rather
+   than being dropped, because a push that shows NOTHING makes iOS substitute its own
+   "This website has been updated in the background" notice — worse than a bare line.
+   Dormant unless the server has VAPID keys and a subscription exists: no subscription,
+   no push event, and this handler simply never runs. */
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; }
+  catch (err) { d = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'ACE', {
+    body: d.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: d.tag || 'ace',            // a newer brief replaces the older one instead of stacking
+    data: { url: d.url || '/' },
+  }));
+});
+
+/* Tapping it opens the command center: focus the HUD if it's already running (iOS keeps
+   an installed PWA alive in the background), otherwise launch it. */
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || '/';
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) {
+        if ('focus' in c) {
+          if (url !== '/' && 'navigate' in c) { try { c.navigate(url).catch(() => {}); } catch (err) {} }
+          return c.focus();
+        }
+      }
+      return self.clients.openWindow(url);
+    })
   );
 });

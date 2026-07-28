@@ -1,7 +1,14 @@
 """
-Ace 2.0's memory database v1 — TOTAL RECALL over everything Ace has ever seen.
+Ace 2.0's memory database v2 — TOTAL RECALL over everything Ace has ever seen.
 
-One entry point: recall(query) — keyword search, scored and recency-tied, across
+One entry point: recall(query) — SEMANTIC/HYBRID search when the Postgres brain is
+live (db.hybrid_search: english full-text + pg_trgm fuzzy, fused with Reciprocal
+Rank Fusion), so Brady can ask by meaning — a paraphrase, a half-remembered name,
+a typo — instead of guessing the exact words that were used at the time.
+
+The original token-overlap keyword scan below is the fallback: it runs when
+Postgres is dormant, and as a second pass when hybrid finds nothing, because it is
+the only path that reaches stores Postgres doesn't hold —
 every store Ace owns or reads:
   • ALL ace2 monthly history files (every turn ever exchanged with 2.0)
   • the shared Telegram conversation window (read-only continuity with the bot)
@@ -9,10 +16,10 @@ every store Ace owns or reads:
   • durable memory facts (ace_memory.json)
   • the data bank (ace2_daybank.json — deals/commitments/notes)
 
-This is deliberately infrastructure-free (no vector DB, no new service): keyword
-scoring over JSON stores already on Drive, with a short in-process cache so
-repeat recalls inside a conversation are instant. If/when volume outgrows this,
-the swap is mem0/pgvector behind the same recall() signature.
+Still deliberately infrastructure-free — NO vector DB, no new service, no embedding
+bill. The semantics come from Postgres itself (to_tsvector stemming + pg_trgm
+similarity), which Ace already runs. If/when volume outgrows this, the swap is
+pgvector behind the same recall() signature.
 
 Reads are best-effort per source — one store failing never kills the search.
 """
@@ -174,15 +181,52 @@ def _fmt_ts(ts: str) -> str:
         return ts or "undated"
 
 
-def recall(query: str, max_results: int = 8) -> str:
-    """Search everything Ace has ever seen. Returns matched snippets, newest first."""
-    query = (query or "").strip()
-    if not query:
-        return "⚠️ recall needs a query."
+def _render(query: str, rows: list) -> str:
+    """rows: [{ts, source, who, text}] already ranked. One shared output format so the
+    hybrid path and the legacy path look identical to Ace (and to any caller)."""
+    lines = [f"MEMORY RECALL — top matches for \"{query}\":"]
+    for r in rows:
+        snippet = re.sub(r"\s+", " ", r.get("text", "") or "").strip()
+        if len(snippet) > 350:
+            snippet = snippet[:350] + "…"
+        who = r.get("who") or ""
+        lines.append(f"• [{_fmt_ts(r.get('ts', ''))} · {r.get('source','')} · {who}] {snippet}")
+    return "\n".join(lines)
+
+
+# Postgres source tag → the labels this function has always printed, so the output
+# Ace reads is unchanged even though the retrieval underneath is completely new.
+_PG_SOURCE = {"fact": "memory", "turn": "ace2", "item": "databank"}
+_PG_WHO = {"user": "Brady", "assistant": "Ace"}
+
+
+def _hybrid_recall(query: str, n: int) -> str:
+    """Postgres hybrid search (full-text + trigram, RRF-fused). '' if it found nothing."""
+    from . import db
+    hits = db.hybrid_search(query, n)
+    if not hits:
+        return ""
+    rows = []
+    for h in hits:
+        src = h.get("source", "")
+        label = (h.get("label") or "").strip()
+        if src == "fact":
+            who = "FACT" + (f"/{label}" if label and label != "active" else "")
+        elif src == "turn":
+            who = _PG_WHO.get(label, label or "turn")
+        else:
+            who = label or "item"
+        rows.append({"ts": h.get("ts", ""), "source": _PG_SOURCE.get(src, src),
+                     "who": who, "text": h.get("text", "")})
+    return _render(query, rows)
+
+
+def _legacy_recall(query: str, n: int) -> str:
+    """The original token-overlap scan over the merged JSON/Drive corpus. Still the
+    only path that covers the Telegram window and the pre-wipe archive, so it stays."""
     q_tokens = _tokens(query)
     if not q_tokens:
         return "⚠️ recall needs a few substantive words to search for."
-    n = max(1, min(int(max_results), 20))
 
     corpus = _corpus()
     if not corpus:
@@ -202,12 +246,39 @@ def recall(query: str, max_results: int = 8) -> str:
     # Best score first; within a score band, newest first.
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
-    lines = [f"MEMORY RECALL — top matches for \"{query}\":"]
-    for s, ts, e in scored[:n]:
-        who = {"user": "Brady", "assistant": "Ace", "fact": "FACT"}.get(e.get("role", ""), e.get("role", ""))
-        src = e.get("source", "")
-        snippet = re.sub(r"\s+", " ", e.get("text", "")).strip()
-        if len(snippet) > 350:
-            snippet = snippet[:350] + "…"
-        lines.append(f"• [{_fmt_ts(ts)} · {src} · {who}] {snippet}")
-    return "\n".join(lines)
+    rows = [{
+        "ts": ts, "source": e.get("source", ""),
+        "who": {"user": "Brady", "assistant": "Ace", "fact": "FACT"}.get(
+            e.get("role", ""), e.get("role", "")),
+        "text": e.get("text", ""),
+    } for s, ts, e in scored[:n]]
+    return _render(query, rows)
+
+
+def recall(query: str, max_results: int = 8) -> str:
+    """Search everything Ace has ever seen — BY MEANING, not by literal keyword.
+
+    Primary path is Postgres hybrid search (db.hybrid_search): english full-text
+    (stemmed, stopword-free, so paraphrases hit) fused by Reciprocal Rank Fusion with
+    pg_trgm fuzzy matching (typos, partial names). Falls back to the original
+    token-overlap scan when Postgres is dormant OR when hybrid finds nothing — the
+    legacy corpus is the only thing that covers the Telegram window and the pre-wipe
+    archive, so a miss there is still worth a second look. Signature and return shape
+    are unchanged: a formatted snippet block, best matches first.
+    """
+    query = (query or "").strip()
+    if not query:
+        return "⚠️ recall needs a query."
+    n = max(1, min(int(max_results), 20))
+
+    try:
+        from . import db
+        if db.enabled():
+            out = _hybrid_recall(query, n)
+            if out:
+                return out
+            logger.info("memory_db: hybrid found nothing for %r — trying legacy corpus", query)
+    except Exception as e:
+        logger.warning("memory_db: hybrid recall failed (%s) — falling back", e)
+
+    return _legacy_recall(query, n)

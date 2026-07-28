@@ -426,6 +426,7 @@
     if (window.__rehydratePins) window.__rehydratePins();   // pinned windows come back open
     checkConvai();
     loadHistory();   // renders the recent thread, then drops the greeting under it
+    maybePushPrompt();   // one-time "let Ace reach your phone" offer (no-op if unsupported/unset)
   }
   /* Last ~18 turns of Ace 2.0's own history, preloaded so the panel opens with
      context instead of empty (Brady: "see history without always asking him").
@@ -504,6 +505,9 @@
           messagesEl.appendChild(row); scrollBottom();
         })(msg.kind || 'morning');
         if (!document.body.classList.contains('mode-chat')) speak(msg.text);
+        break;
+      case 'nudge':   // ambient heads-up Ace raised on his own — lands QUIET: no voice, no
+        addAceMessage(msg.text).classList.add('nudge');   // panel takeover, just the unread glow
         break;
       case 'open': openLink(msg.url, msg.label); break;
       case 'run_on_hud': runOnHud(msg.message); break;
@@ -1228,6 +1232,299 @@
         .then(function(){ return cmdFetch(); }).then(cmdRender).catch(function(){}); };
   }
 
+  /* ============================================================ KNOWLEDGE GRAPH
+     Brady's book of business as a live map: every person, deal and category Ace
+     knows about, and the lines between them. A full-screen canvas overlay running a
+     hand-rolled force layout — repulsion between every pair, springs along the edges,
+     a gentle pull to centre — relaxed 1-2 times per frame. No library: the shell is
+     zero-build and CSP-tight, so the physics lives here.
+     Tap a node to focus it (it and its neighbours light, everything else dims) and
+     read its connections; drag to pan, drag a node to move it, wheel/pinch to zoom. */
+  var GR_COL = { deal: '#45FFA6', person: '#53E7FF', category: '#8F7BFF' };
+  var gr = { open: false, nodes: [], edges: [], adj: {}, sel: null, hov: null,
+             tx: 0, ty: 0, k: 1, k0: 1, alpha: 1, raf: 0, cv: null, ctx: null,
+             W: 0, H: 0, dpr: 1, drag: null, pan: null, down: null, moved: 0,
+             ptr: {}, pinch: 0, sprites: {} };
+  function grNarrow() { return window.innerWidth < 760; }
+
+  // One pre-rendered glow sprite per type, drawn scaled per node. Canvas shadowBlur
+  // on 100+ nodes every frame is what kills these things; a cached sprite is free.
+  function grSprite(col) {
+    if (gr.sprites[col]) return gr.sprites[col];
+    var s = document.createElement('canvas'); s.width = s.height = 128;
+    var x = s.getContext('2d'), g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, '#ffffff'); g.addColorStop(.16, col);
+    g.addColorStop(.40, col + '70'); g.addColorStop(1, col + '00');
+    x.fillStyle = g; x.beginPath(); x.arc(64, 64, 64, 0, 6.283); x.fill();
+    gr.sprites[col] = s; return s;
+  }
+
+  function grFit() {
+    var cv = gr.cv; if (!cv) return;
+    var r = cv.getBoundingClientRect();
+    gr.W = Math.max(1, r.width); gr.H = Math.max(1, r.height);
+    gr.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = Math.round(gr.W * gr.dpr); cv.height = Math.round(gr.H * gr.dpr);
+    gr.ctx = cv.getContext('2d');
+  }
+
+  // Seed on a golden-angle spiral so the first frame is already spread out (a random
+  // scatter takes hundreds of iterations to untangle; this one takes a few dozen).
+  function grSeed() {
+    var n = gr.nodes.length || 1, R = Math.min(gr.W, gr.H) * .36, by = {};
+    gr.adj = {};
+    gr.nodes.forEach(function (nd, i) {
+      var a = i * 2.399963, rr = R * Math.sqrt((i + .5) / n);
+      nd.x = gr.W / 2 + Math.cos(a) * rr; nd.y = gr.H / 2 + Math.sin(a) * rr;
+      nd.vx = 0; nd.vy = 0; gr.adj[nd.id] = []; by[nd.id] = nd;
+    });
+    gr.edges = gr.edges.filter(function (e) {
+      var a = by[e.source], b = by[e.target];
+      if (!a || !b) return false;                     // orphan edge — never reachable
+      e.a = a; e.b = b;
+      gr.adj[a.id].push({ n: b, kind: e.kind }); gr.adj[b.id].push({ n: a, kind: e.kind });
+      return true;
+    });
+    gr.tx = 0; gr.ty = 0; gr.k = 1; gr.alpha = 1; gr.sel = null; gr.hov = null;
+  }
+
+  function grStep() {
+    var N = gr.nodes, n = N.length, E = gr.edges, i, j, a, b, dx, dy, d2, d, f;
+    var cx = gr.W / 2, cy = gr.H / 2, iters = n > 90 ? 1 : 2, it;
+    for (it = 0; it < iters; it++) {
+      for (i = 0; i < n; i++) {                       // repulsion — every pair pushes apart
+        a = N[i];
+        for (j = i + 1; j < n; j++) {
+          b = N[j];
+          dx = b.x - a.x; dy = b.y - a.y; d2 = dx * dx + dy * dy;
+          if (d2 > 300000) continue;                  // far field: skip the sqrt entirely
+          if (d2 < 1) { dx = Math.random() - .5; dy = Math.random() - .5; d2 = 1; }
+          d = Math.sqrt(d2); f = 4600 / d2; dx = dx / d * f; dy = dy / d * f;
+          a.vx -= dx; a.vy -= dy; b.vx += dx; b.vy += dy;
+        }
+      }
+      for (i = 0; i < E.length; i++) {                // springs — edges pull to rest length
+        a = E[i].a; b = E[i].b;
+        dx = b.x - a.x; dy = b.y - a.y; d = Math.sqrt(dx * dx + dy * dy) || 1;
+        f = (d - 88) * .042; dx = dx / d * f; dy = dy / d * f;
+        a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
+      }
+      for (i = 0; i < n; i++) {
+        a = N[i];
+        if (a === gr.drag) { a.vx = 0; a.vy = 0; continue; }   // your finger wins
+        a.vx += (cx - a.x) * .0045; a.vy += (cy - a.y) * .0045;
+        var mx = a.vx * gr.alpha, my = a.vy * gr.alpha, mm = Math.sqrt(mx * mx + my * my);
+        if (mm > 20) { mx = mx / mm * 20; my = my / mm * 20; }  // hard step cap = no explosions
+        a.x += mx; a.y += my; a.vx *= .78; a.vy *= .78;
+      }
+    }
+    gr.alpha *= .993;
+    if (gr.alpha < .02) gr.alpha = .02;   // never fully freezes — the map keeps breathing
+  }
+
+  function grDraw() {
+    var c = gr.ctx; if (!c) return;
+    c.setTransform(gr.dpr, 0, 0, gr.dpr, 0, 0);
+    c.clearRect(0, 0, gr.W, gr.H);
+    c.save(); c.translate(gr.tx, gr.ty); c.scale(gr.k, gr.k);
+    var focus = gr.sel || gr.hov, lit = null, i;
+    if (focus) {
+      lit = {}; lit[focus.id] = 1;
+      (gr.adj[focus.id] || []).forEach(function (l) { lit[l.n.id] = 1; });
+    }
+    for (i = 0; i < gr.edges.length; i++) {
+      var e = gr.edges[i], on = focus && (e.a === focus || e.b === focus);
+      if (on) { c.strokeStyle = GR_COL[focus.type] + 'cc'; c.lineWidth = 1.7 / gr.k; }
+      else if (focus) { c.strokeStyle = 'rgba(120,190,175,.055)'; c.lineWidth = .8 / gr.k; }
+      else { c.strokeStyle = 'rgba(120,215,190,.15)'; c.lineWidth = .9 / gr.k; }
+      c.beginPath(); c.moveTo(e.a.x, e.a.y); c.lineTo(e.b.x, e.b.y); c.stroke();
+    }
+    var fs = (grNarrow() ? 9.5 : 11.5) / gr.k;
+    c.textAlign = 'center'; c.textBaseline = 'top';
+    for (i = 0; i < gr.nodes.length; i++) {
+      var nd = gr.nodes[i], col = GR_COL[nd.type] || GR_COL.person;
+      var dim = !!(lit && !lit[nd.id]), r = nd.size || 8, R = r * 2.7;
+      c.globalAlpha = dim ? .2 : 1;
+      c.drawImage(grSprite(col), nd.x - R, nd.y - R, R * 2, R * 2);
+      c.beginPath(); c.arc(nd.x, nd.y, r * .4, 0, 6.283);
+      c.fillStyle = '#f2fffa'; c.fill();
+      if (nd === focus) {
+        c.strokeStyle = '#eafff5'; c.lineWidth = 1.5 / gr.k;
+        c.beginPath(); c.arc(nd.x, nd.y, r * 1.7, 0, 6.283); c.stroke();
+      }
+      // Label budget: always for the hubs and the focused set, everything else once
+      // you've zoomed in far enough to have room for it.
+      if (!(r >= 10 || gr.k > .85 || (lit && lit[nd.id]))) continue;
+      c.globalAlpha = dim ? .16 : (nd === focus ? 1 : .84);
+      c.font = (nd === focus ? '700 ' : '') + fs.toFixed(1) + 'px ' +
+        'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+      c.fillStyle = nd === focus ? '#ffffff' : '#dff6ec';
+      c.fillText(nd.label, nd.x, nd.y + r + 4 / gr.k);
+    }
+    c.globalAlpha = 1; c.restore();
+  }
+
+  function grLoop() {
+    if (!gr.open) { gr.raf = 0; return; }
+    grStep(); grDraw();
+    gr.raf = requestAnimationFrame(grLoop);
+  }
+
+  function grAt(px, py) {
+    var x = (px - gr.tx) / gr.k, y = (py - gr.ty) / gr.k, best = null, bd = 1e9;
+    for (var i = 0; i < gr.nodes.length; i++) {
+      var nd = gr.nodes[i], dx = nd.x - x, dy = nd.y - y, d = dx * dx + dy * dy;
+      var rr = Math.max((nd.size || 8) * 1.7, 15 / gr.k);
+      if (d < rr * rr && d < bd) { bd = d; best = nd; }
+    }
+    return best;
+  }
+  function grZoom(k, px, py) {
+    k = Math.max(.25, Math.min(3.4, k));
+    var wx = (px - gr.tx) / gr.k, wy = (py - gr.ty) / gr.k;
+    gr.k = k; gr.tx = px - wx * k; gr.ty = py - wy * k;
+  }
+  function grCenter(nd) {
+    gr.tx = gr.W / 2 - nd.x * gr.k; gr.ty = gr.H * .42 - nd.y * gr.k;
+  }
+
+  function grSelect(nd, center) {
+    gr.sel = nd;
+    if (nd && center) grCenter(nd);
+    var d = document.getElementById('gr-detail'); if (!d) return;
+    if (!nd) { d.className = 'gr-detail'; d.innerHTML = ''; return; }
+    var links = (gr.adj[nd.id] || []).slice().sort(function (a, b) { return (b.n.size || 0) - (a.n.size || 0); });
+    var col = GR_COL[nd.type] || GR_COL.person;
+    d.className = 'gr-detail on';
+    d.innerHTML = '<div class="gr-dh"><span class="gr-dot" style="background:' + col +
+      ';box-shadow:0 0 12px ' + col + '"></span><div class="gr-dt">' + cmdEsc(nd.label) +
+      '<span>' + nd.type + ' · ' + links.length + ' connection' + (links.length === 1 ? '' : 's') +
+      '</span></div><button class="gr-dx" id="gr-dx" title="Close">✕</button></div>' +
+      (links.length
+        ? '<div class="gr-dl">' + links.map(function (l) {
+            return '<button class="gr-li" data-id="' + l.n.id + '"><span class="gr-dot sm" style="background:' +
+              (GR_COL[l.n.type] || GR_COL.person) + '"></span><span class="gr-ln">' + cmdEsc(l.n.label) +
+              '</span><span class="gr-lk">' + cmdEsc((l.kind || '').replace(/_/g, ' ')) + '</span></button>';
+          }).join('') + '</div>'
+        : '<div class="gr-none">nothing linked to this yet</div>');
+    d.querySelector('#gr-dx').onclick = function () { grSelect(null); };
+    Array.prototype.forEach.call(d.querySelectorAll('.gr-li'), function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-id');
+        var t = gr.nodes.filter(function (x) { return x.id === id; })[0];
+        if (t) { gr.alpha = Math.max(gr.alpha, .35); grSelect(t, true); }
+      };
+    });
+  }
+
+  function grBind(cv) {
+    function local(ev) { var r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; }
+    function span() {
+      var ids = Object.keys(gr.ptr); if (ids.length < 2) return 0;
+      var a = gr.ptr[ids[0]], b = gr.ptr[ids[1]];
+      return Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)) || 1;
+    }
+    cv.addEventListener('pointerdown', function (ev) {
+      try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
+      gr.ptr[ev.pointerId] = { x: ev.clientX, y: ev.clientY };
+      if (Object.keys(gr.ptr).length === 2) {          // second finger → pinch, cancel any drag
+        gr.pinch = span(); gr.k0 = gr.k; gr.drag = null; gr.pan = null; gr.down = null; return;
+      }
+      var p = local(ev), hit = grAt(p[0], p[1]);
+      gr.moved = 0; gr.down = hit; gr.sx = ev.clientX; gr.sy = ev.clientY;
+      if (hit) { gr.drag = hit; gr.alpha = Math.max(gr.alpha, .45); }
+      else gr.pan = { x: ev.clientX, y: ev.clientY, tx: gr.tx, ty: gr.ty };
+    });
+    cv.addEventListener('pointermove', function (ev) {
+      if (gr.ptr[ev.pointerId]) { gr.ptr[ev.pointerId].x = ev.clientX; gr.ptr[ev.pointerId].y = ev.clientY; }
+      if (gr.pinch && Object.keys(gr.ptr).length >= 2) {
+        var ids = Object.keys(gr.ptr), a = gr.ptr[ids[0]], b = gr.ptr[ids[1]];
+        var r = cv.getBoundingClientRect();
+        grZoom(gr.k0 * (span() / gr.pinch), (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top);
+        return;
+      }
+      if (gr.down || gr.pan) gr.moved = Math.abs(ev.clientX - gr.sx) + Math.abs(ev.clientY - gr.sy);
+      var p = local(ev);
+      if (gr.drag) { gr.drag.x = (p[0] - gr.tx) / gr.k; gr.drag.y = (p[1] - gr.ty) / gr.k; return; }
+      if (gr.pan) { gr.tx = gr.pan.tx + (ev.clientX - gr.pan.x); gr.ty = gr.pan.ty + (ev.clientY - gr.pan.y); return; }
+      if (ev.pointerType === 'mouse') {
+        var h = grAt(p[0], p[1]);
+        if (h !== gr.hov) { gr.hov = h; cv.style.cursor = h ? 'pointer' : 'grab'; }
+      }
+    });
+    function up(ev) {
+      delete gr.ptr[ev.pointerId];
+      if (Object.keys(gr.ptr).length < 2) gr.pinch = 0;
+      if (gr.moved < 8) grSelect(gr.down || null);     // a tap, not a drag → focus (or clear)
+      gr.drag = null; gr.pan = null; gr.down = null;
+    }
+    cv.addEventListener('pointerup', up);
+    cv.addEventListener('pointercancel', up);
+    cv.addEventListener('wheel', function (ev) {
+      ev.preventDefault();
+      var p = local(ev);
+      grZoom(gr.k * Math.pow(.999, ev.deltaY * (ev.ctrlKey ? 5 : 1.7)), p[0], p[1]);
+    }, { passive: false });
+  }
+
+  function graphClose() {
+    gr.open = false;
+    if (gr.raf) { cancelAnimationFrame(gr.raf); gr.raf = 0; }
+    var v = document.getElementById('graph-view'); if (v) v.style.display = 'none';
+  }
+  function grLoad(refresh) {
+    var meta = document.getElementById('gr-meta'), load = document.getElementById('gr-load');
+    if (load) { load.style.display = 'block'; load.textContent = refresh ? '◉ re-reading the whole book…' : '◉ mapping…'; }
+    if (meta) meta.textContent = 'reading facts + board…';
+    fetch(API + '/graph' + (refresh ? '?refresh=1' : ''), { headers: headers() })
+      .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
+      .then(function (d) {
+        gr.nodes = (d.nodes || []).map(function (n) { return { id: n.id, label: n.label, type: n.type, size: n.size || 8 }; });
+        gr.edges = (d.edges || []).slice();
+        if (load) load.style.display = gr.nodes.length ? 'none' : 'block';
+        if (!gr.nodes.length) {
+          if (load) load.textContent = d.error ? 'couldn’t read the map — try ⟳' : 'nothing to map yet';
+          if (meta) meta.textContent = '';
+          return;
+        }
+        grFit(); grSeed(); grSelect(null);
+        if (meta) meta.textContent = gr.nodes.length + ' nodes · ' + gr.edges.length + ' links' +
+          (d.cached ? ' · cached' : ' · fresh');
+        if (!gr.raf) gr.raf = requestAnimationFrame(grLoop);
+      })
+      .catch(function () {
+        if (load) { load.style.display = 'block'; load.textContent = 'the map didn’t load — try ⟳'; }
+      });
+  }
+  function graphOpen() {
+    gr.open = true;
+    var v = document.getElementById('graph-view');
+    if (!v) { v = document.createElement('div'); v.id = 'graph-view'; $('app').appendChild(v); }
+    v.style.display = 'block';
+    v.innerHTML = '<canvas id="graph-canvas"></canvas>' +
+      '<div class="gr-hd"><span class="gr-orb"></span><div class="gr-ttl">KNOWLEDGE GRAPH</div>' +
+      '<div class="gr-meta" id="gr-meta"></div>' +
+      '<button class="gr-ic" id="gr-refresh" title="Rebuild from the latest facts">⟳</button>' +
+      '<button class="gr-ic" id="gr-x" title="Close">✕</button></div>' +
+      '<div class="gr-legend"><span><i style="background:' + GR_COL.person + '"></i>People</span>' +
+      '<span><i style="background:' + GR_COL.deal + '"></i>Deals</span>' +
+      '<span><i style="background:' + GR_COL.category + '"></i>Categories</span></div>' +
+      '<div class="gr-detail" id="gr-detail"></div>' +
+      '<div class="gr-load" id="gr-load">◉ mapping…</div>';
+    gr.cv = v.querySelector('#graph-canvas');
+    grFit(); grBind(gr.cv);
+    v.querySelector('#gr-x').onclick = graphClose;
+    v.querySelector('#gr-refresh').onclick = function () { grLoad(true); };
+    grLoad(false);
+  }
+  window.addEventListener('resize', function () {
+    if (!gr.open || !gr.cv) return;
+    grFit();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && gr.open) graphClose();
+  });
+
   /* ============================================================ WIRING */
   // Chat panel stays hidden until Brady toggles it — sends never auto-open it. Every reply
   // still glows the toggle (markUnread) so he knows one landed, and Ace speaks it; cards render
@@ -1271,9 +1568,113 @@
   }
   $('pulse-btn').addEventListener('click', runPulse);
 
+  /* ============================================================ CAPTURE ANYTHING */
+  // Snap a whiteboard, drop a statement, hum a voice memo — Ace reads/hears it, files the
+  // facts to memory and the actions to the board, then tells you what he got. The 📎 button,
+  // the iOS camera roll and desktop drag-and-drop all land on this one pipeline.
+  var captureBusy = false;
+
+  // Phone photos are 3-12MB; the vision ceiling is 5MB and Brady is usually on cellular.
+  // Downscale in-browser to a 1568px long edge (the model's native tile) and re-encode JPEG.
+  // Any decode failure (HEIC on Chrome, say) falls through with the untouched file so the
+  // server can answer with a readable message instead of the UI silently eating it.
+  function shrinkImage(file) {
+    return new Promise(function (resolve) {
+      if (!/^image\//.test(file.type || '') || file.size < 400000) return resolve(file);
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        try {
+          var s = Math.min(1, 1568 / Math.max(img.width, img.height));
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.width * s) || 1; c.height = Math.round(img.height * s) || 1;
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          c.toBlob(function (b) {
+            URL.revokeObjectURL(url);
+            resolve(b ? new File([b], 'capture.jpg', { type: 'image/jpeg' }) : file);
+          }, 'image/jpeg', 0.86);
+        } catch (e) { URL.revokeObjectURL(url); resolve(file); }
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+
+  // Rewrite a live bubble in place ("Reading…" → the result) so a capture reads as one beat.
+  function replaceBubble(el, text) {
+    if (!el || !el.parentNode) { addAceMessage(text); return; }
+    el.innerHTML = '<div class="sender">ACE</div>';
+    el.appendChild(document.createTextNode(text));
+    var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel();
+    el.appendChild(ts); scrollBottom(); markUnread();
+  }
+
+  function captureFile(file) {
+    if (!file || captureBusy) return;
+    setChat(true);
+    if (file.size > 18 * 1024 * 1024) {
+      addAceMessage('⚠️ That file is over 18MB — too big to read. Send a photo or a shorter clip.');
+      return;
+    }
+    captureBusy = true;
+    var bubble = addAceMessage('📎 Reading ' + (file.name || 'that') + '…');
+    shrinkImage(file).then(function (f) {
+      var fd = new FormData();
+      fd.append('file', f, f.name || 'capture');
+      // NEVER set Content-Type by hand here — the browser owns the multipart boundary.
+      var h = {}; if (state.token) h.Authorization = 'Bearer ' + state.token;
+      return fetch(API + '/capture', { method: 'POST', headers: h, body: fd });
+    }).then(function (r) {
+      if (r.status === 401) { toLogin(); throw 0; }
+      return r.json();
+    }).then(function (d) {
+      if (d && d.ok) {
+        replaceBubble(bubble, d.summary);
+        speak(d.summary);
+        if (d.todos_count && cmd && cmd.open) cmdFetch().then(cmdRender).catch(function () {});
+      } else {
+        replaceBubble(bubble, '⚠️ ' + ((d && d.error) || "Couldn't read that one."));
+      }
+    }).catch(function () {
+      replaceBubble(bubble, '⚠️ Capture failed — the link dropped. Try that again.');
+    }).then(function () { captureBusy = false; });
+  }
+
+  $('clip-btn').addEventListener('click', function () { $('capture-file').click(); });
+  $('capture-file').addEventListener('change', function (e) {
+    var f = e.target.files && e.target.files[0];
+    e.target.value = '';        // so the SAME file picked twice still fires change
+    captureFile(f);
+  });
+
+  // DRAG-AND-DROP anywhere on the window (desktop). dragenter/dragleave fire per element, so
+  // the depth counter keeps the highlight steady when the cursor crosses a child node.
+  var dragDepth = 0;
+  function hasFiles(e) {
+    return !!(e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0);
+  }
+  function dropGlow(on) { document.body.classList.toggle('dropping', !!on); }
+  window.addEventListener('dragenter', function (e) {
+    if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; dropGlow(true);
+  });
+  window.addEventListener('dragover', function (e) {
+    if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('dragleave', function () {
+    dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dropGlow(false);
+  });
+  window.addEventListener('drop', function (e) {
+    if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+    e.preventDefault(); dragDepth = 0; dropGlow(false);
+    captureFile(e.dataTransfer.files[0]);
+  });
+  // "Graph" — the knowledge graph. Its own handler, not the generic DOCK map: this one
+  // isn't a card, it's a full-screen canvas with its own physics loop.
+  $('graph-btn').addEventListener('click', function () { gr.open ? graphClose() : graphOpen(); });
+
   /* ⌘K COMMAND PALETTE — one keystroke to run anything or jump anywhere. */
   var PALETTE = [
     { label: '◧ Command — task board', run: cmdOpen },
+    { label: '◉ Knowledge Graph — the map of your book of business', run: graphOpen },
     { label: '📊 Business Pulse — how\'s my business?', run: runPulse },
     { label: '◈ Plan my week', run: function () { setMode('chat'); setChat(true); sendMessage('Plan my week'); } },
     { label: '☀ Brief me now', run: function () { setChat(true); sendMessage('Give me my morning brief.'); } },
@@ -1361,6 +1762,90 @@
     });
   }
   window.__rehydratePins = rehydratePins;
+
+  /* ============================================================ PHONE ALERTS
+     Ace reaches the phone when the app is CLOSED — the gap the proactive briefs
+     had (they only landed if a HUD was open). Strictly opt-in and strictly silent
+     when anything is missing: no PushManager (older iOS), no VAPID key on the
+     server, or a previous "not now" → the affordance simply never appears and not
+     a single line here can throw into the boot path.
+     iOS: web push exists ONLY for a PWA installed to the home screen (16.4+), and
+     permission must be asked from a REAL TAP — hence a dock button, not a prompt
+     on load (an auto-request would be denied and unrecoverable). */
+  var PUSH_SEEN = 'ace2_push';   // 'on' | 'off' — clear it in localStorage to be asked again
+  function pushSupported() {
+    return ('serviceWorker' in navigator) && ('PushManager' in window)
+      && (typeof Notification !== 'undefined') && (typeof window.atob === 'function');
+  }
+  function urlB64ToBytes(s) {   // VAPID keys travel base64url; subscribe() wants raw bytes
+    var pad = ''; while ((s.length + pad.length) % 4) pad += '=';
+    var raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+  function subscribePush(key) {   // resolves true when the server has the device
+    return navigator.serviceWorker.ready.then(function (reg) {
+      return reg.pushManager.getSubscription().then(function (existing) {
+        // Reuse the existing subscription — re-subscribing with a different key throws.
+        return existing || reg.pushManager.subscribe({
+          userVisibleOnly: true, applicationServerKey: urlB64ToBytes(key) });
+      });
+    }).then(function (sub) {
+      return fetch(API + '/push/subscribe', { method: 'POST', headers: headers(), body: JSON.stringify(sub) })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { return !!(d && d.ok); });
+    });
+  }
+  function maybePushPrompt() {
+    try {
+      if (!pushSupported() || localStorage.getItem(PUSH_SEEN) === 'off') return;
+      if (Notification.permission === 'denied') return;   // browser-level no — never nag
+      fetch(API + '/push/key', { headers: headers() })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          var key = d && d.publicKey;
+          if (!key) return;                               // VAPID unset on the server → dormant
+          if (Notification.permission === 'granted') {    // already allowed: just re-register
+            localStorage.setItem(PUSH_SEEN, 'on');        // (endpoints rotate) and stay quiet
+            subscribePush(key).catch(function () {});
+            return;
+          }
+          if (localStorage.getItem(PUSH_SEEN) === 'on') return;
+          setTimeout(function () { showPushPrompt(key); }, 1500);   // let the stage settle first
+        })
+        .catch(function () {});
+    } catch (e) {}
+  }
+  function showPushPrompt(key) {
+    var dock = $('quick');
+    if (!dock || $('push-enable')) return;
+    var yes = document.createElement('button');
+    yes.className = 'qa'; yes.id = 'push-enable'; yes.textContent = '🔔 Phone alerts';
+    yes.title = 'Let Ace reach this phone when the app is closed — briefs and urgent nudges';
+    var no = document.createElement('button');
+    no.className = 'qa'; no.id = 'push-later'; no.textContent = 'Not now';
+    no.title = 'Hide this';
+    function clear() {
+      [yes, no].forEach(function (b) { if (b.parentNode) b.parentNode.removeChild(b); });
+    }
+    function settle(on) { try { localStorage.setItem(PUSH_SEEN, on ? 'on' : 'off'); } catch (e) {} clear(); }
+    no.onclick = function () { settle(false); };
+    yes.onclick = function () {
+      yes.disabled = true; yes.textContent = '🔔 …';
+      var ask;
+      try { ask = Notification.requestPermission(); } catch (e) { settle(false); return; }
+      if (!ask || typeof ask.then !== 'function') { settle(false); return; }   // ancient callback-only API
+      ask.then(function (p) {
+        if (p !== 'granted') { settle(false); return; }
+        subscribePush(key).then(function (ok) {
+          settle(ok);
+          if (ok) addAceMessage('Phone alerts are on. I\'ll reach you there even when this is closed.');
+        }).catch(function () { settle(false); });
+      }).catch(function () { settle(false); });
+    };
+    dock.appendChild(yes); dock.appendChild(no);
+  }
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

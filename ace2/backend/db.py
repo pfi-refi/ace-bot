@@ -32,6 +32,12 @@ EASTERN = pytz.timezone("America/New_York")
 KINDS = ("note", "todo", "commitment", "followup")
 _ready = False
 
+# pg_trgm availability: None = not probed yet, True/False = known. Probed once per
+# process in _init_search(); a managed Postgres that refuses CREATE EXTENSION just
+# degrades search to full-text only instead of erroring.
+_search_ready = False
+_trgm_ok = None
+
 
 def enabled() -> bool:
     return bool(os.environ.get("DATABASE_URL", "").strip())
@@ -98,6 +104,78 @@ def _init_schema():
                 kind  TEXT NOT NULL DEFAULT 'recap',
                 text  TEXT NOT NULL
             )""")
+        # Web-push subscriptions — how Ace reaches the PHONE when nothing is open. The push
+        # service mints a unique endpoint URL per installed app, so the endpoint IS the device
+        # identity: it's the primary key, and a re-subscribe upserts instead of leaving a twin.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS push_subs (
+                endpoint TEXT PRIMARY KEY,
+                p256dh   TEXT NOT NULL,
+                auth     TEXT NOT NULL,
+                ts       TIMESTAMPTZ NOT NULL DEFAULT now()
+            )""")
+
+
+# ── Search infrastructure (hybrid recall: full-text + trigram) ───────────────────
+# Expression GIN indexes over the text Ace already stores. to_tsvector with an
+# explicit 'english' regconfig literal is IMMUTABLE, so it is indexable; the
+# stemmer + stopword list is what turns keyword lookup into meaning lookup
+# ("operators"→"oper" matches "operator", "retired"→"retir" matches "retires").
+_FTS_DDL = (
+    "CREATE INDEX IF NOT EXISTS facts_fts_idx ON facts "
+    "USING gin (to_tsvector('english', text))",
+    "CREATE INDEX IF NOT EXISTS turns_fts_idx ON turns "
+    "USING gin (to_tsvector('english', content))",
+    "CREATE INDEX IF NOT EXISTS daybank_items_fts_idx ON daybank_items "
+    "USING gin (to_tsvector('english', text))",
+)
+# Trigram indexes power fuzzy/typo/partial-name matching (similarity / word_similarity).
+_TRGM_DDL = (
+    "CREATE INDEX IF NOT EXISTS facts_trgm_idx ON facts USING gin (text gin_trgm_ops)",
+    "CREATE INDEX IF NOT EXISTS turns_trgm_idx ON turns USING gin (content gin_trgm_ops)",
+    "CREATE INDEX IF NOT EXISTS daybank_items_trgm_idx ON daybank_items "
+    "USING gin (text gin_trgm_ops)",
+)
+
+
+def _ddl_best_effort(stmt: str) -> bool:
+    """Run one DDL statement in its OWN transaction. Own-transaction matters: a
+    failed CREATE INDEX poisons the surrounding transaction, so batching these
+    would make one failure kill the rest."""
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute(stmt)
+        return True
+    except Exception as e:
+        logger.warning("db search DDL skipped (%s): %s", stmt.split(" ON ")[0], e)
+        return False
+
+
+def _init_search():
+    """Idempotent search setup: pg_trgm + GIN indexes. Never raises — if any part
+    is unavailable (permissions, old server), search degrades instead of dying.
+    Runs AT MOST ONCE per process, on its own latch: if ensure_ready() keeps failing
+    (e.g. a Drive backfill hiccup) this must not re-run the DDL on every db call."""
+    global _search_ready, _trgm_ok
+    if _search_ready:
+        return
+    _search_ready = True
+    for stmt in _FTS_DDL:
+        _ddl_best_effort(stmt)
+    # CREATE EXTENSION needs elevated rights on some managed Postgres. Probe rather
+    # than assume: create it, then actually call the function to confirm it works.
+    _ddl_best_effort("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT word_similarity('ace', 'ace bot')")
+            cur.fetchone()
+        _trgm_ok = True
+    except Exception as e:
+        _trgm_ok = False
+        logger.warning("db: pg_trgm unavailable — hybrid search falls back to FTS only (%s)", e)
+    if _trgm_ok:
+        for stmt in _TRGM_DDL:
+            _ddl_best_effort(stmt)
 
 
 def ensure_ready():
@@ -111,6 +189,12 @@ def ensure_ready():
         _ready = True
     except Exception as e:
         logger.error("db ensure_ready failed (%s) — falling back to Drive", e)
+    # Search setup is independent of the core schema/backfill: run it even if the
+    # backfill hiccuped, and never let it block _ready.
+    try:
+        _init_search()
+    except Exception as e:
+        logger.warning("db _init_search failed: %s", e)
 
 
 def _backfill():
@@ -402,6 +486,63 @@ def add_summary(text: str, kind: str = "recap") -> bool:
         return False
 
 
+# ── Web-push subscriptions (Ace reaches the phone when the app is CLOSED) ────────
+def add_push_sub(sub: dict) -> bool:
+    """Store one browser PushSubscription — {endpoint, keys:{p256dh, auth}}. Upserts on
+    endpoint, so re-subscribing the same phone refreshes its keys instead of leaving a
+    dead twin that every future push has to time out against."""
+    try:
+        endpoint = ((sub or {}).get("endpoint") or "").strip()
+        keys = (sub or {}).get("keys") or {}
+        p256dh = (keys.get("p256dh") or "").strip()
+        auth = (keys.get("auth") or "").strip()
+    except Exception:
+        return False
+    if not (endpoint and p256dh and auth):
+        return False
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO push_subs (endpoint, p256dh, auth) VALUES (%s, %s, %s) "
+                "ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, "
+                "auth = EXCLUDED.auth, ts = now()", (endpoint, p256dh, auth))
+        return True
+    except Exception as e:
+        logger.warning("db add_push_sub failed: %s", e)
+        return False
+
+
+def list_push_subs() -> list:
+    """Every stored device in pywebpush's own shape, oldest first. [] on any failure —
+    no subscriptions simply means no phone alert, never a broken caller."""
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT endpoint, p256dh, auth FROM push_subs ORDER BY ts")
+            return [{"endpoint": r[0], "keys": {"p256dh": r[1], "auth": r[2]}}
+                    for r in cur.fetchall()]
+    except Exception as e:
+        logger.warning("db list_push_subs failed: %s", e)
+        return []
+
+
+def remove_push_sub(endpoint: str) -> bool:
+    """Drop one device — on an explicit unsubscribe, or when the push service answers
+    404/410 (app deleted / endpoint rotated) so the table self-heals."""
+    endpoint = (endpoint or "").strip()
+    if not endpoint:
+        return False
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("DELETE FROM push_subs WHERE endpoint = %s", (endpoint,))
+        return True
+    except Exception as e:
+        logger.warning("db remove_push_sub failed: %s", e)
+        return False
+
+
 def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None) -> tuple:
     """Edit a board item: status, text, tags (full replace), and/or due. due='' clears it."""
@@ -432,3 +573,156 @@ def update_item(item_id: str, status: str = None, text: str = None,
     except Exception as e:
         logger.error("db update_item failed: %s", e)
         return False, str(e)
+
+
+# ── Hybrid search — recall by MEANING, not by literal keyword ────────────────────
+# Two independent retrievers over the same three stores (facts, turns, board items):
+#
+#   1. FULL-TEXT (ts_rank_cd over to_tsvector('english', …)). The english config
+#      stems and drops stopwords, so "retired buggy operators" finds "retires the
+#      buggy operator". Terms are OR-ed (see _TSQ) so a partial/paraphrased query
+#      still matches — ts_rank_cd then ranks by how many terms hit and how densely.
+#   2. TRIGRAM (word_similarity from pg_trgm). Catches what the dictionary can't:
+#      typos, nicknames, partial names, mashed-together words — "Vicks"/"Vick",
+#      "buggie"/"buggy". word_similarity (not plain similarity) scores the BEST
+#      matching window inside a long document, so a 4-word query still scores well
+#      against a 400-word conversation turn.
+#
+# The two produce scores on incomparable scales, so they are fused with Reciprocal
+# Rank Fusion (k=60) — rank-based, needs no normalization, and is the standard
+# hybrid-retrieval merge. Each (source × retriever) is its own ranked list, so a
+# strong hit in a small store isn't buried by a large one.
+_RRF_K = 60
+_TRGM_MIN = 0.30       # word_similarity floor — below this it's noise
+_PER_LIST = 25         # rows pulled per (source × retriever) list before fusion
+_TRGM_SCAN = 20000     # newest turns considered by the (unindexable-by-plan) trgm scan
+_SEARCH_TIMEOUT_MS = 8000
+
+# plainto_tsquery AND-s every term; we rewrite '&' to '|' so a paraphrase that only
+# partially overlaps still returns rows (recall over precision — ranking sorts it out).
+# Safe by construction: the text being rewritten is Postgres' own tsquery output, not
+# user input, and plainto_tsquery emits no negation operators.
+_TSQ = "replace(plainto_tsquery('english', %(q)s)::text, '&', '|')::tsquery"
+
+_FTS_SQL = f"""
+WITH q AS (SELECT {_TSQ} AS tsq)
+(SELECT 'fact' AS source, f.id::text AS ref, f.text AS text, f.ts AS ts,
+        COALESCE(f.tier, '') AS label,
+        ts_rank_cd(to_tsvector('english', f.text), (SELECT tsq FROM q)) AS score
+   FROM facts f
+  WHERE to_tsvector('english', f.text) @@ (SELECT tsq FROM q)
+  ORDER BY score DESC LIMIT %(n)s)
+UNION ALL
+(SELECT 'turn' AS source, t.id::text AS ref, t.content AS text, t.ts AS ts,
+        COALESCE(t.role, '') AS label,
+        ts_rank_cd(to_tsvector('english', t.content), (SELECT tsq FROM q)) AS score
+   FROM turns t
+  WHERE to_tsvector('english', t.content) @@ (SELECT tsq FROM q)
+  ORDER BY score DESC LIMIT %(n)s)
+UNION ALL
+(SELECT 'item' AS source, d.id::text AS ref, d.text AS text, d.ts AS ts,
+        COALESCE(d.status, '') AS label,
+        ts_rank_cd(to_tsvector('english', d.text), (SELECT tsq FROM q)) AS score
+   FROM daybank_items d
+  WHERE to_tsvector('english', d.text) @@ (SELECT tsq FROM q)
+  ORDER BY score DESC LIMIT %(n)s)
+"""
+
+_TRGM_SQL = """
+(SELECT 'fact' AS source, f.id::text AS ref, f.text AS text, f.ts AS ts,
+        COALESCE(f.tier, '') AS label,
+        word_similarity(%(q)s, f.text) AS score
+   FROM facts f
+  WHERE word_similarity(%(q)s, f.text) >= %(t)s
+  ORDER BY score DESC LIMIT %(n)s)
+UNION ALL
+(SELECT 'turn' AS source, t.id::text AS ref, t.content AS text, t.ts AS ts,
+        COALESCE(t.role, '') AS label,
+        word_similarity(%(q)s, t.content) AS score
+   FROM (SELECT id, ts, role, content FROM turns ORDER BY id DESC LIMIT %(scan)s) t
+  WHERE word_similarity(%(q)s, t.content) >= %(t)s
+  ORDER BY score DESC LIMIT %(n)s)
+UNION ALL
+(SELECT 'item' AS source, d.id::text AS ref, d.text AS text, d.ts AS ts,
+        COALESCE(d.status, '') AS label,
+        word_similarity(%(q)s, d.text) AS score
+   FROM daybank_items d
+  WHERE word_similarity(%(q)s, d.text) >= %(t)s
+  ORDER BY score DESC LIMIT %(n)s)
+"""
+
+
+def _run_search(sql: str, args: dict) -> list:
+    """Execute one retriever. Returns [] on any failure (never raises into recall)."""
+    try:
+        with _conn() as c, c.cursor() as cur:
+            try:
+                cur.execute("SET LOCAL statement_timeout = %s", (_SEARCH_TIMEOUT_MS,))
+            except Exception:
+                c.rollback()  # guard is a nicety; keep the connection usable without it
+            cur.execute(sql, args)
+            return cur.fetchall()
+    except Exception as e:
+        logger.warning("db search retriever failed: %s", e)
+        return []
+
+
+def hybrid_search(query: str, limit: int = 10) -> list:
+    """Meaning-first search across facts, conversation turns, and the task board.
+
+    Returns [{source: 'fact'|'turn'|'item', ref, text, ts, label, score, retrievers}]
+    ranked best-first, where `score` is the fused RRF score. Best-effort: any
+    retriever (or the whole thing) failing yields fewer rows / [], never an exception.
+    """
+    query = (query or "").strip()
+    if not query or not enabled():
+        return []
+    # Total guard: recall() AND the /memory/search endpoint call this directly, so a
+    # surprise here must degrade to "no hits", never a 500 or a broken turn.
+    try:
+        ensure_ready()
+        n = max(1, min(int(limit or 10), 50))
+        per_list = max(n, _PER_LIST)
+
+        lists = []  # each: (retriever_name, [rows...]) already score-ordered by SQL
+        fts = _run_search(_FTS_SQL, {"q": query, "n": per_list})
+        if fts:
+            lists.append(("fts", fts))
+        if _trgm_ok is not False:
+            trgm = _run_search(_TRGM_SQL, {"q": query, "n": per_list,
+                                           "t": _TRGM_MIN, "scan": _TRGM_SCAN})
+            if trgm:
+                lists.append(("trgm", trgm))
+
+        # RRF: rank WITHIN each (source × retriever) list, then sum 1/(k + rank).
+        merged = {}
+        for name, rows in lists:
+            by_source = {}
+            for r in rows:
+                by_source.setdefault(r[0], []).append(r)
+            for src_rows in by_source.values():
+                src_rows.sort(key=lambda r: float(r[5] or 0.0), reverse=True)
+                for rank, r in enumerate(src_rows, start=1):
+                    source, ref, text, ts, label, raw = r
+                    key = (source, ref)
+                    hit = merged.get(key)
+                    if hit is None:
+                        hit = merged[key] = {
+                            "source": source, "ref": ref, "text": text,
+                            "ts": ts.isoformat() if ts else "", "label": label or "",
+                            "score": 0.0, "raw": 0.0, "retrievers": [],
+                        }
+                    hit["score"] += 1.0 / (_RRF_K + rank)
+                    hit["raw"] = max(hit["raw"], float(raw or 0.0))
+                    if name not in hit["retrievers"]:
+                        hit["retrievers"].append(name)
+
+        out = sorted(merged.values(),
+                     key=lambda h: (round(h["score"], 6), h["raw"], h["ts"]), reverse=True)
+        for h in out:
+            h["score"] = round(h["score"], 6)
+            h["raw"] = round(h["raw"], 6)
+        return out[:n]
+    except Exception as e:
+        logger.warning("db hybrid_search failed: %s", e)
+        return []

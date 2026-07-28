@@ -33,7 +33,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import (
@@ -49,7 +51,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import chat, daybank, db, history, voice
+from . import chat, daybank, db, history, memory_db, voice
 from .brain import (
     google_ready,
     read_memory,
@@ -336,6 +338,27 @@ async def memory_facts():
     return {"facts": await asyncio.to_thread(db.read_facts_full), "postgres": True}
 
 
+@app.get("/memory/search", dependencies=[Depends(require_auth)])
+async def memory_search(q: str = "", limit: int = 10):
+    """SEMANTIC / HYBRID memory search — the ranked rows behind Ace's `recall` tool.
+
+    Postgres full-text (stemmed english, so paraphrases hit) fused by Reciprocal Rank
+    Fusion with pg_trgm fuzzy matching (typos, partial names) across durable facts,
+    conversation turns, and the task board. Here for testing and for a future
+    search-the-memory UI; `text` mirrors exactly what Ace himself would read.
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"query": "", "count": 0, "hits": [], "postgres": db.enabled()}
+    n = max(1, min(int(limit or 10), 50))
+    if not db.enabled():
+        # Postgres dormant → no ranked rows exist, but recall still works (Drive corpus).
+        return {"query": q, "count": 0, "hits": [], "postgres": False,
+                "text": await asyncio.to_thread(memory_db.recall, q, min(n, 20))}
+    hits = await asyncio.to_thread(db.hybrid_search, q, n)
+    return {"query": q, "count": len(hits), "hits": hits, "postgres": True}
+
+
 class CurateReq(BaseModel):
     archive: list = []   # substrings — any LIVE fact containing one is archived (kept as history)
     core: list = []      # substrings — matching facts promoted to tier 'core' (always pinned)
@@ -508,6 +531,15 @@ async def brief_run(kind: str = "morning"):
     return {"ok": False, "error": "brief generation failed"}
 
 
+@app.post("/watch/run", dependencies=[Depends(require_auth)])
+async def watch_run(force: bool = True, dry_run: bool = False):
+    """Run ONE ambient watch pass now and report what it decided — the test hook for the loop
+    that otherwise runs itself every ~12 min. force ignores the quiet-hours and rate-limit
+    gates so a pass can be exercised at any hour; dry_run decides without delivering or
+    consuming the diff state, so the same signals are still live for the real loop."""
+    return await chat._watch_pass_once(force=force, dry_run=dry_run)
+
+
 @app.post("/daybank/import_personal_goals", dependencies=[Depends(require_auth)])
 async def daybank_import_personal_goals(req: MigrateReq):
     """One-time: bring Brady's Google PERSONAL + GOALS lists into Ace's store (tagged Personal /
@@ -605,6 +637,148 @@ async def daybank_update(req: DaybankUpdateReq):
             logger.warning("win-logging failed: %s", e)
     items = await asyncio.to_thread(daybank.read_items, True)
     return {"ok": ok, "items": items}
+
+
+# ── THE KNOWLEDGE GRAPH — Brady's book of business as a navigable map ───────────
+# ONE LEARN_MODEL pass reads the durable facts + the open board and returns the
+# entity graph behind them: people (agents/prospects/clients) ↔ deals ↔ the board's
+# categories. That call is slow and costs money, so the result is CACHED in the
+# summaries table under kind='graph_cache' and only rebuilt when it ages past
+# GRAPH_TTL (or ?refresh=1) — the panel opens instantly on every other visit.
+#
+# Parsing is DEFENSIVE on purpose: the model occasionally wraps its JSON in a
+# sentence of prose, so we take the outermost {...} and then validate every node
+# and edge. Anything malformed is dropped rather than shipped to the canvas —
+# a half-built graph still renders; a thrown exception is a black screen.
+GRAPH_TTL = 6 * 3600
+GRAPH_TYPES = ("person", "deal", "category")
+
+
+def _graph_json(text: str) -> dict:
+    """Outermost {...} out of a model reply, parsed. {} when there's nothing usable."""
+    if not text:
+        return {}
+    i, j = text.find("{"), text.rfind("}")
+    if i < 0 or j <= i:
+        return {}
+    try:
+        out = json.loads(text[i:j + 1])
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
+
+
+def _graph_key(label: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (label or "").lower()).strip("-")
+
+
+def _graph_shape(raw: dict) -> dict:
+    """Normalize the model's entity dump into {nodes, edges} the canvas can trust:
+    slugged ids, known types, no orphan edges, no duplicates. Node size is computed
+    from DEGREE here (not asked of the model) so the map's visual weight is honest —
+    the busiest person/deal is literally the biggest dot."""
+    nodes, index = [], {}
+    for n in (raw.get("nodes") or [])[:240]:
+        if not isinstance(n, dict):
+            continue
+        label = str(n.get("label") or n.get("id") or "").strip()
+        nid = _graph_key(label)
+        if not nid or nid in index:
+            continue
+        kind = str(n.get("type") or "person").strip().lower()
+        index[nid] = {"id": nid, "label": label[:52],
+                      "type": kind if kind in GRAPH_TYPES else "person", "size": 8}
+        nodes.append(index[nid])
+    edges, seen, degree = [], set(), {}
+    for e in (raw.get("edges") or [])[:600]:
+        if not isinstance(e, dict):
+            continue
+        s, t = _graph_key(str(e.get("source") or "")), _graph_key(str(e.get("target") or ""))
+        if s == t or s not in index or t not in index:
+            continue   # orphan edge — the model named something it never declared
+        pair = (s, t) if s < t else (t, s)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        edges.append({"source": s, "target": t,
+                      "kind": str(e.get("kind") or "linked_to").strip()[:28] or "linked_to"})
+        degree[s] = degree.get(s, 0) + 1
+        degree[t] = degree.get(t, 0) + 1
+    for nd in nodes:
+        nd["size"] = round(7 + 1.7 * min(degree.get(nd["id"], 0), 11), 1)
+    return {"nodes": nodes, "edges": edges}
+
+
+@app.get("/graph", dependencies=[Depends(require_auth)])
+async def graph(refresh: int = 0):
+    """The knowledge graph: every person, deal and category Ace knows about, and how
+    they connect. Cached ~6h — pass ?refresh=1 to force a fresh extraction."""
+    cached = {}
+    if db.enabled() and not refresh:
+        cached = await asyncio.to_thread(db.latest_summary, "graph_cache")
+    if cached.get("text"):
+        try:
+            age = time.time() - datetime.fromisoformat(cached["ts"]).timestamp()
+        except Exception:
+            age = GRAPH_TTL + 1   # unreadable stamp → treat as stale, rebuild
+        if age < GRAPH_TTL:
+            out = _graph_json(cached["text"])
+            if out.get("nodes"):
+                return {**out, "cached": True, "age_seconds": int(age)}
+
+    facts = await asyncio.to_thread(db.read_facts_full) if db.enabled() else []
+    live = [f["text"] for f in facts if not f.get("invalid_at")][:220]
+    if not live:
+        live = (await asyncio.to_thread(read_memory))[:220]
+    items = await asyncio.to_thread(daybank.read_items, True)
+    board = [it for it in items if it.get("status") != "done"][:120]
+    if not live and not board:
+        return {"nodes": [], "edges": [], "cached": False, "empty": True}
+
+    lines = "\n".join(f"- {t}" for t in live)
+    tasks = "\n".join(
+        "- [{}] {}".format(", ".join(it.get("tags") or []) or "Admin", it.get("text", ""))
+        for it in board)
+    client = chat._anthropic()
+    resp = await client.messages.create(
+        model=chat.LEARN_MODEL, max_tokens=4000,
+        messages=[{"role": "user", "content": (
+            "You are Ace's KNOWLEDGE GRAPH builder for Brady McGraw, who runs Platinum "
+            "Fortune Impact — a real-estate / life-insurance / refi base shop with ~18 agents. "
+            "From his memory facts and his open board below, extract the ENTITY GRAPH of his "
+            "book of business.\n\n"
+            "NODES — one per real entity, no duplicates, and use the person's/deal's real name:\n"
+            '  type "person"   — an agent, prospect, client, referral partner or family member\n'
+            '  type "deal"     — a specific transaction or policy (e.g. "Kiana Wiggins deal", '
+            '"Miller refi")\n'
+            '  type "category" — ONLY these eight board columns, and only when something '
+            "connects to them: Deals, Agents, Admin, Networking, Business, Tech, Personal, Goals\n\n"
+            "EDGES — how they actually connect. `kind` is a short snake_case verb read "
+            "source→target, e.g. deal_of, works_with, recruited_by, referred_by, client_of, "
+            "married_to, owns, belongs_to. Example: {\"source\":\"Kiana Wiggins deal\","
+            "\"target\":\"Corrine\",\"kind\":\"deal_of\"}. Connect every person and deal to the "
+            "board category it belongs to, and connect people to each other wherever a fact says "
+            "they are related, on the same deal, or on the same team.\n\n"
+            "Rules: Brady himself is a node. Skip abstractions, dates and to-do phrasing — only "
+            "named people, named deals, and the eight categories. Prefer FEWER, RIGHT nodes over "
+            "many noisy ones. Every edge's source and target MUST exactly match a node label.\n\n"
+            "Reply with STRICT JSON and nothing else:\n"
+            '{"nodes":[{"id":"kiana-wiggins","label":"Kiana Wiggins","type":"person"}],'
+            '"edges":[{"source":"Kiana Wiggins","target":"Deals","kind":"belongs_to"}]}\n\n'
+            f"MEMORY FACTS:\n{lines or '(none)'}\n\nOPEN BOARD (category in brackets):\n"
+            f"{tasks or '(none)'}")}])
+    out = _graph_shape(_graph_json("".join(getattr(b, "text", "") for b in resp.content)))
+    if not out["nodes"]:
+        # The extraction came back unusable — serve the stale cache rather than a blank map.
+        stale = _graph_json(cached.get("text") or "")
+        if stale.get("nodes"):
+            return {**stale, "cached": True, "stale": True}
+        return {"nodes": [], "edges": [], "cached": False, "error": "extraction failed"}
+    out["generated_at"] = datetime.now(db.EASTERN).isoformat()
+    if db.enabled():
+        await asyncio.to_thread(db.add_summary, json.dumps(out), "graph_cache")
+    logger.info("graph: %d nodes / %d edges built", len(out["nodes"]), len(out["edges"]))
+    return {**out, "cached": False}
 
 
 @app.get("/bootstrap", dependencies=[Depends(require_auth)])
@@ -790,6 +964,212 @@ async def stt(request: Request):
     ctype = request.headers.get("content-type", "audio/webm")
     text, err = await voice.transcribe(audio, "speech.webm", ctype)
     return {"text": text or "", "error": err}
+
+
+# ── CAPTURE ANYTHING: photo / PDF / voice memo → facts + to-dos, filed automatically ──
+# Brady shoots a whiteboard, drops a statement, or mumbles a memo; Ace reads or hears it,
+# extracts what matters, and FILES it (durable facts → memory, actions → the board) instead
+# of leaving it to rot in his camera roll. One endpoint, three input shapes.
+#
+# The multipart body is parsed with the stdlib `email` parser ON PURPOSE. FastAPI's
+# UploadFile/File() needs python-multipart, which is NOT in requirements — declaring one
+# would raise at import time and take the WHOLE service down on deploy. Stdlib keeps this
+# endpoint strictly additive: it cannot break a single existing route.
+CAPTURE_MAX_BYTES = 18 * 1024 * 1024          # ~18MB — anything bigger is a video, not a capture
+CAPTURE_IMAGE_MAX_BYTES = 5 * 1024 * 1024     # Anthropic's per-image ceiling; the UI downscales first
+CAPTURE_CATEGORIES = ("Deals", "Agents", "Admin", "Networking", "Business", "Tech",
+                      "Personal", "Goals")
+CAPTURE_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+
+_CAPTURE_ASK = (
+    "You are Ace, Brady Cochran's chief of staff at Platinum Fortune Impact (life insurance / "
+    "agency building). Read EVERYTHING in this capture — handwriting included: names, phone "
+    "numbers, emails, dollar figures, carriers, dates, times, scribbles in the margin.\n\n"
+    "Return ONLY strict JSON. No prose, no markdown fence, nothing outside the object:\n"
+    '{"summary": "2-4 plain sentences: what this is and what you took from it",\n'
+    ' "facts": ["durable things worth remembering forever, one per string"],\n'
+    ' "todos": [{"text": "an action Brady must take, phrased as an action", "category": "'
+    + "|".join(CAPTURE_CATEGORIES) + '"}],\n'
+    ' "contacts": [{"name": "", "phone": "", "email": "", "note": ""}],\n'
+    ' "text": "the full raw text you read, verbatim"}\n\n'
+    "FACTS stay true (who someone is, a policy amount, an address, a carrier's rule). TODOS "
+    "must HAPPEN (call X, send Y, follow up Thursday) — keep any date/time inside the todo "
+    "text so it isn't lost. Empty arrays are fine and better than filler. NEVER invent "
+    "anything that isn't in the capture."
+)
+
+
+def _capture_part(body: bytes, content_type: str):
+    """Pull the first FILE part out of a multipart/form-data body → (filename, ctype, bytes).
+
+    Stdlib `email` handles binary payloads correctly (surrogateescape round-trip, CRLF
+    preserved), so no dependency is needed. Returns (None, None, None) if there's no file.
+    """
+    from email.parser import BytesParser
+    from email.policy import default as email_policy
+
+    header = ("Content-Type: " + (content_type or "") + "\r\nMIME-Version: 1.0\r\n\r\n")
+    msg = BytesParser(policy=email_policy).parsebytes(header.encode("utf-8", "replace") + body)
+    if not msg.is_multipart():
+        return None, None, None
+    for part in msg.iter_parts():
+        name = part.get_filename()
+        if not name:
+            continue                      # a plain text form field, not the file
+        data = part.get_payload(decode=True)
+        if data:
+            return name, (part.get_content_type() or ""), data
+    return None, None, None
+
+
+def _capture_kind(ctype: str, filename: str) -> str:
+    """image | pdf | audio | '' — falls back to the extension because iOS loves octet-stream."""
+    ctype = (ctype or "").lower()
+    if ctype.startswith("image/"):
+        return "image"
+    if ctype == "application/pdf":
+        return "pdf"
+    if ctype.startswith("audio/") or ctype.startswith("video/"):
+        return "audio"
+    ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in (filename or "") else ""
+    if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"):
+        return "image"
+    if ext == ".pdf":
+        return "pdf"
+    if ext in (".m4a", ".mp3", ".wav", ".webm", ".ogg", ".aac", ".mp4", ".caf"):
+        return "audio"
+    return ""
+
+
+def _capture_json(raw: str) -> dict:
+    """Model replies are asked for strict JSON; take the outermost object anyway so one
+    stray sentence of preamble can't throw away a whole capture."""
+    s = (raw or "").strip()
+    i, j = s.find("{"), s.rfind("}")
+    if i < 0 or j <= i:
+        return {}
+    try:
+        out = json.loads(s[i:j + 1])
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
+
+
+@app.post("/capture", dependencies=[Depends(require_auth)])
+async def capture(request: Request):
+    """CAPTURE ANYTHING — multipart file in, filed knowledge out.
+
+    IMAGE → Claude vision. PDF → Claude document block. AUDIO → Scribe, then the same
+    extraction over the transcript. Facts land in memory (reconciled), to-dos land on the
+    board (deduped server-side), contacts fold into facts. Returns the summary immediately
+    so the UI can show what it got instead of a spinner and a prayer.
+    """
+    from .brain import add_memory
+
+    body = await request.body()
+    if len(body) > CAPTURE_MAX_BYTES + (1 << 20):    # +1MB slack for the multipart envelope
+        return {"ok": False, "error": "That file is too big (over 18MB). Send a photo or a shorter clip."}
+    try:
+        filename, ctype, data = _capture_part(body, request.headers.get("content-type", ""))
+    except Exception as e:
+        logger.warning("capture: multipart parse failed: %s", e)
+        return {"ok": False, "error": "Couldn't read that upload. Try again."}
+    if not data:
+        return {"ok": False, "error": "No file came through."}
+    if len(data) > CAPTURE_MAX_BYTES:
+        return {"ok": False, "error": "That file is too big (over 18MB). Send a photo or a shorter clip."}
+
+    kind = _capture_kind(ctype, filename or "")
+    if not kind:
+        return {"ok": False, "error": "I can read images, PDFs and audio. That one I can't."}
+
+    transcript = ""
+    b64 = ""
+    if kind == "image":
+        media = (ctype or "").lower()
+        if media not in CAPTURE_IMAGE_TYPES:
+            return {"ok": False, "error": "That image format won't open (HEIC?). Send it as a JPEG or PNG."}
+        if len(data) > CAPTURE_IMAGE_MAX_BYTES:
+            return {"ok": False, "error": "That photo is too large to read (over 5MB). Shrink it and resend."}
+        b64 = base64.standard_b64encode(data).decode()
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}},
+            {"type": "text", "text": _CAPTURE_ASK},
+        ]
+    elif kind == "pdf":
+        b64 = base64.standard_b64encode(data).decode()
+        content = [
+            {"type": "document",
+             "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+            {"type": "text", "text": _CAPTURE_ASK},
+        ]
+    else:
+        transcript, err = await voice.transcribe(data, filename or "memo.m4a", ctype or "audio/m4a")
+        if not transcript:
+            return {"ok": False, "error": "Couldn't hear that one" + (f" ({err})" if err else "") + "."}
+        content = [{"type": "text",
+                    "text": _CAPTURE_ASK + "\n\nVOICE MEMO TRANSCRIPT:\n" + transcript}]
+
+    try:
+        client = chat._anthropic()
+        resp = await client.messages.create(
+            model=chat.LEARN_MODEL, max_tokens=3000,
+            messages=[{"role": "user", "content": content}])
+        parsed = _capture_json("".join(getattr(b, "text", "") for b in resp.content))
+    except Exception as e:
+        logger.error("capture: extraction failed (%s): %s", kind, e)
+        return {"ok": False, "error": "I couldn't read that one. Try again in a second."}
+
+    # Contacts are facts with a shape — fold them in rather than inventing a second store.
+    facts = [f.strip() for f in (parsed.get("facts") or []) if isinstance(f, str) and f.strip()]
+    for c in (parsed.get("contacts") or []):
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        reach = ", ".join(x for x in (str(c.get("phone") or "").strip(),
+                                      str(c.get("email") or "").strip()) if x)
+        note = str(c.get("note") or "").strip()
+        facts.append("Contact — " + name + (": " + reach if reach else "")
+                     + (" — " + note if note else ""))
+
+    filed_todos = []
+    for t in (parsed.get("todos") or []):
+        if isinstance(t, str):
+            t = {"text": t}
+        if not isinstance(t, dict):
+            continue
+        txt = str(t.get("text") or "").strip()
+        if len(txt) < 4:
+            continue
+        cat = str(t.get("category") or "").strip()
+        cat = cat if cat in CAPTURE_CATEGORIES else "Admin"
+        ok, res = await asyncio.to_thread(daybank.add_item, "todo", txt, None, [cat, "capture"])
+        if ok and not (isinstance(res, dict) and res.get("dup")):
+            filed_todos.append(txt)
+
+    if facts:
+        await asyncio.to_thread(add_memory, facts, "capture")
+
+    summary = str(parsed.get("summary") or "").strip()
+    raw_text = transcript or str(parsed.get("text") or "").strip()
+    if not summary:
+        summary = "Read it — nothing in there worth filing."
+    line = "📎 Capture (" + kind + ") — " + summary
+    if facts or filed_todos:
+        line += ("\n\nFiled: " + str(len(facts)) + " fact(s) to memory, "
+                 + str(len(filed_todos)) + " to-do(s) to the board.")
+    await asyncio.to_thread(history.append, "assistant", line)
+
+    return {
+        "ok": True,
+        "kind": kind,
+        "summary": line,
+        "facts_count": len(facts),
+        "todos_count": len(filed_todos),
+        "text": raw_text,
+    }
 
 
 # ── Full-duplex realtime voice (ElevenLabs Agents) ──────────────────────────────
@@ -1133,6 +1513,131 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             task.cancel()
 
     return StreamingResponse(sse(), media_type="text/event-stream")
+
+
+# ── PHONE PUSH — Ace reaches Brady when the app is CLOSED ───────────────────────
+# The gap this closes: proactive briefs only ever landed if a HUD tab was open
+# (publish_stage_event talks to live WebSockets). Web push reaches the installed PWA
+# with nothing running.
+#
+# DORMANT BY DEFAULT, exactly like db.py: everything is gated on VAPID_PUBLIC_KEY +
+# VAPID_PRIVATE_KEY. Unset → /push/key returns null, the HUD never offers the prompt,
+# and send_push() logs ONE warning and returns. A brief must never fail — or even
+# slow down — because phone alerts aren't configured yet.
+_push_warned = [False]     # one warning per process, not one per brief
+
+
+def _vapid() -> tuple:
+    """(public, private, subject). Subject is the RFC-8292 contact the push services
+    require — a real mailto:/https: they can reach if a sender misbehaves."""
+    return (
+        os.environ.get("VAPID_PUBLIC_KEY", "").strip(),
+        os.environ.get("VAPID_PRIVATE_KEY", "").strip(),
+        os.environ.get("VAPID_SUBJECT", "").strip() or "mailto:pfi@platinumfortuneimpact.com",
+    )
+
+
+def push_configured() -> bool:
+    pub, priv, _ = _vapid()
+    return bool(pub and priv)
+
+
+def _push_warn(msg: str, *args) -> list:
+    if not _push_warned[0]:
+        _push_warned[0] = True
+        logger.warning("push: " + msg + " — phone alerts dormant", *args)
+    return []
+
+
+def _push_now(title: str, body: str, url: str) -> list:
+    """BLOCKING fan-out to every stored device; returns per-endpoint results. Run it in a
+    thread (send_push does) — pywebpush is sync `requests` under the hood. A device that
+    answers 404/410 is gone for good (app deleted, endpoint rotated), so it's DROPPED
+    rather than retried forever."""
+    pub, priv, subject = _vapid()
+    if not (pub and priv):
+        return _push_warn("VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY unset")
+    try:
+        from pywebpush import WebPushException, webpush
+    except Exception as e:
+        return _push_warn("pywebpush not installed (%s)", e)
+    if not db.enabled():
+        return _push_warn("no DATABASE_URL, nowhere to store subscriptions")
+    subs = db.list_push_subs()
+    payload = json.dumps({"title": title, "body": body, "url": url or "/"})
+    out = []
+    for s in subs:
+        tail = s["endpoint"][-24:]
+        try:
+            # Fresh claims dict PER endpoint: pywebpush mutates it in place to stamp in
+            # the push service's `aud`, so a shared dict would sign Google's push with
+            # Apple's audience on the second device and earn a 403.
+            webpush(subscription_info=s, data=payload, vapid_private_key=priv,
+                    vapid_claims={"sub": subject}, ttl=3600, timeout=10)
+            out.append({"endpoint": tail, "ok": True})
+        except WebPushException as e:
+            code = getattr(getattr(e, "response", None), "status_code", 0)
+            if code in (404, 410):
+                db.remove_push_sub(s["endpoint"])
+            out.append({"endpoint": tail, "ok": False, "status": code, "error": str(e)[:160]})
+        except Exception as e:
+            out.append({"endpoint": tail, "ok": False, "error": str(e)[:160]})
+    if out:
+        logger.info("push sent: %d ok / %d devices", sum(1 for r in out if r["ok"]), len(out))
+    return out
+
+
+def send_push(title: str, body: str, url: str = "/") -> None:
+    """FIRE-AND-FORGET phone alert. Safe from anywhere — sync or async, hot path or not:
+    it hands off to a daemon thread and returns immediately, and it never raises."""
+    try:
+        threading.Thread(target=_push_now, name="ace2-push", daemon=True,
+                         args=(title or "ACE", (body or "").strip()[:180], url or "/")).start()
+    except Exception as e:
+        logger.warning("push: send_push could not start a thread: %s", e)
+
+
+class PushSubReq(BaseModel):
+    endpoint: str = ""
+    keys: dict = {}
+
+
+class PushUnsubReq(BaseModel):
+    endpoint: str = ""
+
+
+@app.get("/push/key", dependencies=[Depends(require_auth)])
+async def push_key():
+    """The VAPID public key the browser needs to subscribe. null = not configured yet,
+    which is the HUD's signal to never offer phone alerts at all."""
+    pub, priv, _ = _vapid()
+    return {"publicKey": pub if (pub and priv) else None, "storage": db.enabled()}
+
+
+@app.post("/push/subscribe", dependencies=[Depends(require_auth)])
+async def push_subscribe(req: PushSubReq):
+    """Store the device's PushSubscription (posted verbatim from pushManager.subscribe)."""
+    if not db.enabled():
+        return {"ok": False, "error": "no DATABASE_URL — nowhere to store the subscription"}
+    ok = await asyncio.to_thread(db.add_push_sub, {"endpoint": req.endpoint, "keys": req.keys})
+    if ok:
+        logger.info("push: device subscribed (…%s)", req.endpoint[-24:])
+    return {"ok": ok}
+
+
+@app.post("/push/unsubscribe", dependencies=[Depends(require_auth)])
+async def push_unsubscribe(req: PushUnsubReq):
+    return {"ok": await asyncio.to_thread(db.remove_push_sub, req.endpoint)}
+
+
+@app.post("/push/test", dependencies=[Depends(require_auth)])
+async def push_test():
+    """Send a test notification to every stored device and report what each one said —
+    the single call that proves the whole chain: keys → subscription → Apple/Google → SW."""
+    if not push_configured():
+        return {"ok": False, "error": "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set", "results": []}
+    results = await asyncio.to_thread(_push_now, "ACE", "Phone alerts are live. ◈", "/")
+    return {"ok": any(r.get("ok") for r in results), "devices": len(results), "results": results}
 
 
 # ── Static frontend (mounted last so API routes win) ────────────────────────────

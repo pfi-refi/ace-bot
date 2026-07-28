@@ -69,6 +69,7 @@
   <div id="quick">
     <button class="qa qa-cmd" id="command-btn" title="Your tasks & pipeline — Ace's own board">◧ Command</button>
     <button class="qa" id="pulse-btn" title="How's my business looking? (⌘K works too)">📊 Pulse</button>
+    <button class="qa qa-graph" id="graph-btn" title="The knowledge graph — your whole book of business as a live map">◉ Graph</button>
     <button class="qa" data-panel="timeline" title="Today's schedule">Schedule</button>
     <button class="qa" data-panel="inbox" title="Priority inbox">Inbox</button>
     <button class="qa" data-panel="weather" title="Weather">Weather</button>
@@ -83,6 +84,10 @@
         <rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/>
       </svg>
     </button>
+    <!-- CAPTURE ANYTHING — a plain file input (no `capture` attr) so iOS offers Camera *and*
+         Photos *and* Files, and desktop gets a normal picker. Drag-and-drop hits the same path. -->
+    <button id="clip-btn" class="icon-btn" title="Capture — photo, PDF, or voice memo">📎</button>
+    <input id="capture-file" type="file" accept="image/*,application/pdf,audio/*" hidden>
     <textarea id="chat-input" rows="1" placeholder="Talk to Ace…" autocomplete="off"></textarea>
     <button id="voice-toggle" class="icon-btn" title="Spoken replies on/off" aria-pressed="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

@@ -216,17 +216,25 @@ TOOLS = [
     {
         "name": "recall",
         "description": (
-            "TOTAL RECALL — search everything you and Brady have EVER discussed or "
-            "recorded: all past conversations (this app, Telegram, the archive), your "
-            "durable memory facts, and the data bank. Use whenever Brady references "
-            "something not in your live context — 'what did we say about…', 'that thing "
-            "from last week/month', a client or deal detail you don't see — instead of "
-            "guessing or saying you don't remember. Returns matched snippets with dates."
+            "TOTAL RECALL — searches by MEANING, not just exact words, across everything "
+            "you and Brady have EVER discussed or recorded: all past conversations (this "
+            "app, Telegram, the archive), your durable memory facts, and the task board / "
+            "data bank. It matches paraphrases, related wording, partial or misspelled "
+            "names, and fuzzy descriptions — so 'the guy from the port' can surface a "
+            "person Brady never named here, and 'that equipment deal' can surface the "
+            "machine by its actual name. Use it whenever Brady references something not "
+            "in your live context — 'what did we say about…', 'that thing from last "
+            "week/month', a person, client or deal detail you don't see — instead of "
+            "guessing or saying you don't remember. If the first phrasing comes back "
+            "thin, try a different angle (a role, a place, a topic) rather than giving "
+            "up. Returns matched snippets with dates and where each came from."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Keywords to search memory for (names, deals, topics)"},
+                "query": {"type": "string", "description": (
+                    "What to look for, in natural words — a description, paraphrase, "
+                    "partial name, role, place or topic. Exact keywords not required.")},
                 "max_results": {"type": "integer", "description": "How many matches (1-20, default 8)"},
             },
             "required": ["query"],

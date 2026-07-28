@@ -518,6 +518,7 @@ async def prime_ctx() -> None:
         asyncio.create_task(_ctx_keepwarm())
         asyncio.create_task(_learn_loop())
         asyncio.create_task(_brief_loop())   # proactive: morning game plan + EOD recap
+        asyncio.create_task(_watch_loop())   # ambient: he notices things and speaks up unasked
 
 
 # ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───
@@ -797,6 +798,17 @@ async def generate_brief(kind: str = "morning") -> str:
         await asyncio.to_thread(history.append, "assistant", delivered)
         await asyncio.to_thread(db.add_summary, now.strftime("%Y-%m-%d"), f"brief_{kind}")
         logger.info("brief delivered: %s (%d chars)", kind, len(text))
+        # …and to the PHONE. The HUD push (publish_stage_event) only reaches an OPEN tab;
+        # this is the one that lands on a locked screen. Fire-and-forget, threaded, and
+        # completely inert until the VAPID keys are set — a brief never waits on it and
+        # never fails because of it. Both brief paths (the loop and /brief/run) come
+        # through here, so one call site covers morning and EOD.
+        try:
+            from .main import send_push
+            send_push("ACE · Morning Brief" if kind == "morning" else "ACE · Evening Recap",
+                      text, "/")
+        except Exception as e:
+            logger.warning("brief phone push skipped: %s", e)
         return delivered
     except Exception as e:
         logger.warning("generate_brief(%s) failed: %s", kind, e)
@@ -915,6 +927,243 @@ async def _brief_loop() -> None:
                         await publish_stage_event("brief", {"kind": kind, "text": text})
                     except Exception:
                         pass
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+# ── AMBIENT WATCH — Ace notices things and speaks up UNASKED ────────────────────
+# The other half of proactive: the briefs are scheduled, this one is ambient. Every pass
+# diffs the world DETERMINISTICALLY first (email ids, event fingerprints, deal ages) and
+# spends a model call ONLY when something actually moved — an idle afternoon costs nothing.
+# The model's main job is to say NOTHING: an interruption Brady never asked for has to earn
+# its place, and a chatty watcher gets muted, which kills the whole feature. Hence the caps.
+_WATCH_INTERVAL = 12 * 60.0             # sweep ~every 12 min
+_WATCH_WAKE = (7 * 60, 21 * 60 + 30)    # 7:00–21:30 Eastern — he is NEVER pinged outside this
+_WATCH_MAX_DAY = 3                      # a 4th nudge in one day is noise, not help
+_WATCH_GAP_SEC = 45 * 60                # ...and never two back-to-back
+_WATCH_COLD_DAYS = 10                   # a Deal untouched this long is going cold
+_watch_running = [False]
+_watch_last_ts = [0.0]   # process-local floor on the gap, so a failed db read can't unmute him
+
+# Sender words that say nothing about WHO wrote: without this "PFI Support" matches the board
+# on "support" and every no-reply blast reads like a client getting in touch.
+_WATCH_GENERIC = {
+    "noreply", "reply", "team", "support", "info", "notifications", "notification", "news",
+    "newsletter", "mail", "email", "admin", "service", "services", "customer", "account",
+    "accounts", "sales", "billing", "alert", "alerts", "hello", "help", "update", "updates",
+    "care", "office", "contact", "group", "response", "invoice", "receipt", "llc", "inc",
+}
+
+
+def _watch_known_sender(sender: str, vocab: set) -> bool:
+    """True when a sender's name already shows up in Ace's own world (facts + board) — the
+    line between 'a client just emailed' and 'a vendor blasted a list'."""
+    import re
+    return any(w in vocab for w in re.findall(r"[a-z0-9]+", (sender or "").lower())
+               if len(w) >= 4 and w not in _WATCH_GENERIC)
+
+
+def _watch_scan(inbox: list, events: list, items: list, facts: list, prior: dict, now: datetime):
+    """The cheap deterministic half: what a person would actually NOTICE since the last pass.
+    Returns (signals, state) — state is the fingerprint set handed to the next pass, so each
+    thing is noticed exactly once no matter how many passes see it."""
+    import re
+    vocab = set()
+    for t in list(facts) + [i.get("text", "") for i in items]:
+        vocab.update(w for w in re.findall(r"[a-z0-9]+", (t or "").lower()) if len(w) >= 4)
+    prior_mail = set(prior.get("emails") or [])
+    prior_ev = dict(prior.get("events") or {})
+    flagged = list(prior.get("flagged") or [])
+    fset = set(flagged)
+    signals = []
+
+    for m in inbox:
+        mid = m.get("id") or ""
+        if not mid or mid in prior_mail or not _watch_known_sender(m.get("from", ""), vocab):
+            continue   # a stranger's cold email is not worth his attention; a name he knows is
+        signals.append(f"NEW EMAIL from {m.get('from', '?')} — \"{m.get('subject', '')}\" — "
+                       f"{m.get('snippet', '')[:100]}")
+
+    ev_state, horizon = {}, now + timedelta(hours=24)
+    today_str = now.strftime("%Y-%m-%d")
+    tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    for e in events:
+        key = f"{e.get('title', '')}|{e.get('date', '')}"
+        ev_state[key] = e.get("iso", "")
+        try:
+            start = datetime.fromisoformat(e["iso"])
+        except Exception:
+            continue
+        # All-day items have a midnight start, so the clock window would always call them past.
+        if e.get("all_day"):
+            in_window = e.get("date", "") in (today_str, tomorrow_str)
+        else:
+            in_window = (now - timedelta(minutes=5)) <= start <= horizon
+        if not in_window:
+            continue
+        was = prior_ev.get(key)
+        if was is None:
+            signals.append(f"CALENDAR ADDED: {e.get('day_label', '')} {e.get('time', '')} — "
+                           f"{e.get('title', '')}")
+        elif was != e.get("iso", ""):
+            signals.append(f"CALENDAR MOVED: {e.get('title', '')} → {e.get('day_label', '')} "
+                           f"{e.get('time', '')}")
+        mins = int((start - now).total_seconds() // 60)
+        if not e.get("all_day") and 0 <= mins <= 30 and key not in fset:
+            signals.append(f"STARTS IN {mins} MIN: {e.get('time', '')} — {e.get('title', '')}")
+            flagged.append(key)
+            fset.add(key)
+
+    for it in items:
+        if "Deals" not in (it.get("tags") or []):
+            continue
+        key = "deal:" + str(it.get("id", ""))
+        if key in fset:
+            continue
+        try:
+            age = (now - datetime.fromisoformat(it["ts"])).days
+        except Exception:
+            continue
+        if age >= _WATCH_COLD_DAYS:
+            signals.append(f"DEAL GOING COLD: {it.get('text', '')[:70]} — {age} days untouched")
+            flagged.append(key)
+            fset.add(key)
+
+    mail_state = [m.get("id") for m in inbox if m.get("id")]
+    mail_state += sorted(prior_mail - set(mail_state))   # sorted → a stable blob, so state
+    return signals, {                                    # writes happen only on real change
+        "emails": mail_state[:80], "events": ev_state, "flagged": flagged[-60:],
+    }
+
+
+async def _watch_pass_once(force: bool = False, dry_run: bool = False) -> dict:
+    """One ambient pass: deterministic diff → at most ONE model call → at most one nudge.
+    Returns the decision (this is what /watch/run reports). force skips the quiet-hours and
+    rate-limit gates for testing; dry_run decides but delivers nothing and keeps the state."""
+    if _watch_running[0]:
+        return {"nudged": False, "skipped": "busy"}
+    _watch_running[0] = True
+    try:
+        from . import db
+        if not db.enabled():
+            return {"nudged": False, "skipped": "no db"}
+        now = datetime.now(EASTERN)
+        cur = now.hour * 60 + now.minute
+        if not force and not (_WATCH_WAKE[0] <= cur <= _WATCH_WAKE[1]):
+            return {"nudged": False, "skipped": "quiet hours"}
+        today = now.strftime("%Y-%m-%d")
+        # ONE marker carries both caps: its text is today's count, its ts is the last nudge.
+        mark = await asyncio.to_thread(db.latest_summary, "nudge_count")
+        sent_today = 0
+        if (mark.get("text") or "").startswith(today):
+            try:
+                sent_today = int(mark["text"].split(":")[-1])
+            except Exception:
+                sent_today = _WATCH_MAX_DAY   # unreadable marker → assume spent and stay quiet
+        last_ts = _watch_last_ts[0]
+        if mark.get("ts"):
+            try:
+                last_ts = max(last_ts, datetime.fromisoformat(mark["ts"]).timestamp())
+            except Exception:
+                pass
+        if not force:
+            if sent_today >= _WATCH_MAX_DAY:
+                return {"nudged": False, "skipped": "daily cap"}
+            if (time.time() - last_ts) < _WATCH_GAP_SEC:
+                return {"nudged": False, "skipped": "too soon"}
+
+        inbox, events, items, facts, prior_raw = await asyncio.gather(
+            asyncio.to_thread(get_inbox_structured, 10),
+            asyncio.to_thread(get_events_structured, 2),
+            asyncio.to_thread(db.read_items, False),
+            asyncio.to_thread(db.read_facts),
+            asyncio.to_thread(db.latest_summary, "watch_state"),
+            return_exceptions=True,
+        )
+
+        def ok(v, d):
+            return d if isinstance(v, Exception) or v is None else v
+
+        inbox, events, facts = ok(inbox, []), ok(events, []), ok(facts, [])
+        items = [i for i in ok(items, []) if i.get("status") == "open"]
+        try:
+            prior = json.loads(ok(prior_raw, {}).get("text") or "{}")
+        except Exception:
+            prior = {}
+        signals, state = _watch_scan(inbox, events, items, facts, prior, now)
+        if not prior:
+            # First pass ever (or after a wipe) — everything looks new. Set the baseline and
+            # stay silent; nobody wants a nudge storm the minute a deploy lands.
+            if not dry_run:
+                await asyncio.to_thread(db.add_summary, json.dumps(state, sort_keys=True), "watch_state")
+            return {"nudged": False, "skipped": "baseline set", "signals": signals}
+        blob = json.dumps(state, sort_keys=True)
+        if not dry_run and blob != json.dumps(prior, sort_keys=True):
+            # Consume the signals BEFORE deciding: whatever the model does with them, the same
+            # email/event never gets re-argued every 12 minutes for the rest of the day.
+            await asyncio.to_thread(db.add_summary, blob, "watch_state")
+        if not signals:
+            return {"nudged": False, "skipped": "nothing changed"}
+
+        sched = _format_today_schedule([e for e in events if e.get("date") == today], now)
+        board = "\n".join(f"- [{','.join(i.get('tags') or []) or 'untagged'}] {i.get('text', '')[:70]}"
+                          for i in items[:25]) or "(empty)"
+        thread = _format_thread(await asyncio.to_thread(_unified_thread, 8))
+        client = _anthropic()
+        resp = await client.messages.create(
+            model=LEARN_MODEL, max_tokens=120,
+            messages=[{"role": "user", "content": (
+                "You are Ace's ambient watch — you noticed something and now you decide whether "
+                "it is worth INTERRUPTING Brady for, unprompted, mid-work. Silence is the default "
+                "and the right answer most of the time: he gets at most 3 of these in a day.\n"
+                "Speak up only for what a sharp chief of staff would tap him on the shoulder for "
+                "RIGHT NOW: a client or agent he knows sent something that needs him, a meeting "
+                "that moved or starts within the hour with nothing prepped for it, a live deal "
+                "going cold. Stay silent for newsletters and vendors, anything he obviously "
+                "already knows (check the recent thread), anything that can wait for tonight's "
+                "recap or tomorrow's brief, and anything you'd only say to look useful.\n"
+                "If it clears that bar, reply with EXACTLY ONE sentence, 20 words max, in his "
+                "register: direct, specific, names and numbers, no greeting, no 'just wanted to', "
+                "no offer to help, no question. Otherwise reply with the single word NOTHING.\n\n"
+                f"TIME: {now.strftime('%A, %B %-d — %-I:%M %p')} ET\n\n"
+                "WHAT CHANGED SINCE THE LAST PASS:\n" + "\n".join(f"- {s}" for s in signals)
+                + f"\n\nTODAY'S SCHEDULE:\n{sched}\n\nHIS OPEN BOARD:\n{board}"
+                + f"\n\nRECENT THREAD (never repeat something already said here):\n{thread}")}])
+        text = "".join(getattr(b, "text", "") for b in resp.content).strip()
+        text = text.split("\n")[0].strip().strip('"').strip()[:220]
+        if not text or text.upper().startswith("NOTHING"):
+            return {"nudged": False, "skipped": "not worth interrupting", "signals": signals}
+        delivered = f"◈ HEADS UP — {text}"
+        if dry_run:
+            return {"nudged": False, "dry_run": True, "text": delivered, "signals": signals}
+        # CLAIM FIRST — bump the counter before delivering, so a deploy-overlap twin that
+        # decides the same thing in the same minute can't double-tap him.
+        if not await asyncio.to_thread(db.add_summary, f"{today}:{sent_today + 1}", "nudge_count"):
+            return {"nudged": False, "skipped": "claim failed", "signals": signals}
+        _watch_last_ts[0] = time.time()
+        await asyncio.to_thread(history.append, "assistant", delivered)
+        try:
+            from .main import publish_stage_event
+            await publish_stage_event("nudge", {"text": delivered})
+        except Exception:
+            pass
+        logger.info("nudge delivered (%d today): %s", sent_today + 1, text[:80])
+        return {"nudged": True, "text": delivered, "count_today": sent_today + 1, "signals": signals}
+    except Exception as e:
+        logger.warning("watch pass failed: %s", e)
+        return {"nudged": False, "error": str(e)}
+    finally:
+        _watch_running[0] = False
+
+
+async def _watch_loop() -> None:
+    """Sleeps FIRST so a boot or redeploy never fires a nudge before the caches are warm."""
+    while True:
+        try:
+            await asyncio.sleep(_WATCH_INTERVAL)
+            await _watch_pass_once()
         except asyncio.CancelledError:
             break
         except Exception:
