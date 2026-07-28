@@ -14,12 +14,14 @@ const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
 
 self.addEventListener('install', (e) => {
   // Seed the offline fallback from the NETWORK (cache:'reload' bypasses the browser's
-  // HTTP cache). Best-effort: install must not fail if one icon 404s.
+  // HTTP cache). Best-effort per file — but only take over (skipWaiting) if the shell
+  // root actually seeded, so a failed install can't promote an empty cache.
   e.waitUntil(caches.open(CACHE_VERSION)
     .then((c) => Promise.allSettled(
       SHELL.map((u) => fetch(new Request(u, { cache: 'reload' }))
-        .then((res) => { if (res.ok) return c.put(u, res); }))))
-    .then(() => self.skipWaiting()));
+        .then((res) => { if (res.ok) return c.put(u, res); })))
+      .then(() => c.match('/')))
+    .then((rootSeeded) => { if (rootSeeded) return self.skipWaiting(); }));
 });
 
 self.addEventListener('activate', (e) => {
@@ -39,14 +41,22 @@ self.addEventListener('fetch', (e) => {
   const isShell = SHELL.includes(url.pathname) || req.mode === 'navigate';
   if (!isShell) return;                                // API + everything else → network (default)
 
-  // NETWORK-FIRST: fresh when online (and refresh the fallback copy); cache when offline.
+  // NETWORK-FIRST: fresh when online (and refresh the fallback copy). Fall back to cache
+  // when the network fails, returns a server error (mid-deploy 502s), or is slower than
+  // ~3.5s on a warm cache — so the app opens instantly even on a flaky radio.
+  const cacheKey = (req.mode === 'navigate' || url.pathname === '/') ? '/' : url.pathname;
+  const net = fetch(req);
   e.respondWith(
-    fetch(req).then((res) => {
-      if (res.ok) {
-        const copy = res.clone();
-        caches.open(CACHE_VERSION).then((c) => c.put(url.pathname, copy));
+    Promise.race([
+      net,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('sw-timeout')), 3500)),
+    ]).then((res) => {
+      if (!res.ok) {
+        return caches.match(cacheKey).then((hit) => hit || res);   // 502 mid-deploy → cached shell
       }
+      const copy = res.clone();
+      caches.open(CACHE_VERSION).then((c) => c.put(url.pathname, copy));
       return res;
-    }).catch(() => caches.match(url.pathname === '/' || req.mode === 'navigate' ? '/' : url.pathname))
+    }).catch(() => caches.match(cacheKey).then((hit) => hit || net))
   );
 });

@@ -632,14 +632,20 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                     "You are Ace reflecting on how to serve Brady better. From this conversation, "
                     "list up to 3 SELF-IMPROVEMENT notes — ONLY genuine signals like: something "
                     "Brady asked for that Ace couldn't do or got wrong, a capability he wished "
-                    "for, repeated manual work Ace should automate, or a misroute/miss. One per "
-                    "line, ~15 words, no bullets. If none, reply NONE.\n\n"
+                    "for, repeated manual work Ace should automate, or a misroute/miss. ~15 words "
+                    "each. One per line, EXACTLY: NOTE :: <the note>. No other text. If none, "
+                    "reply NONE.\n\n"
                     f"CONVERSATION:\n{convo}")}])
             t3 = "".join(getattr(b, "text", "") for b in resp3.content).strip()
             if t3 and not t3.upper().startswith("NONE"):
-                notes = [f"ACE SELF-NOTE: {ln.strip('-•* ').strip()}"
-                         for ln in t3.split("\n")
-                         if len(ln.strip()) > 12 and not ln.strip().upper().startswith("NONE")][:3]
+                notes = []
+                for ln in t3.split("\n"):
+                    if "::" not in ln:
+                        continue   # line protocol keeps preamble/junk out of permanent memory
+                    body = ln.split("::", 1)[1].strip()
+                    if len(body) > 12:
+                        notes.append(f"ACE SELF-NOTE: {body}")
+                notes = notes[:3]
                 if notes:
                     await asyncio.to_thread(brain.add_memory, notes, "reflection")
                     logger.info("reflection: filed %d self-note(s)", len(notes))
@@ -728,8 +734,8 @@ async def generate_brief(kind: str = "morning") -> str:
     from . import db
     try:
         stats = await asyncio.to_thread(_board_stats)
-        events_today, wx, convo = await asyncio.gather(
-            asyncio.to_thread(get_events_structured, 1),
+        events_raw, wx, convo = await asyncio.gather(
+            asyncio.to_thread(get_events_structured, 2 if kind == "eod" else 1),
             get_weather(),
             asyncio.to_thread(_unified_thread, 16),
             return_exceptions=True,
@@ -737,7 +743,15 @@ async def generate_brief(kind: str = "morning") -> str:
         def ok(v, d):
             return d if isinstance(v, Exception) else v
         now = datetime.now(EASTERN)
-        sched = _format_today_schedule(ok(events_today, []), now)
+        events = ok(events_raw, [])
+        today_str = now.strftime("%Y-%m-%d")
+        sched = _format_today_schedule([e for e in events if e.get("date") == today_str], now)
+        tomorrow_block = ""
+        if kind == "eod":
+            tom = [e for e in events if e.get("date") != today_str][:4]
+            tomorrow_block = "\n\nTOMORROW'S FIRST EVENTS:\n" + (
+                "\n".join(f"- {e.get('time','')} {e.get('title','')}" for e in tom)
+                or "(nothing scheduled yet)")
         goals = [f for f in await asyncio.to_thread(brain.read_memory) if "goal" in f.lower()][:6]
         client = _anthropic()
         if kind == "morning":
@@ -777,9 +791,14 @@ async def generate_brief(kind: str = "morning") -> str:
         return ""
 
 
+_brief_sent: dict = {}   # process-local claim: {kind: "YYYY-MM-DD"} — survives db outages
+
+
 async def _brief_loop() -> None:
-    """Fire the morning/EOD briefs at their Eastern times — once per day each, guarded by a
-    summary marker so restarts/redeploys never double-send."""
+    """Fire the morning/EOD briefs at their Eastern times — once per day each, INSIDE a
+    2-hour window (a late boot never sends a 'morning' brief at 11pm). Claim-first via a
+    local guard + db marker so restarts, deploy overlaps, and db outages never double-send
+    or spam-generate."""
     from . import db
     while True:
         try:
@@ -787,12 +806,21 @@ async def _brief_loop() -> None:
             if not db.enabled():
                 continue
             now = datetime.now(EASTERN)
+            today = now.strftime("%Y-%m-%d")
+            cur = now.hour * 60 + now.minute
             for kind, (hh, mm) in _BRIEF_TIMES.items():
-                if (now.hour, now.minute) < (hh, mm):
-                    continue
+                if not (0 <= cur - (hh * 60 + mm) <= 120):
+                    continue   # only within 2h of the target — missed windows are skipped
+                if _brief_sent.get(kind) == today:
+                    continue   # local claim (also caps retries if db reads fail)
                 last = await asyncio.to_thread(db.latest_summary, f"brief_{kind}")
-                if (last.get("text") or "") == now.strftime("%Y-%m-%d"):
-                    continue   # already sent today
+                if (last.get("text") or "") == today:
+                    _brief_sent[kind] = today
+                    continue   # already sent (other container / before restart)
+                # CLAIM FIRST — before the LLM call — so a deploy-overlap twin can't double-send.
+                _brief_sent[kind] = today
+                if not await asyncio.to_thread(db.add_summary, today, f"brief_{kind}"):
+                    continue   # db write failed: keep the local claim, try again tomorrow
                 text = await generate_brief(kind)
                 if text:
                     try:

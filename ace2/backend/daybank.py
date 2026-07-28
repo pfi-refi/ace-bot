@@ -142,6 +142,8 @@ def update_item(item_id: str, status: str = None, text: str = None,
     enabled, else Drive (Drive path supports status/text only)."""
     if db.enabled():
         return db.update_item(item_id, status, text, tags=tags, due=due)
+    if tags is not None or due is not None:
+        return False, "category/due edits require the Postgres store"
     return _drive_update_item(item_id, status, text)
 
 

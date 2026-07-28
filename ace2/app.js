@@ -375,8 +375,7 @@
     if (aceMode === 'chat' && !chatOpen) setChat(true);
     applyChatState();
     connectWS();
-    loadToday();
-    loadDashboard();
+    loadToday();   // feeds the up-next strip; the stage stays clean (dock summons cards)
     checkConvai();
     loadHistory();   // renders the recent thread, then drops the greeting under it
   }
@@ -441,7 +440,10 @@
       case 'delta': if (!streamMsg) streamMsg = beginAceStream(); appendToStream(streamMsg, msg.text); break;
       case 'tool': renderTool(msg); break;
       case 'card': materializeCard(msg.panel, msg.data, msg.where); break;
-      case 'brief': addAceMessage(msg.text); markUnread(); break;   // proactive brief, pushed live
+      case 'brief':   // proactive brief pushed live — spoken like JARVIS unless in silent chat mode
+        addAceMessage(msg.text);
+        if (!document.body.classList.contains('mode-chat')) speak(msg.text);
+        break;
       case 'open': openLink(msg.url, msg.label); break;
       case 'run_on_hud': runOnHud(msg.message); break;
       case 'confirmation': renderConfirm(msg.text); break;
@@ -527,7 +529,12 @@
     var body = document.createElement('div'); body.className = 'card-body';
     card.appendChild(head); card.appendChild(body);
     // one card per panel across BOTH slots (so re-placing moves it); cap each slot at 4
-    var dup = document.querySelector('.card[data-panel="' + title + '"]'); if (dup) dup.remove();
+    var dup = document.querySelector('.card[data-panel="' + title + '"]');
+    if (dup) {
+      // a maximized (viewfinder) card stays maximized through data refreshes
+      if (dup.classList.contains('card-max')) card.classList.add('card-max');
+      dup.remove();
+    }
     card.setAttribute('data-panel', title);
     host.insertBefore(card, host.firstChild);
     while (host.children.length > 4) host.removeChild(host.lastChild);   // cap each slot at 4
@@ -667,15 +674,8 @@
       });
     }
   }
-  // CLEAN BY DEFAULT (Brady's call): no auto-cards on startup — the stage is the orb.
-  // The dock summons surfaces on demand; Ace materializes cards himself when asked.
-  // We still fetch today's events silently so the always-on up-next strip stays live.
-  function loadDashboard() {
-    fetch(API + '/calendar?days=1', { headers: headers() })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d) { todayEvents = d.events || []; todayLoaded = true; renderUpNext(); } })
-      .catch(function () {});
-  }
+  // CLEAN BY DEFAULT (Brady's call): no auto-cards on startup — the stage is the orb,
+  // the dock summons surfaces on demand, and loadToday() keeps the up-next strip live.
   function toggleBankItem(id, status) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
       .then(function (r) { return r.ok ? r.json() : null; })
@@ -968,14 +968,17 @@
   function cmdRow(it){
     var c=cmdCatOf(it), col=CMD_CATS[c], done=it.status==='done';
     if (cmd.editing === it.id) {
+      var dText = (cmd.draft && cmd.draft.text != null) ? cmd.draft.text : it.text;
+      var dCat  = (cmd.draft && cmd.draft.cat) || c;
+      var dDue  = (cmd.draft && cmd.draft.due != null) ? cmd.draft.due : (it.due || '');
       var opts = CMD_ORDER.map(function (o) {
-        return '<option value="'+o+'"'+(o===c?' selected':'')+'>'+o+'</option>';
+        return '<option value="'+o+'"'+(o===dCat?' selected':'')+'>'+o+'</option>';
       }).join('');
       return '<div class="cmd-row cmd-editing" data-id="'+it.id+'" style="border-left-color:'+col+'">'
         +'<div class="cmd-eform">'
-        +'<textarea class="cmd-etext" rows="2">'+cmdEsc(it.text)+'</textarea>'
+        +'<textarea class="cmd-etext" rows="2">'+cmdEsc(dText)+'</textarea>'
         +'<div class="cmd-erow"><select class="cmd-ecat">'+opts+'</select>'
-        +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(it.due||'')+'"></div>'
+        +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(dDue)+'"></div>'
         +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button></div>'
         +'</div></div>';
     }
@@ -989,6 +992,16 @@
   }
   function cmdRender(){
     var v=document.getElementById('command-view'); if(!v) return;
+    // Preserve unsaved editor input across ANY re-render (checkbox ticks, lens/chip taps):
+    // snapshot the open editor's values so the rebuilt form rehydrates them.
+    if (cmd.editing) {
+      var er = v.querySelector('.cmd-row.cmd-editing');
+      if (er) cmd.draft = {
+        text: er.querySelector('.cmd-etext').value,
+        cat:  er.querySelector('.cmd-ecat').value,
+        due:  er.querySelector('.cmd-edue').value
+      };
+    }
     if(cmd.min){
       var nx=cmd.items.filter(function(x){return x.status!=='done';})[0];
       v.innerHTML='<div class="cmd-clean"><div class="cmd-orb-big" id="cmd-orb-big"></div>'
@@ -1027,24 +1040,35 @@
     }; });
     // FULL EDITING (Brady): ✎ opens the inline editor — rewrite text, move category, set due.
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-pencil'), function(b){ b.onclick=function(){
+      cmd.draft = null;   // fresh item → fresh editor
       cmd.editing = b.parentNode.getAttribute('data-id'); cmdRender();
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-ecancel'), function(b){ b.onclick=function(){
-      cmd.editing = null; cmdRender();
+      cmd.editing = null; cmd.draft = null; cmdRender();
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
       var row = b.closest('.cmd-row'); if (!row) return;
       var id = row.getAttribute('data-id');
+      var ta = row.querySelector('.cmd-etext');
       var body = {
         id: id,
-        text: (row.querySelector('.cmd-etext').value || '').trim(),
+        text: (ta.value || '').trim(),
         category: row.querySelector('.cmd-ecat').value,
         due: (row.querySelector('.cmd-edue').value || '').trim()
       };
+      if (!body.text) { ta.style.borderColor = '#ff6b6b'; ta.focus(); return; }   // blank = no-op server-side
       b.textContent = 'SAVING…'; b.disabled = true;
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify(body)})
-        .then(function(){ cmd.editing = null; return cmdFetch(); }).then(cmdRender)
-        .catch(function(){ cmd.editing = null; cmdRender(); });
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (!d || !d.ok) throw 0;
+          cmd.editing = null; cmd.draft = null;
+          return cmdFetch().then(cmdRender);
+        })
+        .catch(function(){
+          // keep the editor open with the typed values — never eat an edit silently
+          b.textContent = 'RETRY SAVE'; b.disabled = false;
+        });
     }; });
     var f=v.querySelector('#cmd-add');
     if(f) f.onsubmit=function(e){ e.preventDefault(); var inp=v.querySelector('#cmd-input'); var t=(inp.value||'').trim(); if(!t) return; inp.value='';

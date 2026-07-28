@@ -308,9 +308,16 @@ def complete_all_tasks(dry_run: bool = True) -> dict:
             if "no touch" in name.lower():
                 out["lists"].append({"list": name, "open": 0, "skipped": True})
                 continue
-            tasks = service.tasks().list(
-                tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=100,
-            ).execute().get("items", [])
+            tasks, page = [], None
+            while True:   # paginate — a 100+ task list must not be silently half-cleared
+                resp = service.tasks().list(
+                    tasklist=tl["id"], showCompleted=False, showHidden=False,
+                    maxResults=100, pageToken=page,
+                ).execute()
+                tasks.extend(resp.get("items", []))
+                page = resp.get("nextPageToken")
+                if not page:
+                    break
             open_tasks = [t for t in tasks if t.get("status") != "completed" and (t.get("title") or "").strip()]
             out["total"] += len(open_tasks)
             done_here = 0
