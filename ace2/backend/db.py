@@ -628,26 +628,33 @@ UNION ALL
   ORDER BY score DESC LIMIT %(n)s)
 """
 
-_TRGM_SQL = """
+# `HAS_CONTENT` gates trigram on the query containing at least one real lexeme. Without
+# it a query of pure stopwords ("the a of") returns nothing from FTS but a pile of
+# trigram noise — "the … of" is a character pattern that occurs everywhere. Empty
+# tsquery ⇒ nothing meaningful was asked ⇒ return nothing and let recall() say so.
+_HAS_CONTENT = "(SELECT tsq FROM q)::text <> ''"
+
+_TRGM_SQL = f"""
+WITH q AS (SELECT {_TSQ} AS tsq)
 (SELECT 'fact' AS source, f.id::text AS ref, f.text AS text, f.ts AS ts,
         COALESCE(f.tier, '') AS label,
         word_similarity(%(q)s, f.text) AS score
    FROM facts f
-  WHERE word_similarity(%(q)s, f.text) >= %(t)s
+  WHERE {_HAS_CONTENT} AND word_similarity(%(q)s, f.text) >= %(t)s
   ORDER BY score DESC LIMIT %(n)s)
 UNION ALL
 (SELECT 'turn' AS source, t.id::text AS ref, t.content AS text, t.ts AS ts,
         COALESCE(t.role, '') AS label,
         word_similarity(%(q)s, t.content) AS score
    FROM (SELECT id, ts, role, content FROM turns ORDER BY id DESC LIMIT %(scan)s) t
-  WHERE word_similarity(%(q)s, t.content) >= %(t)s
+  WHERE {_HAS_CONTENT} AND word_similarity(%(q)s, t.content) >= %(t)s
   ORDER BY score DESC LIMIT %(n)s)
 UNION ALL
 (SELECT 'item' AS source, d.id::text AS ref, d.text AS text, d.ts AS ts,
         COALESCE(d.status, '') AS label,
         word_similarity(%(q)s, d.text) AS score
    FROM daybank_items d
-  WHERE word_similarity(%(q)s, d.text) >= %(t)s
+  WHERE {_HAS_CONTENT} AND word_similarity(%(q)s, d.text) >= %(t)s
   ORDER BY score DESC LIMIT %(n)s)
 """
 

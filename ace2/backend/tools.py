@@ -227,7 +227,9 @@ TOOLS = [
             "week/month', a person, client or deal detail you don't see — instead of "
             "guessing or saying you don't remember. If the first phrasing comes back "
             "thin, try a different angle (a role, a place, a topic) rather than giving "
-            "up. Returns matched snippets with dates and where each came from."
+            "up. Returns matched snippets with dates and where each came from — these "
+            "are ranked CANDIDATES, so read them and, if none actually answer what "
+            "Brady asked, say so plainly instead of forcing the closest one to fit."
         ),
         "input_schema": {
             "type": "object",
