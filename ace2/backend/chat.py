@@ -752,7 +752,16 @@ async def generate_brief(kind: str = "morning") -> str:
             tomorrow_block = "\n\nTOMORROW'S FIRST EVENTS:\n" + (
                 "\n".join(f"- {e.get('time','')} {e.get('title','')}" for e in tom)
                 or "(nothing scheduled yet)")
-        goals = [f for f in await asyncio.to_thread(brain.read_memory) if "goal" in f.lower()][:6]
+        mem_all = await asyncio.to_thread(brain.read_memory)
+        goals = [f for f in mem_all if "goal" in f.lower() and not f.startswith("ACE SELF-NOTE")][:6]
+        self_notes = [f for f in mem_all if f.startswith("ACE SELF-NOTE")][-3:]
+        # Brief feedback steering — Brady's 👍/👎 votes tune tomorrow's brief
+        fb = await asyncio.to_thread(db.latest_summary, "brief_feedback")
+        fb_line = ""
+        if fb.get("text", "").endswith(":down"):
+            fb_line = "\n\nNOTE: Brady thumbed-down the last brief — tighten it, drop filler, sharper priorities."
+        elif fb.get("text", "").endswith(":up"):
+            fb_line = "\n\nNOTE: Brady liked the last brief — keep this style."
         client = _anthropic()
         if kind == "morning":
             ask = (
@@ -774,8 +783,11 @@ async def generate_brief(kind: str = "morning") -> str:
             model=LEARN_MODEL, max_tokens=400,
             messages=[{"role": "user", "content": (
                 f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
-                f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}\n\n"
+                f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
                 f"{stats}\n\nHIS GOALS:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+                + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
+                   + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
+                + fb_line
                 + "\n\nRECENT THREAD (for what happened):\n" + _format_thread(ok(convo, [])))}])
         text = "".join(getattr(b, "text", "") for b in resp.content).strip()
         if not text:
@@ -788,6 +800,81 @@ async def generate_brief(kind: str = "morning") -> str:
         return delivered
     except Exception as e:
         logger.warning("generate_brief(%s) failed: %s", kind, e)
+        return ""
+
+
+async def generate_business_report() -> str:
+    """THE 'HOW'S MY BUSINESS?' REPORT — on-demand deep snapshot: full pipeline by
+    category with ages, wins (30d), goals vs pace, week ahead, and straight talk on
+    what needs attention. Deterministic numbers first; the deep model writes the read."""
+    from . import db
+    try:
+        now = datetime.now(EASTERN)
+        items, facts, events, convo = await asyncio.gather(
+            asyncio.to_thread(db.read_items, False),
+            asyncio.to_thread(db.read_facts_full),
+            asyncio.to_thread(get_events_structured, 7),
+            asyncio.to_thread(_unified_thread, 12),
+            return_exceptions=True,
+        )
+        def ok(v, d):
+            return d if isinstance(v, Exception) else v
+        items, facts, events = ok(items, []), ok(facts, []), ok(events, [])
+        _CATS = ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"]
+        def cat(it):
+            for t in (it.get("tags") or []):
+                if t in _CATS:
+                    return t
+            return "Admin"
+        lines = []
+        for c in ["Deals", "Agents"]:
+            rows = []
+            for i in items:
+                if i.get("status") == "open" and cat(i) == c:
+                    try:
+                        age = (now - datetime.fromisoformat(i["ts"])).days
+                    except Exception:
+                        age = "?"
+                    rows.append(f"  - {i.get('text','')[:70]} [{age}d old]")
+            lines.append(f"{c.upper()} ({len(rows)} open):\n" + ("\n".join(rows) or "  (none)"))
+        goals = [i.get("text", "") for i in items if i.get("status") == "open" and cat(i) == "Goals"]
+        lines.append("GOALS:\n" + ("\n".join(f"  - {g[:70]}" for g in goals) or "  (none)"))
+        wins = []
+        for f in facts:
+            t = f.get("text", "")
+            if (t.startswith("Deal won:") or t.startswith("Goal reached:")) and not f.get("invalid_at"):
+                try:
+                    if (now - datetime.fromisoformat(f["ts"]).astimezone(EASTERN)).days <= 30:
+                        wins.append(f"  - {t[:75]}")
+                except Exception:
+                    pass
+        lines.append("WINS (last 30 days):\n" + ("\n".join(wins) or "  (none logged yet)"))
+        week = "\n".join(f"  - {e.get('date','')} {e.get('time','')} {e.get('title','')[:55]}"
+                         for e in events[:14]) or "  (clear)"
+        lines.append("WEEK AHEAD:\n" + week)
+        client = _anthropic()
+        resp = await client.messages.create(
+            model=LEARN_MODEL, max_tokens=900,
+            messages=[{"role": "user", "content": (
+                "You are Ace giving Brady the straight 'how's my business looking' read — his "
+                "JARVIS chief of staff who knows the whole book. From the REAL data below, write: "
+                "(1) THE HEADLINE — one sentence, honest temperature of the business; "
+                "(2) PIPELINE — what's moving, what's aging out (call out anything 10+ days old "
+                "by name), where the money is this month; (3) TEAM — agent momentum, who needs a "
+                "push; (4) GOALS — pace vs his targets (EMD especially), the gap in plain numbers "
+                "where possible; (5) THE ONE MOVE — the single highest-leverage action right now. "
+                "Punchy, ~220 words max, plain text with short section labels. Never invent "
+                "numbers not in the data.\n\n"
+                f"TODAY: {now.strftime('%A, %B %d, %Y')}\n\n" + "\n\n".join(lines)
+                + "\n\nRECENT CONTEXT:\n" + _format_thread(ok(convo, [])))}])
+        text = "".join(getattr(b, "text", "") for b in resp.content).strip()
+        if text:
+            delivered = f"📊 BUSINESS PULSE\n\n{text}"
+            await asyncio.to_thread(history.append, "assistant", delivered)
+            return delivered
+        return ""
+    except Exception as e:
+        logger.warning("business report failed: %s", e)
         return ""
 
 

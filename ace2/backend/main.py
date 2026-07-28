@@ -749,6 +749,27 @@ async def voice_set(req: VoiceSetReq):
     return await voice.set_agent_voice(req.voice_id)
 
 
+@app.post("/business/report", dependencies=[Depends(require_auth)])
+async def business_report():
+    """On-demand 'how's my business looking?' — the deep pipeline/team/goals read.
+    Lands in the thread and returns the text for instant display."""
+    text = await chat.generate_business_report()
+    return {"ok": bool(text), "text": text}
+
+
+class BriefFeedbackReq(BaseModel):
+    kind: str = "morning"
+    vote: str = "up"   # up | down
+
+
+@app.post("/brief/feedback", dependencies=[Depends(require_auth)])
+async def brief_feedback(req: BriefFeedbackReq):
+    """👍/👎 on a brief — steers tomorrow's tone and tightness."""
+    vote = "up" if req.vote != "down" else "down"
+    ok = await asyncio.to_thread(db.add_summary, f"{req.kind}:{vote}", "brief_feedback")
+    return {"ok": ok}
+
+
 class TTSReq(BaseModel):
     text: str = ""
 

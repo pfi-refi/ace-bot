@@ -490,6 +490,19 @@
       case 'card': materializeCard(msg.panel, msg.data, msg.where); break;
       case 'brief':   // proactive brief pushed live — spoken like JARVIS unless in silent chat mode
         addAceMessage(msg.text);
+        (function (kind) {   // 👍/👎 feedback row — votes steer tomorrow's brief
+          var row = document.createElement('div'); row.className = 'brief-fb';
+          ['up', 'down'].forEach(function (v) {
+            var b = document.createElement('button'); b.textContent = v === 'up' ? '👍' : '👎';
+            b.onclick = function () {
+              fetch(API + '/brief/feedback', { method: 'POST', headers: headers(),
+                body: JSON.stringify({ kind: kind, vote: v }) }).catch(function () {});
+              row.textContent = v === 'up' ? 'Noted — keeping this style.' : 'Noted — tightening it up.';
+            };
+            row.appendChild(b);
+          });
+          messagesEl.appendChild(row); scrollBottom();
+        })(msg.kind || 'morning');
         if (!document.body.classList.contains('mode-chat')) speak(msg.text);
         break;
       case 'open': openLink(msg.url, msg.label); break;
@@ -1245,6 +1258,70 @@
   });
   // "Command" — summon Ace's own task/pipeline board (his store, not Google Tasks).
   $('command-btn').addEventListener('click', cmdOpen);
+  // "Pulse" — the on-demand 'how's my business looking?' deep read.
+  function runPulse() {
+    var btn = $('pulse-btn'); if (btn) { btn.textContent = '📊 Reading…'; btn.disabled = true; }
+    fetch(API + '/business/report', { method: 'POST', headers: headers() })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.text) { setChat(true); addAceMessage(d.text); }
+      })
+      .catch(function () {})
+      .then(function () { if (btn) { btn.textContent = '📊 Pulse'; btn.disabled = false; } });
+  }
+  $('pulse-btn').addEventListener('click', runPulse);
+
+  /* ⌘K COMMAND PALETTE — one keystroke to run anything or jump anywhere. */
+  var PALETTE = [
+    { label: '◧ Command — task board', run: cmdOpen },
+    { label: '📊 Business Pulse — how\'s my business?', run: runPulse },
+    { label: '◈ Plan my week', run: function () { setMode('chat'); setChat(true); sendMessage('Plan my week'); } },
+    { label: '☀ Brief me now', run: function () { setChat(true); sendMessage('Give me my morning brief.'); } },
+    { label: '🧠 What do you want to become? (self-notes)', run: function () { setChat(true); sendMessage('What is on your self-improvement list? Read me your ACE SELF-NOTES.'); } },
+    { label: 'Schedule window', panel: 'timeline' },
+    { label: 'Inbox window', panel: 'inbox' },
+    { label: 'Weather window', panel: 'weather' },
+    { label: 'Memory window', panel: 'memory' }
+  ];
+  var palEl = null, palSel = 0;
+  function paletteClose() { if (palEl) { palEl.remove(); palEl = null; } }
+  function paletteOpen() {
+    paletteClose(); palSel = 0;
+    palEl = document.createElement('div'); palEl.id = 'palette';
+    palEl.innerHTML = '<div class="pal-box"><input id="pal-in" placeholder="Type a command…" autocomplete="off"><div id="pal-list"></div></div>';
+    document.body.appendChild(palEl);
+    palEl.addEventListener('click', function (e) { if (e.target === palEl) paletteClose(); });
+    var inp = palEl.querySelector('#pal-in');
+    function render() {
+      var q = (inp.value || '').toLowerCase();
+      var hits = PALETTE.filter(function (p) { return p.label.toLowerCase().indexOf(q) !== -1; }).slice(0, 9);
+      var list = palEl.querySelector('#pal-list');
+      if (palSel >= hits.length) palSel = Math.max(0, hits.length - 1);
+      list.innerHTML = hits.map(function (p, i) {
+        return '<div class="pal-item' + (i === palSel ? ' on' : '') + '" data-i="' + i + '">' + p.label + '</div>';
+      }).join('') || '<div class="pal-item">no match</div>';
+      Array.prototype.forEach.call(list.children, function (el) {
+        el.onclick = function () { var h = hits[+el.getAttribute('data-i')]; if (h) { paletteClose(); exec(h); } };
+      });
+      return hits;
+    }
+    function exec(h) {
+      if (h.run) { h.run(); return; }
+      if (h.panel) { var b = document.querySelector('.qa[data-panel="' + h.panel + '"]'); if (b) b.click(); }
+    }
+    inp.addEventListener('input', function () { palSel = 0; render(); });
+    inp.addEventListener('keydown', function (e) {
+      var hits = render();
+      if (e.key === 'Escape') { paletteClose(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); palSel = Math.min(palSel + 1, hits.length - 1); render(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); palSel = Math.max(palSel - 1, 0); render(); }
+      else if (e.key === 'Enter') { e.preventDefault(); var h = hits[palSel]; if (h) { paletteClose(); exec(h); } }
+    });
+    render(); inp.focus();
+  }
+  document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); palEl ? paletteClose() : paletteOpen(); }
+  });
   // THE DOCK — tap a surface to summon its window, tap again to dismiss (clean by default).
   // Same materializeCard machinery Ace uses, driven client-side so it's instant.
   var DOCK = {
