@@ -44,7 +44,7 @@
         ctx.fillStyle = 'rgba(' + s.hue + ',' + a.toFixed(3) + ')';
         ctx.beginPath(); ctx.arc(s.x, s.y, s.s * s.z, 0, 6.283); ctx.fill();
       }
-      if (Math.random() < .0015 && meteors.length < 1) {
+      if (Math.random() < .0032 && meteors.length < 2) {
         meteors.push({ x: Math.random() * canvas.width * .8, y: Math.random() * canvas.height * .3, vx: 7 + Math.random() * 5, vy: 3 + Math.random() * 2, life: 1 });
       }
       for (var m = meteors.length - 1; m >= 0; m--) {
@@ -113,6 +113,25 @@
     }
     function setAmplitude(v) { amp = Math.max(0, Math.min(1, v)); }
 
+    // THE HUE JOURNEY — the galaxy's identity color slowly travels aurora → cyan →
+    // violet → aurora (~48s loop), so the orb is never the same twice.
+    var PAL = [[69, 255, 166], [79, 227, 255], [143, 123, 255]];
+    function hue(t, offset) {
+      var p = ((t / 16 + (offset || 0)) % 3 + 3) % 3;
+      var i = Math.floor(p), f = p - i, a = PAL[i], b = PAL[(i + 1) % 3];
+      return Math.round(a[0] + (b[0] - a[0]) * f) + ',' +
+             Math.round(a[1] + (b[1] - a[1]) * f) + ',' +
+             Math.round(a[2] + (b[2] - a[2]) * f);
+    }
+    // Comets — three bright wanderers with fading trails, orbiting outside the arms
+    var comets = [];
+    for (var cm = 0; cm < 3; cm++) comets.push({
+      r: 78 + cm * 13, a0: Math.random() * 6.283,
+      w: (.14 + Math.random() * .1) * (cm % 2 ? -1 : 1), trail: 9,
+    });
+    // Sonar pulses — expanding rings from the core, more often when he's speaking
+    var pulses = [], lastPulse = 0;
+
     function frame(now) {
       var t = now / 1000; last = now;
       speed += (speedT - speed) * .04; glow += (glowT - glow) * .05;
@@ -121,23 +140,37 @@
       var light = .75 + .25 * Math.sin(t * .55 + .8) + glow * .5 + amp * .8;
 
       // Autonomous life: the whole cloud slowly drifts, rotates, and tilts on its own.
-      var dx = 4 * Math.sin(t * 0.11), dy = 3.2 * Math.cos(t * 0.14);   // wander
+      var dx = 5.5 * Math.sin(t * 0.11), dy = 4.2 * Math.cos(t * 0.14);   // wander
       var ox = cx + dx, oy = cy + dy;
-      var flat = 0.56 + 0.13 * Math.sin(t * 0.17);                      // disc tilt over time
-      var gRot = t * 0.06 * speed;                                      // whole-galaxy rotation
+      var flat = 0.54 + 0.17 * Math.sin(t * 0.17);                      // disc tilt over time
+      var gRot = t * 0.078 * speed;                                     // whole-galaxy rotation
 
       ctx.clearRect(0, 0, W, W);
       ctx.save();
       ctx.translate(ox, oy); ctx.scale(breath, breath); ctx.translate(-ox, -oy);
       ctx.globalCompositeOperation = 'lighter';   // pure additive glow on transparent — it floats in space
 
-      // edgeless glow bed — replaces the old hard vignette/rim; fades fully out, no circle
+      // edgeless glow bed — hue-journeying: the whole halo drifts aurora→cyan→violet
+      var H = hue(t, 0);
       var halo = ctx.createRadialGradient(ox, oy, 6, ox, oy, R * 1.02);
       var ha = (.14 + glow * .11 + amp * .14) * light;
-      halo.addColorStop(0, 'rgba(69,255,166,' + ha.toFixed(3) + ')');
-      halo.addColorStop(.5, 'rgba(69,255,166,' + (ha * .4).toFixed(3) + ')');
-      halo.addColorStop(1, 'rgba(69,255,166,0)');
+      halo.addColorStop(0, 'rgba(' + H + ',' + ha.toFixed(3) + ')');
+      halo.addColorStop(.5, 'rgba(' + H + ',' + (ha * .4).toFixed(3) + ')');
+      halo.addColorStop(1, 'rgba(' + H + ',0)');
       ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(ox, oy, R * 1.02, 0, 6.283); ctx.fill();
+
+      // sonar pulses — a ring breathes out from the heart every few seconds
+      var pulseGap = 6.5 - glow * 3.5 - amp * 1.5;   // speaking = faster pulse
+      if (t - lastPulse > pulseGap) { pulses.push({ born: t }); lastPulse = t; }
+      for (var pu = pulses.length - 1; pu >= 0; pu--) {
+        var age = (t - pulses[pu].born) / 3.2;
+        if (age >= 1) { pulses.splice(pu, 1); continue; }
+        var pr = 20 + age * R * .95;
+        var pa = (1 - age) * .16 * light;
+        ctx.strokeStyle = 'rgba(' + H + ',' + pa.toFixed(3) + ')';
+        ctx.lineWidth = 1.1 - age * .7;
+        ctx.beginPath(); ctx.ellipse(ox, oy, pr, pr * flat, 0, 0, 6.283); ctx.stroke();
+      }
 
       // nebula clouds — drift with the galaxy, morph, tilt
       for (var i = 0; i < clouds.length; i++) {
@@ -177,12 +210,26 @@
         ctx.beginPath(); ctx.arc(mx, my, mo.s, 0, 6.283); ctx.fill();
       }
 
-      // luminous core — the galaxy's heart, drifting with it
+      // comets — bright wanderers with fading trails, cutting across the outer field
+      for (var cc = 0; cc < comets.length; cc++) {
+        var co = comets[cc];
+        var ca = co.a0 + t * co.w * (0.7 + speed * 0.3);
+        var chue = hue(t, cc + 1.2);
+        for (var tr = 0; tr < co.trail; tr++) {
+          var ta2 = ca - tr * 0.045 * (co.w > 0 ? 1 : -1);
+          var txx = ox + Math.cos(ta2) * co.r, tyy = oy + Math.sin(ta2) * co.r * flat;
+          var tal = (1 - tr / co.trail) * .5 * light;
+          ctx.fillStyle = 'rgba(' + chue + ',' + tal.toFixed(3) + ')';
+          ctx.beginPath(); ctx.arc(txx, tyy, 1.7 * (1 - tr / co.trail) + .3, 0, 6.283); ctx.fill();
+        }
+      }
+
+      // luminous core — the galaxy's heart, white-hot center bleeding into the journey hue
       var coreR = 30 + amp * 12;
       var core = ctx.createRadialGradient(ox, oy, 0, ox, oy, coreR);
       core.addColorStop(0, 'rgba(240,255,248,' + (.92 * light).toFixed(3) + ')');
-      core.addColorStop(.32, 'rgba(69,255,166,' + (.55 * light).toFixed(3) + ')');
-      core.addColorStop(1, 'rgba(69,255,166,0)');
+      core.addColorStop(.32, 'rgba(' + H + ',' + (.55 * light).toFixed(3) + ')');
+      core.addColorStop(1, 'rgba(' + H + ',0)');
       ctx.fillStyle = core; ctx.beginPath(); ctx.arc(ox, oy, coreR, 0, 6.283); ctx.fill();
 
       // Feather EVERYTHING into a soft round edge — guarantees the square canvas
@@ -376,6 +423,7 @@
     applyChatState();
     connectWS();
     loadToday();   // feeds the up-next strip; the stage stays clean (dock summons cards)
+    if (window.__rehydratePins) window.__rehydratePins();   // pinned windows come back open
     checkConvai();
     loadHistory();   // renders the recent thread, then drops the greeting under it
   }
@@ -515,11 +563,45 @@
   var CARD_SLOTS = { timeline: 'left', daybank: 'right', calendar: 'left', tasks: 'left',
                      weather: 'right', memory: 'right', inbox: 'right' };
   function slotEl(where) { return (where === 'left') ? $('cards-left') : $('cards'); }
+  // WINDOW SYSTEM — pins (cards that stay open across sessions) + per-card size.
+  var TITLE_PANEL = { 'TODAY': 'timeline', 'PRIORITY INBOX': 'inbox', 'WEATHER': 'weather',
+                      'MEMORY': 'memory', 'CALENDAR': 'calendar', 'TASKS': 'tasks', 'DATA BANK': 'daybank' };
+  function pinsGet() { try { return JSON.parse(localStorage.getItem('ace2_pins') || '{}'); } catch (e) { return {}; } }
+  function pinsSet(p) { localStorage.setItem('ace2_pins', JSON.stringify(p)); }
+
   function cardShell(title, where) {
     var host = slotEl(where);
     var card = document.createElement('div'); card.className = 'card';
     var head = document.createElement('div'); head.className = 'card-head';
     head.appendChild(document.createTextNode(title));
+    var panel = TITLE_PANEL[title] || null;
+    var pins = pinsGet();
+    if (panel && pins[panel] && pins[panel].size === 'wide') card.classList.add('card-wide');
+    // ⤢ size toggle — normal ↔ wide (remembered per card)
+    var sz = document.createElement('button'); sz.className = 'card-x'; sz.textContent = '⤢';
+    sz.title = 'Resize';
+    sz.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      var wide = card.classList.toggle('card-wide');
+      if (panel) { var p = pinsGet(); p[panel] = p[panel] || {}; p[panel].size = wide ? 'wide' : null;
+        if (!p[panel].pinned && !p[panel].size) delete p[panel]; pinsSet(p); }
+    });
+    head.appendChild(sz);
+    // 📌 pin — this window STAYS OPEN: it survives dismissal and comes back on every boot
+    if (panel) {
+      var pin = document.createElement('button'); pin.className = 'card-x card-pin'; pin.textContent = '📌';
+      pin.title = 'Keep open';
+      if (pins[panel] && pins[panel].pinned) pin.classList.add('on');
+      pin.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var p = pinsGet(); p[panel] = p[panel] || {};
+        p[panel].pinned = !p[panel].pinned;
+        pin.classList.toggle('on', p[panel].pinned);
+        if (!p[panel].pinned && !p[panel].size) delete p[panel];
+        pinsSet(p);
+      });
+      head.appendChild(pin);
+    }
     var x = document.createElement('button'); x.className = 'card-x'; x.textContent = '✕';
     x.addEventListener('click', function (ev) { ev.stopPropagation(); card.remove(); });
     head.appendChild(x);
@@ -1125,6 +1207,26 @@
         .catch(function () {});
     });
   });
+  // PINNED WINDOWS — every pinned card re-opens with fresh data on boot ("hard-code
+  // some to stay open", but it's your choice per card via the 📌).
+  var REHYDRATE = {
+    timeline: DOCK.timeline, inbox: DOCK.inbox, weather: DOCK.weather, memory: DOCK.memory,
+    daybank:  { url: '/daybank',         shape: function (d) { return { items: d.items || [] }; } },
+    calendar: { url: '/calendar?days=7', shape: function (d) { return { events: d.events || [] }; } },
+    tasks:    { url: '/tasks',           shape: function (d) { return { tasks: d.tasks || [], lists: d.lists || null }; } }
+  };
+  function rehydratePins() {
+    var p = pinsGet();
+    Object.keys(p).forEach(function (panel) {
+      if (!p[panel] || !p[panel].pinned) return;
+      var cfg = REHYDRATE[panel]; if (!cfg) return;
+      fetch(API + cfg.url, { headers: headers() })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d) materializeCard(panel, cfg.shape(d)); })
+        .catch(function () {});
+    });
+  }
+  window.__rehydratePins = rehydratePins;
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });

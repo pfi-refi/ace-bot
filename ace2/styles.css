@@ -685,3 +685,15 @@ body::after { content: ""; position: fixed; inset: 0 0 40% 0; z-index: 1; pointe
 @media (min-width: 900px) and (min-height: 560px) {
   #app { padding-right: 176px; }
 }
+
+/* ================================================== v37: living background + windows */
+/* The whole atmosphere HUE-JOURNEYS with the orb — aurora → cyan → violet and back. */
+body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
+              skyHue 48s linear infinite; }
+@keyframes skyHue { 0% { filter: hue-rotate(0deg); } 50% { filter: hue-rotate(70deg); } 100% { filter: hue-rotate(0deg); } }
+/* Windows: wide size + pin styling */
+.card.card-wide { width: min(560px, 92vw); align-self: flex-end; }
+.card.card-wide .card-body { max-height: 420px; }
+.card-pin { filter: grayscale(1); opacity: .5; font-size: 11px; }
+.card-pin.on { filter: none; opacity: 1; }
+.card-head .card-x { margin-left: 2px; }
