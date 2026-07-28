@@ -5,12 +5,17 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v32';   // v32: atmosphere turned UP — visible deck grid, aurora breath, scan
+const CACHE_VERSION = 'ace2-shell-v33';   // v33: fix SW caching stale shell files (cache:'reload' on install) + atmosphere
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE_VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache:'reload' forces each shell file to come from the NETWORK, not the browser's
+  // HTTP cache — without it a version bump could cache STALE files under the new name
+  // (the "reload twice to see changes" bug).
+  e.waitUntil(caches.open(CACHE_VERSION)
+    .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
