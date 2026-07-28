@@ -5,7 +5,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v28';   // v28: Command panel — Ace's own task/pipeline board (lens+chips+collapse-to-orb)
+const CACHE_VERSION = 'ace2-shell-v29';   // v29: Personal + Goals categories in the Command panel (everything lives in Ace)
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 

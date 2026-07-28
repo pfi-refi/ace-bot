@@ -942,8 +942,8 @@
   /* ============================================================ COMMAND PANEL
      Ace's OWN task/pipeline surface — replaces Google Tasks. A summonable full-screen
      overlay that collapses to a clean orb; reads/writes the data bank via /daybank. */
-  var CMD_CATS = { Deals:'#45ffa6', Agents:'#53e7ff', Admin:'#ffce7a', Networking:'#b79dff', Business:'#ff9e7a', Tech:'#7aa2ff' };
-  var CMD_ORDER = ['Deals','Agents','Admin','Networking','Business','Tech'];
+  var CMD_CATS = { Deals:'#45ffa6', Agents:'#53e7ff', Admin:'#ffce7a', Networking:'#b79dff', Business:'#ff9e7a', Tech:'#7aa2ff', Personal:'#ff9ecb', Goals:'#ffd24a' };
+  var CMD_ORDER = ['Deals','Agents','Admin','Networking','Business','Tech','Personal','Goals'];
   var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[] };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }

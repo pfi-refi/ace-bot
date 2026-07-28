@@ -525,6 +525,23 @@ async def daybank_update(req: DaybankUpdateReq):
     update_item tool, exposed directly so a checkbox is instant, not a chat round-trip."""
     status = req.status if req.status in ("open", "done") else None
     ok, _msg = await asyncio.to_thread(daybank.update_item, req.id, status)
+    # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
+    # accomplishments over time — not every checkbox, only the meaningful categories.
+    if ok and status == "done":
+        try:
+            from . import brain
+            from datetime import datetime as _dt
+            import pytz as _pytz
+            it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
+                       if x.get("id") == req.id), None)
+            cats = set(it.get("tags") or []) if it else set()
+            if cats & {"Deals", "Goals"}:
+                today = _dt.now(_pytz.timezone("America/New_York")).strftime("%B %-d, %Y")
+                kind = "Goal reached" if "Goals" in cats else "Deal won"
+                await asyncio.to_thread(
+                    brain.add_memory, [f"{kind}: {it.get('text', '')} — {today}."], "win")
+        except Exception as e:
+            logger.warning("win-logging failed: %s", e)
     items = await asyncio.to_thread(daybank.read_items, True)
     return {"ok": ok, "items": items}
 
