@@ -655,17 +655,52 @@ GRAPH_TYPES = ("person", "deal", "category")
 
 
 def _graph_json(text: str) -> dict:
-    """Outermost {...} out of a model reply, parsed. {} when there's nothing usable."""
+    """Outermost {...} out of a model reply, parsed. {} when there's nothing usable.
+
+    Tolerates TRUNCATION: a graph of this size can run past max_tokens mid-array, which
+    strict json.loads rejects outright — losing every node the model did produce. So on
+    failure we salvage: close the dangling string/array/object and retry, and failing
+    that, harvest whatever complete {...} objects exist into nodes/edges by shape."""
     if not text:
         return {}
-    i, j = text.find("{"), text.rfind("}")
-    if i < 0 or j <= i:
+    i = text.find("{")
+    if i < 0:
         return {}
-    try:
-        out = json.loads(text[i:j + 1])
-        return out if isinstance(out, dict) else {}
-    except Exception:
-        return {}
+    j = text.rfind("}")
+    if j > i:
+        try:
+            out = json.loads(text[i:j + 1])
+            if isinstance(out, dict):
+                return out
+        except Exception:
+            pass
+    # --- salvage a truncated reply ---
+    frag = text[i:]
+    trimmed = frag[:frag.rfind("}") + 1] if "}" in frag else frag
+    for tail in ('"}]}', '}]}', ']}', '}}', '}'):
+        try:
+            out = json.loads(trimmed + tail)
+            if isinstance(out, dict) and (out.get("nodes") or out.get("edges")):
+                logger.info("graph: recovered a truncated reply")
+                return out
+        except Exception:
+            continue
+    nodes, edges = [], []
+    for m in re.finditer(r"\{[^{}]*\}", frag):
+        try:
+            o = json.loads(m.group(0))
+        except Exception:
+            continue
+        if isinstance(o, dict):
+            if o.get("label"):
+                nodes.append(o)
+            elif o.get("source") and o.get("target"):
+                edges.append(o)
+    if nodes:
+        logger.info("graph: harvested %d node(s) / %d edge(s) from a broken reply",
+                    len(nodes), len(edges))
+        return {"nodes": nodes, "edges": edges}
+    return {}
 
 
 def _graph_key(label: str) -> str:
@@ -756,8 +791,10 @@ async def graph(refresh: int = 0):
         "board category it belongs to, and connect people to each other wherever a fact says "
         "they are related, on the same deal, or on the same team.\n\n"
         "Rules: Brady himself is a node. Skip abstractions, dates and to-do phrasing — only "
-        "named people, named deals, and the eight categories. Prefer FEWER, RIGHT nodes over "
-        "many noisy ones. Every edge's source and target MUST exactly match a node label.\n\n"
+        "named people, named deals, and the eight categories. HARD CAP: at most 55 nodes and "
+        "90 edges — pick the most connected, most active entities and drop the rest. Keep "
+        "labels under 30 characters. Every edge's source and target MUST exactly match a "
+        "node label.\n\n"
         "Reply with STRICT JSON and nothing else:\n"
         '{"nodes":[{"id":"kiana-wiggins","label":"Kiana Wiggins","type":"person"}],'
         '"edges":[{"source":"Kiana Wiggins","target":"Deals","kind":"belongs_to"}]}\n\n'
@@ -767,18 +804,20 @@ async def graph(refresh: int = 0):
     try:
         client = chat._anthropic()
         resp = await client.messages.create(
-            model=chat.LEARN_MODEL, max_tokens=4000,
+            model=chat.LEARN_MODEL, max_tokens=16000,
             messages=[{"role": "user", "content": prompt}])
         out = _graph_shape(_graph_json("".join(getattr(b, "text", "") for b in resp.content)))
     except Exception as e:
         logger.warning("graph extraction failed: %s", e)
+        out = {"nodes": [], "_err": f"{type(e).__name__}: {e}"[:200]}
     if not out["nodes"]:
         # Extraction failed or came back unusable — an OLD map beats a blank screen, so
         # serve the stale cache (flagged) instead of nothing.
         stale = _graph_json(cached.get("text") or "")
         if stale.get("nodes"):
             return {**stale, "cached": True, "stale": True}
-        return {"nodes": [], "edges": [], "cached": False, "error": "extraction failed"}
+        return {"nodes": [], "edges": [], "cached": False,
+                "error": out.get("_err") or "extraction produced no usable nodes"}
     out["generated_at"] = datetime.now(db.EASTERN).isoformat()
     if db.enabled():
         await asyncio.to_thread(db.add_summary, json.dumps(out), "graph_cache")
