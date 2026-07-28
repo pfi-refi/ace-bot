@@ -613,13 +613,16 @@ body::after { content: ""; position: fixed; inset: 0 0 40% 0; z-index: 1; pointe
   animation: auroraBreath 9s ease-in-out infinite alternate; }
 @keyframes auroraBreath { from { opacity: .45; } to { opacity: 1; } }
 
-#overlay::after { content: ""; position: absolute; left: -22%; right: -22%; bottom: -14%; height: 48%;
+#overlay::after { content: ""; position: absolute; left: -25%; right: -25%; bottom: 0; height: 56%;
   background:
-    repeating-linear-gradient(to right, rgba(69,255,166,.17) 0 1px, transparent 1px 64px),
-    repeating-linear-gradient(to top,   rgba(69,255,166,.14) 0 1px, transparent 1px 46px);
-  transform: perspective(620px) rotateX(63deg); transform-origin: 50% 100%;
-  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.85), transparent 82%);
-  mask-image: linear-gradient(to top, rgba(0,0,0,.85), transparent 82%); }
+    radial-gradient(58% 26% at 50% 0%, rgba(69,255,166,.12), transparent 72%),
+    repeating-linear-gradient(to right, rgba(69,255,166,.16) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(to top,   rgba(69,255,166,.20) 0 1px, transparent 1px 44px);
+  transform: perspective(640px) rotateX(58deg); transform-origin: 50% 100%;
+  animation: gridFlow 7s linear infinite;
+  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.9) 0%, rgba(0,0,0,.55) 55%, transparent 96%);
+  mask-image: linear-gradient(to top, rgba(0,0,0,.9) 0%, rgba(0,0,0,.55) 55%, transparent 96%); }
+@keyframes gridFlow { to { background-position: 0 0, 0 0, 0 44px; } }
 
 #overlay::before { content: ""; position: absolute; left: 0; right: 0; top: -24%; height: 20%;
   background: linear-gradient(to bottom, transparent, rgba(120,255,200,.10) 45%, transparent);
