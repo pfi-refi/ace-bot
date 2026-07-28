@@ -519,6 +519,7 @@ async def prime_ctx() -> None:
         asyncio.create_task(_learn_loop())
         asyncio.create_task(_brief_loop())   # proactive: morning game plan + EOD recap
         asyncio.create_task(_watch_loop())   # ambient: he notices things and speaks up unasked
+        asyncio.create_task(_graph_warm_loop())   # keep the knowledge map instant to open
 
 
 # ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───
@@ -669,6 +670,29 @@ async def _learn_loop() -> None:
             break
         except Exception:
             pass
+
+
+async def _graph_warm_loop() -> None:
+    """Keep the knowledge graph's cache hot. Building it costs ~35s of model time, and the
+    HUD holds a connection open while it runs — so a cold tap on ◉ Graph is the one place
+    Ace feels slow. Rebuilding just under the 6h TTL means Brady always gets the cached
+    read (~0.1s) and never waits for a build he didn't ask for."""
+    await asyncio.sleep(90)   # let the app finish booting before spending model time
+    while True:
+        try:
+            from . import db
+            if db.enabled():
+                from .main import graph
+                await graph(refresh=1)
+                logger.info("graph cache warmed")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("graph warm failed: %s", e)
+        try:
+            await asyncio.sleep(5 * 3600)   # just inside the 6h TTL
+        except asyncio.CancelledError:
+            break
 
 
 async def _ctx_keepwarm() -> None:

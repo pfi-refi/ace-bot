@@ -532,7 +532,7 @@ async def brief_run(kind: str = "morning"):
 
 
 @app.post("/watch/run", dependencies=[Depends(require_auth)])
-async def watch_run(force: bool = True, dry_run: bool = False):
+async def watch_run(force: bool = False, dry_run: bool = False):
     """Run ONE ambient watch pass now and report what it decided — the test hook for the loop
     that otherwise runs itself every ~12 min. force ignores the quiet-hours and rate-limit
     gates so a pass can be exercised at any hour; dry_run decides without delivering or
