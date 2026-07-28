@@ -602,3 +602,56 @@ body.chatting { overflow: hidden; }
 .tl-n { font-size: 9px; opacity: .65; font-variant-numeric: tabular-nums; }
 .tl-tab.on .tl-n { opacity: .8; }
 .tl-items { display: flex; flex-direction: column; }
+
+/* ================================================================== v31 DEPTH PASS
+   The portal feel (Brady): layered atmosphere, a left command rail on desktop, an
+   input that grows with your text, and a viewfinder — tap a card's title to expand. */
+
+/* ---------- Atmosphere: aurora breath + deck floor + slow scan ---------- */
+body::after { content: ""; position: fixed; inset: 0 0 40% 0; z-index: 1; pointer-events: none;
+  background: radial-gradient(60% 55% at 50% -10%, rgba(69,255,166,.10), rgba(83,231,255,.05) 45%, transparent 70%);
+  animation: auroraBreath 9s ease-in-out infinite alternate; }
+@keyframes auroraBreath { from { opacity: .45; } to { opacity: 1; } }
+
+#overlay::after { content: ""; position: absolute; left: -22%; right: -22%; bottom: -14%; height: 48%;
+  background:
+    repeating-linear-gradient(to right, rgba(69,255,166,.07) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(to top,   rgba(69,255,166,.06) 0 1px, transparent 1px 46px);
+  transform: perspective(620px) rotateX(63deg); transform-origin: 50% 100%;
+  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.85), transparent 82%);
+  mask-image: linear-gradient(to top, rgba(0,0,0,.85), transparent 82%); }
+
+#overlay::before { content: ""; position: absolute; left: 0; right: 0; top: -24%; height: 20%;
+  background: linear-gradient(to bottom, transparent, rgba(120,255,200,.045) 45%, transparent);
+  animation: deckScan 17s linear infinite; }
+@keyframes deckScan { to { transform: translateY(640%); } }
+
+/* ---------- Cards: materialize + hover lift + VIEWFINDER ---------- */
+.card { animation: cardIn .42s var(--ease-out); transition: transform .2s var(--ease-out), box-shadow .2s; }
+.card:hover { transform: translateY(-2px); }
+@keyframes cardIn { from { opacity: 0; transform: translateY(12px) scale(.97); filter: blur(7px); }
+                    to   { opacity: 1; transform: none; filter: none; } }
+.card-head { cursor: pointer; }
+.card.card-max { position: fixed; z-index: 55; inset: max(7dvh, 54px) max(5vw, 16px) max(9dvh, 64px);
+  box-shadow: 0 0 0 100vmax rgba(2,6,8,.72), 0 40px 120px -30px rgba(0,0,0,.9), 0 0 44px -6px rgba(69,255,166,.14);
+  animation: cardIn .3s var(--ease-out); }
+.card.card-max .card-body { max-height: none; height: calc(100% - 40px); font-size: 14px; }
+
+/* ---------- Input: grows with your text ---------- */
+#chat-input { resize: none; overflow-y: auto; max-height: 132px; line-height: 1.45; }
+#chat-input::-webkit-scrollbar { width: 5px; }
+#chat-input::-webkit-scrollbar-thumb { background: var(--aurora-25); border-radius: 5px; }
+
+/* ---------- THE RAIL: left-hand command dock on desktop ---------- */
+@media (min-width: 900px) {
+  #quick { position: fixed; left: 16px; top: 50%; transform: translateY(-50%); z-index: 5;
+    flex-direction: column; align-items: stretch; gap: 7px; width: 138px;
+    padding: 12px 10px; border-radius: 18px; border: 1px solid transparent;
+    background: var(--panel-fill) padding-box, var(--panel-edge) border-box;
+    backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2);
+    box-shadow: var(--panel-shadow); }
+  #quick::before { content: "◈ SURFACES"; font-family: var(--mono); font-size: 9px;
+    letter-spacing: .24em; color: var(--text-faint); padding: 2px 6px 6px; }
+  .qa { text-align: left; padding: 9px 12px; }
+  #app { padding-left: 176px; }
+}

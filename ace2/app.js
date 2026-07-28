@@ -476,6 +476,7 @@
     text = (text || $('chat-input').value).trim();
     if (!text || state.busy) return;
     state.busy = true; $('chat-input').value = '';
+    $('chat-input').style.height = 'auto';   // collapse the grown textarea back to one line
     addUserMessage(text); showTyping(); setOrbState('listening');
     if (state.wsReady && state.ws) { state.ws.send(JSON.stringify({ message: text })); }
     else {
@@ -517,8 +518,11 @@
     var head = document.createElement('div'); head.className = 'card-head';
     head.appendChild(document.createTextNode(title));
     var x = document.createElement('button'); x.className = 'card-x'; x.textContent = '✕';
-    x.addEventListener('click', function () { card.remove(); });
+    x.addEventListener('click', function (ev) { ev.stopPropagation(); card.remove(); });
     head.appendChild(x);
+    // VIEWFINDER — tap the card's title bar to expand it into a focused view; tap again to dock it.
+    head.title = 'Tap to expand';
+    head.addEventListener('click', function () { card.classList.toggle('card-max'); });
     var body = document.createElement('div'); body.className = 'card-body';
     card.appendChild(head); card.appendChild(body);
     // one card per panel across BOTH slots (so re-placing moves it); cap each slot at 4
@@ -1016,7 +1020,17 @@
   // still glows the toggle (markUnread) so he knows one landed, and Ace speaks it; cards render
   // on the stage regardless of the panel. Toggle it open only when he wants to read the thread.
   $('send-btn').addEventListener('click', function () { sendMessage(); });
-  $('chat-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') { sendMessage(); } });
+  // The input grows with your text (Brady: long messages ran off to the right in the
+  // one-line box). Enter sends; Shift+Enter makes a new line.
+  function growInput() {
+    var el = $('chat-input');
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 132) + 'px';
+  }
+  $('chat-input').addEventListener('input', growInput);
+  $('chat-input').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-msg]'), function (btn) {
     btn.addEventListener('click', function () { sendMessage(btn.getAttribute('data-msg')); });
   });
