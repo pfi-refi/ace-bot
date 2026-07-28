@@ -685,7 +685,7 @@ async def _ctx_keepwarm() -> None:
 # The autonomy loop Brady asked for: Ace runs himself on a schedule. Each brief is
 # grounded in DETERMINISTIC board/win stats first, then written by the deep model,
 # and lands in the ONE thread (so it's waiting in chat) + pushes live to open HUDs.
-_BRIEF_TIMES = {"morning": (6, 15), "eod": (20, 15)}   # Eastern
+_BRIEF_TIMES = {"morning": (9, 0), "eod": (20, 15)}   # Eastern — Brady wants the day to open at 9
 
 
 def _board_stats() -> str:

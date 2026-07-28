@@ -738,6 +738,17 @@ async def chat_http(req: ChatReq):
 
 
 # ── Voice: TTS proxy (ACE voice, key server-side) ───────────────────────────────
+class VoiceSetReq(BaseModel):
+    voice_id: str = ""
+
+
+@app.post("/voice/set", dependencies=[Depends(require_auth)])
+async def voice_set(req: VoiceSetReq):
+    """Swap Ace's voice EVERYWHERE in one call: patches the live ElevenLabs agent and
+    stores the TTS override. Paste a Voice ID from the ElevenLabs voice library."""
+    return await voice.set_agent_voice(req.voice_id)
+
+
 class TTSReq(BaseModel):
     text: str = ""
 

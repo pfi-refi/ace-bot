@@ -697,3 +697,10 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
 .card-pin { filter: grayscale(1); opacity: .5; font-size: 11px; }
 .card-pin.on { filter: none; opacity: 1; }
 .card-head .card-x { margin-left: 2px; }
+
+/* ============================== v38: WINDOW MANAGER ===== */
+.card-free { position: absolute; width: min(340px, 88vw); z-index: 6; }
+.card-free.card-wide { width: min(560px, 92vw); }
+.card-free .card-head { cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; }
+.card-free .card-head:active { cursor: grabbing; }
+.card-free .card-body { max-height: 340px; }

@@ -34,8 +34,54 @@ DEFAULT_SETTINGS = {
 def configured() -> bool:
     return bool(
         os.environ.get("ELEVENLABS_API_KEY", "").strip()
-        and os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+        and (os.environ.get("ELEVENLABS_VOICE_ID", "").strip() or active_voice_id())
     )
+
+
+def active_voice_id() -> str:
+    """The voice Ace speaks with: a db override (set live via /voice/set — no redeploy,
+    no env change) wins over the ELEVENLABS_VOICE_ID env var."""
+    try:
+        from . import db
+        if db.enabled():
+            ov = (db.latest_summary("voice_override").get("text") or "").strip()
+            if ov:
+                return ov
+    except Exception:
+        pass
+    return os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+
+
+async def set_agent_voice(new_id: str) -> dict:
+    """ONE-SHOT VOICE SWAP: point BOTH voice paths at a new ElevenLabs voice —
+    PATCH the ConvAI agent (live calls) and store the db override (the /tts proxy).
+    Survives redeploys; env var becomes the fallback only."""
+    new_id = (new_id or "").strip()
+    if not new_id:
+        return {"ok": False, "error": "no voice_id"}
+    out = {"ok": True, "voice_id": new_id, "agent_patched": False, "tts_override": False}
+    key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if key and CONVAI_AGENT_ID:
+        try:
+            async with httpx.AsyncClient(timeout=20) as cx:
+                r = await cx.patch(
+                    f"https://api.elevenlabs.io/v1/convai/agents/{CONVAI_AGENT_ID}",
+                    headers={"xi-api-key": key},
+                    json={"conversation_config": {"tts": {"voice_id": new_id}}},
+                )
+                out["agent_patched"] = r.status_code < 300
+                if r.status_code >= 300:
+                    out["agent_error"] = r.text[:200]
+        except Exception as e:
+            out["agent_error"] = str(e)
+    try:
+        from . import db
+        if db.enabled():
+            out["tts_override"] = db.add_summary(new_id, "voice_override")
+    except Exception as e:
+        out["tts_error"] = str(e)
+    out["ok"] = out["agent_patched"] or out["tts_override"]
+    return out
 
 
 def _settings() -> dict:
@@ -158,7 +204,7 @@ async def synthesize(text: str):
         return None, "not configured"
 
     api_key = os.environ["ELEVENLABS_API_KEY"].strip()
-    voice_id = os.environ["ELEVENLABS_VOICE_ID"].strip()
+    voice_id = active_voice_id()
     primary = os.environ.get("ELEVENLABS_MODEL_ID", DEFAULT_MODEL).strip()
     # Try the good conversational model; if it errors, drop to flash before ever
     # letting the frontend fall back to the browser's robot voice.

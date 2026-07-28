@@ -568,6 +568,14 @@
                       'MEMORY': 'memory', 'CALENDAR': 'calendar', 'TASKS': 'tasks', 'DATA BANK': 'daybank' };
   function pinsGet() { try { return JSON.parse(localStorage.getItem('ace2_pins') || '{}'); } catch (e) { return {}; } }
   function pinsSet(p) { localStorage.setItem('ace2_pins', JSON.stringify(p)); }
+  // WINDOW MANAGER (desktop): cards are free windows — drag them anywhere by the title
+  // bar; positions are remembered per panel. Phones keep the stacked flow.
+  function freeWM() { return window.matchMedia('(min-width: 900px) and (min-height: 560px)').matches; }
+  function winposGet() { try { return JSON.parse(localStorage.getItem('ace2_winpos') || '{}'); } catch (e) { return {}; } }
+  function winposSet(p) { localStorage.setItem('ace2_winpos', JSON.stringify(p)); }
+  var WIN_DEFAULTS = { timeline: [.015, .05], calendar: [.015, .34], daybank: [.015, .56],
+                       inbox: [.72, .05], memory: [.72, .34], weather: [.72, .62], tasks: [.36, .62] };
+  var zTop = 10;
 
   function cardShell(title, where) {
     var host = slotEl(where);
@@ -605,9 +613,43 @@
     var x = document.createElement('button'); x.className = 'card-x'; x.textContent = '✕';
     x.addEventListener('click', function (ev) { ev.stopPropagation(); card.remove(); });
     head.appendChild(x);
-    // VIEWFINDER — tap the card's title bar to expand it into a focused view; tap again to dock it.
-    head.title = 'Tap to expand';
-    head.addEventListener('click', function () { card.classList.toggle('card-max'); });
+    // VIEWFINDER — tap the title bar to expand; DRAG it to move the window (desktop).
+    head.title = 'Tap to expand · drag to move';
+    var dragged = false;
+    head.addEventListener('click', function () {
+      if (dragged) { dragged = false; return; }   // a drag is not a tap
+      if (card.classList.contains('card-max')) {
+        card.classList.remove('card-max');
+        if (card.dataset.wx) { card.style.left = card.dataset.wx; card.style.top = card.dataset.wy; }
+      } else {
+        card.dataset.wx = card.style.left || ''; card.dataset.wy = card.style.top || '';
+        card.style.left = ''; card.style.top = '';
+        card.classList.add('card-max');
+      }
+    });
+    // WINDOW MANAGER drag — pointer-based, 6px threshold, position saved per panel.
+    head.addEventListener('pointerdown', function (ev) {
+      if (!card.classList.contains('card-free') || card.classList.contains('card-max')) return;
+      if (ev.target !== head && ev.target.nodeType === 1 && ev.target.tagName === 'BUTTON') return;
+      var sx = ev.clientX, sy = ev.clientY;
+      var r = card.getBoundingClientRect(), host = $('stage').getBoundingClientRect();
+      var ox = r.left - host.left, oy = r.top - host.top, moved = false;
+      function mv(e2) {
+        var dx = e2.clientX - sx, dy = e2.clientY - sy;
+        if (!moved && Math.abs(dx) + Math.abs(dy) < 6) return;
+        moved = true; dragged = true;
+        card.style.left = Math.max(0, Math.min(host.width - 60, ox + dx)) + 'px';
+        card.style.top = Math.max(0, Math.min(host.height - 40, oy + dy)) + 'px';
+      }
+      function up() {
+        document.removeEventListener('pointermove', mv);
+        document.removeEventListener('pointerup', up);
+        if (moved && panel) { var wp = winposGet(); wp[panel] = [card.style.left, card.style.top]; winposSet(wp); }
+      }
+      document.addEventListener('pointermove', mv);
+      document.addEventListener('pointerup', up);
+    });
+    card.addEventListener('pointerdown', function () { card.style.zIndex = ++zTop; });
     var body = document.createElement('div'); body.className = 'card-body';
     card.appendChild(head); card.appendChild(body);
     // one card per panel across BOTH slots (so re-placing moves it); cap each slot at 4
@@ -618,8 +660,23 @@
       dup.remove();
     }
     card.setAttribute('data-panel', title);
-    host.insertBefore(card, host.firstChild);
-    while (host.children.length > 4) host.removeChild(host.lastChild);   // cap each slot at 4
+    if (freeWM()) {
+      // Desktop: a FREE WINDOW on the stage — saved position, or this panel's default spot.
+      card.classList.add('card-free');
+      var stage = $('stage'), sr = stage.getBoundingClientRect();
+      var saved = panel && winposGet()[panel];
+      if (saved && saved[0]) { card.style.left = saved[0]; card.style.top = saved[1]; }
+      else {
+        var dp = (panel && WIN_DEFAULTS[panel]) || [.4, .1];
+        card.style.left = Math.round(sr.width * dp[0]) + 'px';
+        card.style.top = Math.round(sr.height * dp[1]) + 'px';
+      }
+      card.style.zIndex = ++zTop;
+      stage.appendChild(card);
+    } else {
+      host.insertBefore(card, host.firstChild);
+      while (host.children.length > 4) host.removeChild(host.lastChild);   // cap each slot at 4
+    }
     return body;
   }
   function empty(body, note) { var d = document.createElement('div'); d.className = 'empty-note'; d.textContent = note; body.appendChild(d); }
