@@ -294,6 +294,46 @@ def complete_task(partial_title: str):
 
 
 # ── Gmail (ported from bot.py) ───────────────────────────────────────────────────
+def complete_all_tasks(dry_run: bool = True) -> dict:
+    """RETIREMENT SWEEP: mark every open task COMPLETE in every list except NO TOUCH.
+    Complete-not-delete — everything stays recoverable in Google's completed view.
+    Only called after the full board migration into Ace's own store."""
+    out = {"dry_run": dry_run, "lists": [], "total": 0, "completed": 0, "errors": 0}
+    try:
+        creds = get_google_creds()
+        service = build("tasks", "v1", credentials=creds)
+        task_lists = service.tasklists().list(maxResults=30).execute().get("items", [])
+        for tl in task_lists:
+            name = tl.get("title", "")
+            if "no touch" in name.lower():
+                out["lists"].append({"list": name, "open": 0, "skipped": True})
+                continue
+            tasks = service.tasks().list(
+                tasklist=tl["id"], showCompleted=False, showHidden=False, maxResults=100,
+            ).execute().get("items", [])
+            open_tasks = [t for t in tasks if t.get("status") != "completed" and (t.get("title") or "").strip()]
+            out["total"] += len(open_tasks)
+            done_here = 0
+            if not dry_run:
+                for t in open_tasks:
+                    try:
+                        service.tasks().patch(
+                            tasklist=tl["id"], task=t["id"], body={"status": "completed"},
+                        ).execute()
+                        done_here += 1
+                    except Exception as e:
+                        logger.warning("clear: could not complete '%s' in %s: %s",
+                                       t.get("title", "?")[:40], name, e)
+                        out["errors"] += 1
+                out["completed"] += done_here
+            out["lists"].append({"list": name, "open": len(open_tasks), "completed": done_here})
+        return out
+    except Exception as e:
+        logger.error("complete_all_tasks failed: %s", e)
+        out["error"] = str(e)
+        return out
+
+
 def get_gmail_summary() -> str:
     """Pull recent unread priority emails from Gmail (excludes promos/social)."""
     try:

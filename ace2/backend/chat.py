@@ -517,6 +517,7 @@ async def prime_ctx() -> None:
         _ctx_keepwarm_started[0] = True
         asyncio.create_task(_ctx_keepwarm())
         asyncio.create_task(_learn_loop())
+        asyncio.create_task(_brief_loop())   # proactive: morning game plan + EOD recap
 
 
 # ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───
@@ -620,6 +621,30 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                     logger.info("triage sweep: captured %d to-do(s) into the data bank", routed)
         except Exception as e:
             logger.warning("triage sweep (data bank) failed: %s", e)
+
+        # REFLECTION (third pass) — the self-building seed: Ace notices where he fell short
+        # or where Brady wants more, and files it as a SELF-NOTE fact. These become the
+        # backlog for upgrading Ace himself (reviewed in chats/briefs, built out in dev).
+        try:
+            resp3 = await client.messages.create(
+                model=LEARN_MODEL, max_tokens=300,
+                messages=[{"role": "user", "content": (
+                    "You are Ace reflecting on how to serve Brady better. From this conversation, "
+                    "list up to 3 SELF-IMPROVEMENT notes — ONLY genuine signals like: something "
+                    "Brady asked for that Ace couldn't do or got wrong, a capability he wished "
+                    "for, repeated manual work Ace should automate, or a misroute/miss. One per "
+                    "line, ~15 words, no bullets. If none, reply NONE.\n\n"
+                    f"CONVERSATION:\n{convo}")}])
+            t3 = "".join(getattr(b, "text", "") for b in resp3.content).strip()
+            if t3 and not t3.upper().startswith("NONE"):
+                notes = [f"ACE SELF-NOTE: {ln.strip('-•* ').strip()}"
+                         for ln in t3.split("\n")
+                         if len(ln.strip()) > 12 and not ln.strip().upper().startswith("NONE")][:3]
+                if notes:
+                    await asyncio.to_thread(brain.add_memory, notes, "reflection")
+                    logger.info("reflection: filed %d self-note(s)", len(notes))
+        except Exception as e:
+            logger.warning("reflection pass failed: %s", e)
         return {"facts": filed, "tasks": routed}
     except Exception as e:
         logger.warning("learn sweep failed: %s", e)
@@ -644,6 +669,137 @@ async def _ctx_keepwarm() -> None:
         try:
             await asyncio.sleep(30)
             await _refresh_ctx()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+# ── PROACTIVE BRIEFS — Ace comes to Brady (morning game plan + EOD recap) ────────
+# The autonomy loop Brady asked for: Ace runs himself on a schedule. Each brief is
+# grounded in DETERMINISTIC board/win stats first, then written by the deep model,
+# and lands in the ONE thread (so it's waiting in chat) + pushes live to open HUDs.
+_BRIEF_TIMES = {"morning": (6, 15), "eod": (20, 15)}   # Eastern
+
+
+def _board_stats() -> str:
+    """Deterministic business snapshot from Ace's own store — no LLM guessing."""
+    from . import db
+    _CATS = ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"]
+    try:
+        items = db.read_items(active_only=False)
+    except Exception:
+        items = []
+    def cat(it):
+        for t in (it.get("tags") or []):
+            if t in _CATS:
+                return t
+        return "Admin"
+    now = datetime.now(EASTERN)
+    open_items = [i for i in items if i.get("status") == "open"]
+    lines = ["BOARD: " + " · ".join(
+        f"{c} {n}" for c in _CATS if (n := sum(1 for i in open_items if cat(i) == c)))]
+    stale = []
+    for i in open_items:
+        if cat(i) == "Deals":
+            try:
+                age = (now - datetime.fromisoformat(i["ts"])).days
+                if age >= 7:
+                    stale.append(f"{i.get('text','')[:48]} ({age}d)")
+            except Exception:
+                pass
+    if stale:
+        lines.append("STALE DEALS (no touch 7+ days): " + "; ".join(stale[:5]))
+    # Wins from memory (the win-logger writes "Deal won:" / "Goal reached:" facts)
+    try:
+        wins = [f for f in db.read_facts_full()
+                if not f.get("invalid_at")
+                and (f.get("text", "").startswith("Deal won:") or f.get("text", "").startswith("Goal reached:"))
+                and (now - datetime.fromisoformat(f["ts"]).astimezone(EASTERN)).days <= 7]
+        if wins:
+            lines.append("WINS THIS WEEK: " + " | ".join(w["text"][:70] for w in wins[:5]))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+async def generate_brief(kind: str = "morning") -> str:
+    """Build one brief and deliver it: thread + summary marker. Returns the text."""
+    from . import db
+    try:
+        stats = await asyncio.to_thread(_board_stats)
+        events_today, wx, convo = await asyncio.gather(
+            asyncio.to_thread(get_events_structured, 1),
+            get_weather(),
+            asyncio.to_thread(_unified_thread, 16),
+            return_exceptions=True,
+        )
+        def ok(v, d):
+            return d if isinstance(v, Exception) else v
+        now = datetime.now(EASTERN)
+        sched = _format_today_schedule(ok(events_today, []), now)
+        goals = [f for f in await asyncio.to_thread(brain.read_memory) if "goal" in f.lower()][:6]
+        client = _anthropic()
+        if kind == "morning":
+            ask = (
+                "Write Brady's MORNING BRIEF as Ace — his JARVIS-style chief of staff waking up "
+                "with him. Punchy, warm, zero fluff, ~140 words max. Structure: (1) one-line "
+                "greeting with the weather beat; (2) TODAY — his schedule turned into a game "
+                "plan, top 3 moves in priority order; (3) BUSINESS PULSE — one tight line from "
+                "the board stats (deals moving, anything stale to touch, wins momentum); "
+                "(4) one EMD-goal push line. Plain text, short lines, no markdown headers."
+            )
+        else:
+            ask = (
+                "Write Brady's END-OF-DAY RECAP as Ace. Warm, brief, ~110 words max. Structure: "
+                "(1) what got DONE today (from the thread/board); (2) what carries to tomorrow "
+                "(top 2-3, from open board items + tomorrow's first event); (3) one genuine "
+                "one-line push tied to his goals. Plain text, no markdown headers."
+            )
+        resp = await client.messages.create(
+            model=LEARN_MODEL, max_tokens=400,
+            messages=[{"role": "user", "content": (
+                f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
+                f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}\n\n"
+                f"{stats}\n\nHIS GOALS:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+                + "\n\nRECENT THREAD (for what happened):\n" + _format_thread(ok(convo, [])))}])
+        text = "".join(getattr(b, "text", "") for b in resp.content).strip()
+        if not text:
+            return ""
+        label = "☀ MORNING BRIEF" if kind == "morning" else "◈ EVENING RECAP"
+        delivered = f"{label}\n\n{text}"
+        await asyncio.to_thread(history.append, "assistant", delivered)
+        await asyncio.to_thread(db.add_summary, now.strftime("%Y-%m-%d"), f"brief_{kind}")
+        logger.info("brief delivered: %s (%d chars)", kind, len(text))
+        return delivered
+    except Exception as e:
+        logger.warning("generate_brief(%s) failed: %s", kind, e)
+        return ""
+
+
+async def _brief_loop() -> None:
+    """Fire the morning/EOD briefs at their Eastern times — once per day each, guarded by a
+    summary marker so restarts/redeploys never double-send."""
+    from . import db
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if not db.enabled():
+                continue
+            now = datetime.now(EASTERN)
+            for kind, (hh, mm) in _BRIEF_TIMES.items():
+                if (now.hour, now.minute) < (hh, mm):
+                    continue
+                last = await asyncio.to_thread(db.latest_summary, f"brief_{kind}")
+                if (last.get("text") or "") == now.strftime("%Y-%m-%d"):
+                    continue   # already sent today
+                text = await generate_brief(kind)
+                if text:
+                    try:
+                        from .main import publish_stage_event
+                        await publish_stage_event("brief", {"kind": kind, "text": text})
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             break
         except Exception:

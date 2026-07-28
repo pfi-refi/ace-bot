@@ -658,3 +658,30 @@ body::after { content: ""; position: fixed; inset: 0 0 40% 0; z-index: 1; pointe
   .qa { text-align: left; padding: 9px 12px; }
   #app { padding-left: 176px; }
 }
+
+/* ============================== v36: panel editing + color + centered stage ===== */
+/* Category accent stripe on every board row (color set inline per category) */
+.cmd-row { border-left: 3px solid transparent; }
+.cmd-pencil { flex: none; align-self: center; width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid rgba(120,200,170,.16); background: transparent; color: #63796f;
+  font-size: 13px; cursor: pointer; transition: color .15s, border-color .15s; }
+.cmd-pencil:hover { color: #45ffa6; border-color: rgba(69,255,166,.4); }
+.cmd-eform { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.cmd-etext { width: 100%; resize: vertical; min-height: 44px; border-radius: 9px; padding: 8px 10px;
+  border: 1px solid rgba(69,255,166,.3); background: rgba(5,13,15,.7); color: #eef7f3;
+  font-family: inherit; font-size: 13.5px; outline: none; }
+.cmd-erow { display: flex; gap: 7px; }
+.cmd-ecat, .cmd-edue { flex: 1; border-radius: 8px; padding: 7px 9px; font-size: 12px;
+  border: 1px solid rgba(120,200,170,.2); background: rgba(5,13,15,.7); color: #dce8e4; outline: none; }
+.cmd-ecat option { background: #06121a; }
+.cmd-esave, .cmd-ecancel { flex: 1; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  padding: 8px 4px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.cmd-esave { background: #45ffa6; color: #04120b; font-weight: 700; }
+.cmd-esave:disabled { opacity: .6; }
+.cmd-ecancel { background: transparent; color: #8fa4a0; border-color: rgba(120,200,170,.2); }
+
+/* Center the stage on desktop: the rail pushed everything right — balance it so the
+   orb sits dead-center of the SCREEN again. */
+@media (min-width: 900px) {
+  #app { padding-right: 176px; }
+}

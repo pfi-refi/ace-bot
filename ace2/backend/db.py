@@ -402,12 +402,15 @@ def add_summary(text: str, kind: str = "recap") -> bool:
         return False
 
 
-def update_item(item_id: str, status: str = None, text: str = None) -> tuple:
+def update_item(item_id: str, status: str = None, text: str = None,
+                tags: list = None, due: str = None) -> tuple:
+    """Edit a board item: status, text, tags (full replace), and/or due. due='' clears it."""
     item_id = (item_id or "").strip()
     if not item_id:
         return False, "no id"
     ensure_ready()
     try:
+        import json
         with _conn() as c, c.cursor() as cur:
             sets, args = [], []
             if status in ("open", "done"):
@@ -416,6 +419,10 @@ def update_item(item_id: str, status: str = None, text: str = None) -> tuple:
                 args.append(datetime.now(EASTERN).isoformat() if status == "done" else None)
             if text and text.strip():
                 sets.append("text = %s"); args.append(text.strip())
+            if tags is not None:
+                sets.append("tags = %s::jsonb"); args.append(json.dumps(tags))
+            if due is not None:
+                sets.append("due = %s"); args.append(due.strip() or None)
             if not sets:
                 return False, "nothing to update"
             args.append(item_id)

@@ -136,10 +136,12 @@ def _drive_add_item(kind: str, text: str, due: str = None, tags: list = None) ->
         return False, str(e)
 
 
-def update_item(item_id: str, status: str = None, text: str = None) -> tuple:
-    """Complete/reopen or edit an item by id. Postgres when enabled, else Drive."""
+def update_item(item_id: str, status: str = None, text: str = None,
+                tags: list = None, due: str = None) -> tuple:
+    """Complete/reopen or edit an item by id (text/tags/due too). Postgres when
+    enabled, else Drive (Drive path supports status/text only)."""
     if db.enabled():
-        return db.update_item(item_id, status, text)
+        return db.update_item(item_id, status, text, tags=tags, due=due)
     return _drive_update_item(item_id, status, text)
 
 

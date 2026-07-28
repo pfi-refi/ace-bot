@@ -349,16 +349,22 @@ TOOLS = [
     {
         "name": "update_item",
         "description": (
-            "Update a DATA BANK item: mark it done (status='done') when Brady says he "
-            "finished it or you complete it for him, reopen it, or edit its text. Use the "
-            "item's id from the data bank."
+            "Update a TASK BOARD item by id: mark it done (status='done') when Brady says "
+            "he finished it, reopen it, rewrite its text, move it to another category, or "
+            "change its due. Use the item's id from YOUR TASK BOARD in context."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "The data bank item id"},
+                "id": {"type": "string", "description": "The board item id"},
                 "status": {"type": "string", "enum": ["open", "done"], "description": "New status"},
                 "text": {"type": "string", "description": "Optional new text"},
+                "category": {
+                    "type": "string",
+                    "enum": ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"],
+                    "description": "Optional: move the item to this board column",
+                },
+                "due": {"type": "string", "description": "Optional new due in plain words ('' clears it)"},
             },
             "required": ["id"],
         },
@@ -566,11 +572,18 @@ def _do_capture_item(kind="note", text="", due=None, category=None, **_):
     return f"⚠️ Could not capture: {res}"
 
 
-def _do_update_item(id="", status=None, text=None, **_):
-    ok, res = daybank.update_item(id, status=status, text=text)
+def _do_update_item(id="", status=None, text=None, category=None, due=None, **_):
+    tags = None
+    if category:
+        _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
+        it = next((x for x in daybank.read_items(False) if x.get("id") == id), None)
+        keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
+        tags = [category] + keep
+    ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due)
     if ok:
         verb = "Completed" if status == "done" else ("Reopened" if status == "open" else "Updated")
-        return f"◆ {verb}: {res}"
+        moved = f" → [{category}]" if category else ""
+        return f"◆ {verb}{moved}: {res}"
     return f"⚠️ Could not update item: {res}"
 
 

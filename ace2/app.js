@@ -441,6 +441,7 @@
       case 'delta': if (!streamMsg) streamMsg = beginAceStream(); appendToStream(streamMsg, msg.text); break;
       case 'tool': renderTool(msg); break;
       case 'card': materializeCard(msg.panel, msg.data, msg.where); break;
+      case 'brief': addAceMessage(msg.text); markUnread(); break;   // proactive brief, pushed live
       case 'open': openLink(msg.url, msg.label); break;
       case 'run_on_hud': runOnHud(msg.message); break;
       case 'confirmation': renderConfirm(msg.text); break;
@@ -948,7 +949,7 @@
      overlay that collapses to a clean orb; reads/writes the data bank via /daybank. */
   var CMD_CATS = { Deals:'#45ffa6', Agents:'#53e7ff', Admin:'#ffce7a', Networking:'#b79dff', Business:'#ff9e7a', Tech:'#7aa2ff', Personal:'#ff9ecb', Goals:'#ffd24a' };
   var CMD_ORDER = ['Deals','Agents','Admin','Networking','Business','Tech','Personal','Goals'];
-  var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[] };
+  var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[], editing:null };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
   function cmdFetch(){
@@ -965,11 +966,26 @@
   }
   function cmdClose(){ cmd.open=false; var v=document.getElementById('command-view'); if(v) v.style.display='none'; }
   function cmdRow(it){
-    var c=cmdCatOf(it), done=it.status==='done';
-    return '<div class="cmd-row '+(done?'done':'')+'" data-id="'+it.id+'"><div class="cmd-box"></div>'
+    var c=cmdCatOf(it), col=CMD_CATS[c], done=it.status==='done';
+    if (cmd.editing === it.id) {
+      var opts = CMD_ORDER.map(function (o) {
+        return '<option value="'+o+'"'+(o===c?' selected':'')+'>'+o+'</option>';
+      }).join('');
+      return '<div class="cmd-row cmd-editing" data-id="'+it.id+'" style="border-left-color:'+col+'">'
+        +'<div class="cmd-eform">'
+        +'<textarea class="cmd-etext" rows="2">'+cmdEsc(it.text)+'</textarea>'
+        +'<div class="cmd-erow"><select class="cmd-ecat">'+opts+'</select>'
+        +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(it.due||'')+'"></div>'
+        +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button></div>'
+        +'</div></div>';
+    }
+    return '<div class="cmd-row '+(done?'done':'')+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
+      +'<div class="cmd-box"></div>'
       +'<div class="cmd-b"><div class="cmd-t">'+cmdEsc(it.text)+'</div><div class="cmd-m">'
-      +'<span class="cmd-tag"><span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>'+c+'</span>'
-      +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')+'</div></div></div>';
+      +'<span class="cmd-tag" style="color:'+col+';border-color:'+col+'55;background:'+col+'14">'
+      +'<span class="cmd-d" style="background:'+col+'"></span>'+c+'</span>'
+      +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')+'</div></div>'
+      +'<button class="cmd-pencil" title="Edit">✎</button></div>';
   }
   function cmdRender(){
     var v=document.getElementById('command-view'); if(!v) return;
@@ -1008,6 +1024,27 @@
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
       var ns=it.status==='done'?'open':'done'; it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:ns})}).catch(function(){});
+    }; });
+    // FULL EDITING (Brady): ✎ opens the inline editor — rewrite text, move category, set due.
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-pencil'), function(b){ b.onclick=function(){
+      cmd.editing = b.parentNode.getAttribute('data-id'); cmdRender();
+    }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-ecancel'), function(b){ b.onclick=function(){
+      cmd.editing = null; cmdRender();
+    }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
+      var row = b.closest('.cmd-row'); if (!row) return;
+      var id = row.getAttribute('data-id');
+      var body = {
+        id: id,
+        text: (row.querySelector('.cmd-etext').value || '').trim(),
+        category: row.querySelector('.cmd-ecat').value,
+        due: (row.querySelector('.cmd-edue').value || '').trim()
+      };
+      b.textContent = 'SAVING…'; b.disabled = true;
+      fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify(body)})
+        .then(function(){ cmd.editing = null; return cmdFetch(); }).then(cmdRender)
+        .catch(function(){ cmd.editing = null; cmdRender(); });
     }; });
     var f=v.querySelector('#cmd-add');
     if(f) f.onsubmit=function(e){ e.preventDefault(); var inp=v.querySelector('#cmd-input'); var t=(inp.value||'').trim(); if(!t) return; inp.value='';

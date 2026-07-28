@@ -397,7 +397,10 @@ async def daybank_read(all: bool = False):
 
 class DaybankUpdateReq(BaseModel):
     id: str = ""
-    status: str = ""  # "open" | "done"
+    status: str = ""     # "open" | "done" | "" (no status change)
+    text: str = ""       # new wording ("" = leave)
+    category: str = ""   # move to another board column ("" = leave)
+    due: str | None = None   # new due ("" clears it; None = leave)
 
 
 class DaybankAddReq(BaseModel):
@@ -483,6 +486,28 @@ async def daybank_migrate(req: MigrateReq):
     }
 
 
+@app.post("/tasks/clear_all", dependencies=[Depends(require_auth)])
+async def tasks_clear_all(req: MigrateReq):
+    """GOOGLE TASKS RETIREMENT (Brady's explicit call): complete every open task in every
+    list except NO TOUCH. Complete-not-delete — recoverable in Google's completed view.
+    Run only after the board holds everything (it does: migrated + imported + deduped)."""
+    from .integrations.tasks_api import complete_all_tasks
+    return await asyncio.to_thread(complete_all_tasks, req.dry_run)
+
+
+@app.post("/brief/run", dependencies=[Depends(require_auth)])
+async def brief_run(kind: str = "morning"):
+    """Generate a brief NOW (also used by the scheduled loops): 'morning' = the wake-up
+    game plan + business snapshot; 'eod' = the evening recap. Lands in the conversation
+    thread and pushes to any open HUD."""
+    kind = kind if kind in ("morning", "eod") else "morning"
+    text = await chat.generate_brief(kind)
+    if text:
+        reached = await publish_stage_event("brief", {"kind": kind, "text": text})
+        return {"ok": True, "kind": kind, "chars": len(text), "hud_clients": reached}
+    return {"ok": False, "error": "brief generation failed"}
+
+
 @app.post("/daybank/import_personal_goals", dependencies=[Depends(require_auth)])
 async def daybank_import_personal_goals(req: MigrateReq):
     """One-time: bring Brady's Google PERSONAL + GOALS lists into Ace's store (tagged Personal /
@@ -547,11 +572,20 @@ async def daybank_categorize():
 
 @app.post("/daybank/update", dependencies=[Depends(require_auth)])
 async def daybank_update(req: DaybankUpdateReq):
-    """Toggle an item from the HUD checkbox. Mutates Ace's OWN private data-bank
-    file only — never the shared conversation file. Same mutation Ace makes via the
-    update_item tool, exposed directly so a checkbox is instant, not a chat round-trip."""
+    """Edit a board item from the Command panel: toggle done, rewrite the text, move it
+    to another category, or change its due — instant, no chat round-trip. Mutates Ace's
+    OWN store only."""
     status = req.status if req.status in ("open", "done") else None
-    ok, _msg = await asyncio.to_thread(daybank.update_item, req.id, status)
+    text = req.text.strip() or None
+    tags = None
+    _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
+    if req.category and req.category in _CATS:
+        it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
+                   if x.get("id") == req.id), None)
+        keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
+        tags = [req.category] + keep
+    ok, _msg = await asyncio.to_thread(
+        daybank.update_item, req.id, status, text, tags, req.due)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":
