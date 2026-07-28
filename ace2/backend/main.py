@@ -713,10 +713,9 @@ def _graph_shape(raw: dict) -> dict:
 async def graph(refresh: int = 0):
     """The knowledge graph: every person, deal and category Ace knows about, and how
     they connect. Cached ~6h — pass ?refresh=1 to force a fresh extraction."""
-    cached = {}
-    if db.enabled() and not refresh:
-        cached = await asyncio.to_thread(db.latest_summary, "graph_cache")
-    if cached.get("text"):
+    # Always read the cache, even on ?refresh=1 — a failed rebuild falls back to it below.
+    cached = await asyncio.to_thread(db.latest_summary, "graph_cache") if db.enabled() else {}
+    if cached.get("text") and not refresh:
         try:
             age = time.time() - datetime.fromisoformat(cached["ts"]).timestamp()
         except Exception:
@@ -739,37 +738,43 @@ async def graph(refresh: int = 0):
     tasks = "\n".join(
         "- [{}] {}".format(", ".join(it.get("tags") or []) or "Admin", it.get("text", ""))
         for it in board)
-    client = chat._anthropic()
-    resp = await client.messages.create(
-        model=chat.LEARN_MODEL, max_tokens=4000,
-        messages=[{"role": "user", "content": (
-            "You are Ace's KNOWLEDGE GRAPH builder for Brady McGraw, who runs Platinum "
-            "Fortune Impact — a real-estate / life-insurance / refi base shop with ~18 agents. "
-            "From his memory facts and his open board below, extract the ENTITY GRAPH of his "
-            "book of business.\n\n"
-            "NODES — one per real entity, no duplicates, and use the person's/deal's real name:\n"
-            '  type "person"   — an agent, prospect, client, referral partner or family member\n'
-            '  type "deal"     — a specific transaction or policy (e.g. "Kiana Wiggins deal", '
-            '"Miller refi")\n'
-            '  type "category" — ONLY these eight board columns, and only when something '
-            "connects to them: Deals, Agents, Admin, Networking, Business, Tech, Personal, Goals\n\n"
-            "EDGES — how they actually connect. `kind` is a short snake_case verb read "
-            "source→target, e.g. deal_of, works_with, recruited_by, referred_by, client_of, "
-            "married_to, owns, belongs_to. Example: {\"source\":\"Kiana Wiggins deal\","
-            "\"target\":\"Corrine\",\"kind\":\"deal_of\"}. Connect every person and deal to the "
-            "board category it belongs to, and connect people to each other wherever a fact says "
-            "they are related, on the same deal, or on the same team.\n\n"
-            "Rules: Brady himself is a node. Skip abstractions, dates and to-do phrasing — only "
-            "named people, named deals, and the eight categories. Prefer FEWER, RIGHT nodes over "
-            "many noisy ones. Every edge's source and target MUST exactly match a node label.\n\n"
-            "Reply with STRICT JSON and nothing else:\n"
-            '{"nodes":[{"id":"kiana-wiggins","label":"Kiana Wiggins","type":"person"}],'
-            '"edges":[{"source":"Kiana Wiggins","target":"Deals","kind":"belongs_to"}]}\n\n'
-            f"MEMORY FACTS:\n{lines or '(none)'}\n\nOPEN BOARD (category in brackets):\n"
-            f"{tasks or '(none)'}")}])
-    out = _graph_shape(_graph_json("".join(getattr(b, "text", "") for b in resp.content)))
+    prompt = (
+        "You are Ace's KNOWLEDGE GRAPH builder for Brady McGraw, who runs Platinum "
+        "Fortune Impact — a real-estate / life-insurance / refi base shop with ~18 agents. "
+        "From his memory facts and his open board below, extract the ENTITY GRAPH of his "
+        "book of business.\n\n"
+        "NODES — one per real entity, no duplicates, and use the person's/deal's real name:\n"
+        '  type "person"   — an agent, prospect, client, referral partner or family member\n'
+        '  type "deal"     — a specific transaction or policy (e.g. "Kiana Wiggins deal", '
+        '"Miller refi")\n'
+        '  type "category" — ONLY these eight board columns, and only when something '
+        "connects to them: Deals, Agents, Admin, Networking, Business, Tech, Personal, Goals\n\n"
+        "EDGES — how they actually connect. `kind` is a short snake_case verb read "
+        "source→target, e.g. deal_of, works_with, recruited_by, referred_by, client_of, "
+        "married_to, owns, belongs_to. Example: {\"source\":\"Kiana Wiggins deal\","
+        "\"target\":\"Corrine\",\"kind\":\"deal_of\"}. Connect every person and deal to the "
+        "board category it belongs to, and connect people to each other wherever a fact says "
+        "they are related, on the same deal, or on the same team.\n\n"
+        "Rules: Brady himself is a node. Skip abstractions, dates and to-do phrasing — only "
+        "named people, named deals, and the eight categories. Prefer FEWER, RIGHT nodes over "
+        "many noisy ones. Every edge's source and target MUST exactly match a node label.\n\n"
+        "Reply with STRICT JSON and nothing else:\n"
+        '{"nodes":[{"id":"kiana-wiggins","label":"Kiana Wiggins","type":"person"}],'
+        '"edges":[{"source":"Kiana Wiggins","target":"Deals","kind":"belongs_to"}]}\n\n'
+        f"MEMORY FACTS:\n{lines or '(none)'}\n\nOPEN BOARD (category in brackets):\n"
+        f"{tasks or '(none)'}")
+    out = {"nodes": []}
+    try:
+        client = chat._anthropic()
+        resp = await client.messages.create(
+            model=chat.LEARN_MODEL, max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}])
+        out = _graph_shape(_graph_json("".join(getattr(b, "text", "") for b in resp.content)))
+    except Exception as e:
+        logger.warning("graph extraction failed: %s", e)
     if not out["nodes"]:
-        # The extraction came back unusable — serve the stale cache rather than a blank map.
+        # Extraction failed or came back unusable — an OLD map beats a blank screen, so
+        # serve the stale cache (flagged) instead of nothing.
         stale = _graph_json(cached.get("text") or "")
         if stale.get("nodes"):
             return {**stale, "cached": True, "stale": True}

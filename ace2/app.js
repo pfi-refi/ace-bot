@@ -1244,7 +1244,7 @@
   var gr = { open: false, nodes: [], edges: [], adj: {}, sel: null, hov: null,
              tx: 0, ty: 0, k: 1, k0: 1, alpha: 1, raf: 0, cv: null, ctx: null,
              W: 0, H: 0, dpr: 1, drag: null, pan: null, down: null, moved: 0,
-             ptr: {}, pinch: 0, sprites: {} };
+             ptr: {}, pinch: 0, sprites: {}, autofit: true };
   function grNarrow() { return window.innerWidth < 760; }
 
   // One pre-rendered glow sprite per type, drawn scaled per node. Canvas shadowBlur
@@ -1285,7 +1285,27 @@
       gr.adj[a.id].push({ n: b, kind: e.kind }); gr.adj[b.id].push({ n: a, kind: e.kind });
       return true;
     });
-    gr.tx = 0; gr.ty = 0; gr.k = 1; gr.alpha = 1; gr.sel = null; gr.hov = null;
+    gr.tx = 0; gr.ty = 0; gr.k = 1; gr.alpha = 1; gr.sel = null; gr.hov = null; gr.autofit = true;
+  }
+
+  // AUTO-FRAME — while the layout is still settling and Brady hasn't grabbed it yet, ease
+  // the viewport toward the graph's bounding box. The map arrives perfectly composed instead
+  // of half off-screen; the first touch hands control back for good.
+  function grFrame() {
+    var n = gr.nodes.length; if (!n) return;
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, i;
+    for (i = 0; i < n; i++) {
+      var nd = gr.nodes[i], r = (nd.size || 8) * 2.2;
+      if (nd.x - r < x0) x0 = nd.x - r;
+      if (nd.x + r > x1) x1 = nd.x + r;
+      if (nd.y - r < y0) y0 = nd.y - r;
+      if (nd.y + r > y1) y1 = nd.y + r;
+    }
+    var pad = grNarrow() ? 28 : 70;
+    var k = Math.min((gr.W - pad * 2) / Math.max(1, x1 - x0), (gr.H - pad * 2) / Math.max(1, y1 - y0));
+    k = Math.max(.3, Math.min(1.4, k));
+    var tx = gr.W / 2 - (x0 + x1) / 2 * k, ty = gr.H / 2 - (y0 + y1) / 2 * k;
+    gr.k += (k - gr.k) * .09; gr.tx += (tx - gr.tx) * .09; gr.ty += (ty - gr.ty) * .09;
   }
 
   function grStep() {
@@ -1339,7 +1359,8 @@
       else { c.strokeStyle = 'rgba(120,215,190,.15)'; c.lineWidth = .9 / gr.k; }
       c.beginPath(); c.moveTo(e.a.x, e.a.y); c.lineTo(e.b.x, e.b.y); c.stroke();
     }
-    var fs = (grNarrow() ? 9.5 : 11.5) / gr.k;
+    var fs = (grNarrow() ? 9.5 : 11.5) / gr.k;   // ÷k so labels hold one readable screen size
+    var labelAll = gr.nodes.length <= 70;        // a small book fits every name; a big one doesn't
     c.textAlign = 'center'; c.textBaseline = 'top';
     for (i = 0; i < gr.nodes.length; i++) {
       var nd = gr.nodes[i], col = GR_COL[nd.type] || GR_COL.person;
@@ -1354,7 +1375,7 @@
       }
       // Label budget: always for the hubs and the focused set, everything else once
       // you've zoomed in far enough to have room for it.
-      if (!(r >= 10 || gr.k > .85 || (lit && lit[nd.id]))) continue;
+      if (!(labelAll || r >= 10 || gr.k > .85 || (lit && lit[nd.id]))) continue;
       c.globalAlpha = dim ? .16 : (nd === focus ? 1 : .84);
       c.font = (nd === focus ? '700 ' : '') + fs.toFixed(1) + 'px ' +
         'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -1366,7 +1387,9 @@
 
   function grLoop() {
     if (!gr.open) { gr.raf = 0; return; }
-    grStep(); grDraw();
+    grStep();
+    if (gr.autofit && !gr.sel && gr.alpha > .06) grFrame();
+    grDraw();
     gr.raf = requestAnimationFrame(grLoop);
   }
 
@@ -1428,9 +1451,12 @@
       try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
       gr.ptr[ev.pointerId] = { x: ev.clientX, y: ev.clientY };
       if (Object.keys(gr.ptr).length === 2) {          // second finger → pinch, cancel any drag
-        gr.pinch = span(); gr.k0 = gr.k; gr.drag = null; gr.pan = null; gr.down = null; return;
+        gr.pinch = span(); gr.k0 = gr.k; gr.drag = null; gr.pan = null; gr.down = null;
+        gr.moved = 999; gr.autofit = false;            // ...and don't let the release read as a tap
+        return;
       }
       var p = local(ev), hit = grAt(p[0], p[1]);
+      gr.autofit = false;                              // his hands are on it now — stop re-framing
       gr.moved = 0; gr.down = hit; gr.sx = ev.clientX; gr.sy = ev.clientY;
       if (hit) { gr.drag = hit; gr.alpha = Math.max(gr.alpha, .45); }
       else gr.pan = { x: ev.clientX, y: ev.clientY, tx: gr.tx, ty: gr.ty };
@@ -1462,6 +1488,7 @@
     cv.addEventListener('pointercancel', up);
     cv.addEventListener('wheel', function (ev) {
       ev.preventDefault();
+      gr.autofit = false;
       var p = local(ev);
       grZoom(gr.k * Math.pow(.999, ev.deltaY * (ev.ctrlKey ? 5 : 1.7)), p[0], p[1]);
     }, { passive: false });
@@ -1474,11 +1501,20 @@
   }
   function grLoad(refresh) {
     var meta = document.getElementById('gr-meta'), load = document.getElementById('gr-load');
-    if (load) { load.style.display = 'block'; load.textContent = refresh ? '◉ re-reading the whole book…' : '◉ mapping…'; }
+    var rf = document.getElementById('gr-refresh');
+    // A cold build is a full Opus read of every fact + the whole board — tens of seconds.
+    // Say so, and lock ⟳ so an impatient second tap can't start a second extraction.
+    if (rf) { rf.disabled = true; rf.style.opacity = '.45'; }
+    if (load) {
+      load.style.display = 'block';
+      load.textContent = refresh ? '◉ re-reading the whole book — this takes a moment…' : '◉ mapping…';
+    }
     if (meta) meta.textContent = 'reading facts + board…';
+    function unlock() { if (rf) { rf.disabled = false; rf.style.opacity = ''; } }
     fetch(API + '/graph' + (refresh ? '?refresh=1' : ''), { headers: headers() })
       .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
       .then(function (d) {
+        unlock();
         gr.nodes = (d.nodes || []).map(function (n) { return { id: n.id, label: n.label, type: n.type, size: n.size || 8 }; });
         gr.edges = (d.edges || []).slice();
         if (load) load.style.display = gr.nodes.length ? 'none' : 'block';
@@ -1493,6 +1529,7 @@
         if (!gr.raf) gr.raf = requestAnimationFrame(grLoop);
       })
       .catch(function () {
+        unlock();
         if (load) { load.style.display = 'block'; load.textContent = 'the map didn’t load — try ⟳'; }
       });
   }
