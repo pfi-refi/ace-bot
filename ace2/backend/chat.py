@@ -58,11 +58,13 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
 VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
-# The background LEARNING/TRIAGE sweep is NOT latency-bound — it runs every ~25 min off the
-# live path — so it gets Ace's REAL brain (Opus), not the fast voice model. Haiku was badly
-# under-reading dense brain dumps (a long Saturday dump → 0 facts, 5 tasks, most of it dropped).
-# Override with ACE2_LEARN_MODEL to trade cost for depth (e.g. claude-sonnet-5).
-LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", MODEL)
+# The background LEARNING/TRIAGE sweep + briefs + graph + nudges are NOT latency-bound (they
+# run off the live path), so they don't need the premium typed brain (Opus, $5/$25). Sonnet 5
+# ($3/$15, cheaper still on intro pricing) is near-Opus quality and cut Brady's API bill ~40-60%
+# on all this invisible background work — the typed CHAT he actually interacts with stays MODEL.
+# Haiku was too weak here (a dense brain dump → 0 facts, most dropped); Sonnet 5 is the floor.
+# Override with ACE2_LEARN_MODEL (e.g. back to claude-opus-4-8) to trade cost for depth.
+LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", "claude-sonnet-5")
 # On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
 # confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
 # says yes, only then does the second call actually send). Built once for cache stability.
@@ -525,7 +527,7 @@ async def prime_ctx() -> None:
 # ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───
 # himself — auto-extracting new durable facts (not only when he remembered to save one), on a
 # schedule, OFF the live conversation loop so he stays fast. This is "he builds himself" (Brady).
-_LEARN_INTERVAL = 25 * 60.0   # sweep ~every 25 min
+_LEARN_INTERVAL = 45 * 60.0   # sweep ~every 45 min (was 25 — halved the sweep cost, no real loss)
 _learn_running = [False]
 _learn_state = {"last_hash": None}
 
@@ -690,9 +692,9 @@ async def _graph_warm_loop() -> None:
         except Exception as e:
             logger.warning("graph warm failed: %s", e)
         try:
-            await asyncio.sleep(5 * 3600)   # just inside the 6h TTL
-        except asyncio.CancelledError:
-            break
+            await asyncio.sleep(23 * 3600)   # once a day — the book of business doesn't turn
+        except asyncio.CancelledError:       # over every 5h; cut this rebuild cost ~80%. TTL
+            break                            # is raised to match so taps still hit the cache.
 
 
 async def _ctx_keepwarm() -> None:

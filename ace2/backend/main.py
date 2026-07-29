@@ -650,7 +650,8 @@ async def daybank_update(req: DaybankUpdateReq):
 # sentence of prose, so we take the outermost {...} and then validate every node
 # and edge. Anything malformed is dropped rather than shipped to the canvas —
 # a half-built graph still renders; a thrown exception is a black screen.
-GRAPH_TTL = 6 * 3600
+GRAPH_TTL = 26 * 3600   # a day + margin — the warm loop rebuilds daily, so a cached read
+                        # is served instantly all day and a tap never triggers a live rebuild
 GRAPH_TYPES = ("person", "deal", "category")
 
 
