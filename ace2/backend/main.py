@@ -1101,13 +1101,16 @@ def _capture_json(raw: str) -> dict:
 
 
 @app.post("/capture", dependencies=[Depends(require_auth)])
-async def capture(request: Request):
+async def capture(request: Request, dry_run: bool = False):
     """CAPTURE ANYTHING — multipart file in, filed knowledge out.
 
     IMAGE → Claude vision. PDF → Claude document block. AUDIO → Scribe, then the same
     extraction over the transcript. Facts land in memory (reconciled), to-dos land on the
     board (deduped server-side), contacts fold into facts. Returns the summary immediately
     so the UI can show what it got instead of a spinner and a prayer.
+
+    dry_run=true → PREVIEW: read and return exactly what would be filed, but write NOTHING
+    to memory or the board. Lets Brady eyeball a dense screenshot's read before committing.
     """
     from .brain import add_memory
 
@@ -1178,6 +1181,22 @@ async def capture(request: Request):
         note = str(c.get("note") or "").strip()
         facts.append("Contact — " + name + (": " + reach if reach else "")
                      + (" — " + note if note else ""))
+
+    # PREVIEW MODE — read it, show what it found, file nothing. Return the exact facts/todos
+    # so Brady can confirm a dense screenshot read right before it touches his brain.
+    if dry_run:
+        prev_todos = []
+        for t in (parsed.get("todos") or []):
+            t = {"text": t} if isinstance(t, str) else t
+            if isinstance(t, dict) and len(str(t.get("text") or "").strip()) >= 4:
+                prev_todos.append(str(t["text"]).strip())
+        return {
+            "ok": True, "dry_run": True, "kind": kind,
+            "summary": str(parsed.get("summary") or "").strip(),
+            "facts": facts, "todos": prev_todos,
+            "facts_count": len(facts), "todos_count": len(prev_todos),
+            "text": transcript or str(parsed.get("text") or "").strip(),
+        }
 
     filed_todos = []
     for t in (parsed.get("todos") or []):
