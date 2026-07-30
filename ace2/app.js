@@ -1617,17 +1617,23 @@
   // server can answer with a readable message instead of the UI silently eating it.
   function shrinkImage(file) {
     return new Promise(function (resolve) {
-      if (!/^image\//.test(file.type || '') || file.size < 400000) return resolve(file);
+      // Only shrink images that are actually near the server's 5MB per-image cap. A normal
+      // screenshot (well under that) goes through UNTOUCHED — the canvas step is exactly what
+      // returned a BLANK image on iOS for big screenshots (Brady: "he said it was blank").
+      if (!/^image\//.test(file.type || '') || file.size < 4500000) return resolve(file);
       var url = URL.createObjectURL(file), img = new Image();
       img.onload = function () {
         try {
           var s = Math.min(1, 1568 / Math.max(img.width, img.height));
           var c = document.createElement('canvas');
           c.width = Math.round(img.width * s) || 1; c.height = Math.round(img.height * s) || 1;
-          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          var ctx = c.getContext('2d');
+          ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height);   // no transparent→black
+          ctx.drawImage(img, 0, 0, c.width, c.height);
           c.toBlob(function (b) {
             URL.revokeObjectURL(url);
-            resolve(b ? new File([b], 'capture.jpg', { type: 'image/jpeg' }) : file);
+            // If the canvas blanked out (iOS) the blob is tiny — fall back to the original file.
+            resolve(b && b.size > 3000 ? new File([b], 'capture.jpg', { type: 'image/jpeg' }) : file);
           }, 'image/jpeg', 0.86);
         } catch (e) { URL.revokeObjectURL(url); resolve(file); }
       };
