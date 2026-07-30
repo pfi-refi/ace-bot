@@ -459,6 +459,32 @@ def _format_calendar_window(events: list, now) -> str:
 # (main.prime) and kept warm every ~30s.
 _CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "tasks": [], "recap": "", "ts": 0.0}
 _CTX_TTL = 45.0
+
+
+def ctx_diag() -> dict:
+    """Read-only snapshot of the VOICE context cache — the exact data a live call reads
+    from. If today's events are missing here, voice is calendar-blind even though the typed
+    path (a fresh fetch) is fine. This is how we tell a stale/failed refresh from a wrong
+    clock."""
+    now = datetime.now(EASTERN)
+    today = now.strftime("%Y-%m-%d")
+    events = _CTX.get("events") or []
+    todays = [e for e in events if e.get("date") == today]
+    return {
+        "server_now_eastern": now.strftime("%A, %B %d, %Y — %-I:%M %p"),
+        "today": today,
+        "cache_age_seconds": round(time.time() - _CTX["ts"], 1) if _CTX["ts"] else None,
+        "cache_ttl_seconds": _CTX_TTL,
+        "cache_is_stale": (_CTX["ts"] == 0.0) or (time.time() - _CTX["ts"]) > _CTX_TTL,
+        "events_total_cached": len(events),
+        "events_today_count": len(todays),
+        "events_today_titles": [f"{e.get('time','')} {e.get('title','')}".strip() for e in todays[:12]],
+        "memory_facts_cached": len(_CTX.get("memory") or []),
+        "board_items_cached": len(_CTX.get("bank") or []),
+        "learn_model": LEARN_MODEL,
+        "typed_model": MODEL,
+        "voice_model": VOICE_MODEL,
+    }
 _RECAP_TTL = 3 * 3600.0   # regenerate the "where we left off" recap at most every ~3h
 _recap_running = [False]
 _ctx_lock: asyncio.Lock = asyncio.Lock()

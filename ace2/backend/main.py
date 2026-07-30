@@ -1218,6 +1218,16 @@ async def capture(request: Request):
 
 
 # ── Full-duplex realtime voice (ElevenLabs Agents) ──────────────────────────────
+@app.get("/diag", dependencies=[Depends(require_auth)])
+async def diag():
+    """Operator check-up: the live VOICE context cache (what a call actually reads) + the
+    ElevenLabs agent's dashboard prompt (where a stale hardcoded date could hide). Read-only."""
+    return {
+        "context_cache": chat.ctx_diag(),
+        "elevenlabs_agent": await voice.convai_agent_audit(),
+    }
+
+
 @app.get("/convai/config", dependencies=[Depends(require_auth)])
 async def convai_config():
     on = voice.convai_enabled()

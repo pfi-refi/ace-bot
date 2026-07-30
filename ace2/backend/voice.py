@@ -153,6 +153,18 @@ async def convai_agent_audit() -> dict:
         agent = conv.get("agent") or {}
         prompt = agent.get("prompt") or {}
         tools = prompt.get("tools") or []
+        # The agent's dashboard SYSTEM PROMPT + greeting — the one place a stale hardcoded
+        # date ("Today is …") could live outside our code and make voice think it's the
+        # wrong day. Surfaced (truncated) so an audit can actually see it.
+        ptext = prompt.get("prompt") or ""
+        first_msg = agent.get("first_message") or conv.get("first_message") or ""
+        import re as _re
+        date_hits = _re.findall(
+            r"(?i)\b(?:today is|current date|it is|the date is)[^.\n]{0,40}"
+            r"|\b\d{4}-\d{2}-\d{2}\b"
+            r"|\b(?:January|February|March|April|May|June|July|August|September|October|"
+            r"November|December)\s+\d{1,2}\b",
+            (ptext + " " + first_msg))
         return {
             "ok": True,
             "voice_id": (conv.get("tts") or {}).get("voice_id"),
@@ -160,6 +172,10 @@ async def convai_agent_audit() -> dict:
             "tool_names": [t.get("name") for t in tools if isinstance(t, dict)],
             "built_in_tools": list((prompt.get("built_in_tools") or {}).keys())
             if isinstance(prompt.get("built_in_tools"), dict) else prompt.get("built_in_tools"),
+            "prompt_len": len(ptext),
+            "prompt_head": ptext[:600],
+            "first_message": first_msg[:300],
+            "hardcoded_date_hits": date_hits,   # NON-EMPTY here = the smoking gun
         }
     except Exception as e:
         logger.warning("convai agent audit error: %s", e)
