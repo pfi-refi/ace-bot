@@ -1645,16 +1645,16 @@
     el.appendChild(ts); scrollBottom(); markUnread();
   }
 
-  function captureFile(file) {
-    if (!file || captureBusy) return;
+  // Read ONE file → /capture. Returns a promise so a batch can sequence them.
+  function captureOne(file) {
+    if (!file) return Promise.resolve();
     setChat(true);
     if (file.size > 18 * 1024 * 1024) {
-      addAceMessage('⚠️ That file is over 18MB — too big to read. Send a photo or a shorter clip.');
-      return;
+      addAceMessage('⚠️ "' + (file.name || 'that') + '" is over 18MB — too big to read. Send a photo or a shorter clip.');
+      return Promise.resolve();
     }
-    captureBusy = true;
     var bubble = addAceMessage('📎 Reading ' + (file.name || 'that') + '…');
-    shrinkImage(file).then(function (f) {
+    return shrinkImage(file).then(function (f) {
       var fd = new FormData();
       fd.append('file', f, f.name || 'capture');
       // NEVER set Content-Type by hand here — the browser owns the multipart boundary.
@@ -1673,14 +1673,28 @@
       }
     }).catch(function () {
       replaceBubble(bubble, '⚠️ Capture failed — the link dropped. Try that again.');
-    }).then(function () { captureBusy = false; });
+    });
+  }
+
+  // Send SEVERAL at once (Brady: personal + super base + this month + rolling 12). Read them
+  // ONE AFTER ANOTHER — each screenshot is its own read + filing, and sequencing keeps the
+  // link and the model from being hammered by 4 parallel uploads.
+  function captureFiles(list) {
+    if (!list || !list.length || captureBusy) return;
+    var files = Array.prototype.slice.call(list);
+    captureBusy = true;
+    if (files.length > 1) addAceMessage('📎 Reading ' + files.length + ' files, one at a time…');
+    (function next(i) {
+      if (i >= files.length) { captureBusy = false; return; }
+      captureOne(files[i]).then(function () { next(i + 1); });
+    })(0);
   }
 
   $('clip-btn').addEventListener('click', function () { $('capture-file').click(); });
   $('capture-file').addEventListener('change', function (e) {
-    var f = e.target.files && e.target.files[0];
+    var files = e.target.files;
     e.target.value = '';        // so the SAME file picked twice still fires change
-    captureFile(f);
+    captureFiles(files);
   });
 
   // DRAG-AND-DROP anywhere on the window (desktop). dragenter/dragleave fire per element, so
@@ -1702,7 +1716,7 @@
   window.addEventListener('drop', function (e) {
     if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
     e.preventDefault(); dragDepth = 0; dropGlow(false);
-    captureFile(e.dataTransfer.files[0]);
+    captureFiles(e.dataTransfer.files);
   });
   // "Graph" — the knowledge graph. Its own handler, not the generic DOCK map: this one
   // isn't a card, it's a full-screen canvas with its own physics loop.

@@ -87,7 +87,7 @@
     <!-- CAPTURE ANYTHING — a plain file input (no `capture` attr) so iOS offers Camera *and*
          Photos *and* Files, and desktop gets a normal picker. Drag-and-drop hits the same path. -->
     <button id="clip-btn" class="icon-btn" title="Capture — photo, PDF, or voice memo">📎</button>
-    <input id="capture-file" type="file" accept="image/*,application/pdf,audio/*" hidden>
+    <input id="capture-file" type="file" accept="image/*,application/pdf,audio/*" multiple hidden>
     <textarea id="chat-input" rows="1" placeholder="Talk to Ace…" autocomplete="off"></textarea>
     <button id="voice-toggle" class="icon-btn" title="Spoken replies on/off" aria-pressed="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
