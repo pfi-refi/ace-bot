@@ -1314,8 +1314,15 @@ async def _fast_context() -> str:
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
     # today's typed turns too — not just its own call and not the stale Telegram window.
     convo_str = _format_thread(_CTX["convo"][-24:])   # voice: wider memory window (was 12)
+    # HARD DATE ANCHOR (Brady: voice "keeps forgetting what day it is"). The voice brain is
+    # the fast/small model — it HAS the date but a passive line let it drift on live calls.
+    # State it as ground truth + an explicit instruction so it can never guess or ask.
+    now_line = now.strftime("%A, %B %d, %Y — %-I:%M %p")
     return "\n".join([
-        f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
+        f"⏰ RIGHT NOW IT IS: {now_line} (US Eastern). This is the current date and time — "
+        f"it is TODAY. If Brady asks what day, date, or time it is, answer with THIS exactly. "
+        f"Never guess the date, never say you're unsure, never ask him what day it is — you "
+        f"always know, it is stated right here and refreshed every turn.",
         "",
         "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
@@ -1323,7 +1330,9 @@ async def _fast_context() -> str:
         "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
         _recap_block(),
         "",
-        "TODAY'S SCHEDULE (relative to the current time above):",
+        f"TODAY'S SCHEDULE ({now.strftime('%A, %B %-d')} — this is his calendar for TODAY, "
+        f"relative to the current time above; answer 'what's on my calendar / what's next' "
+        f"from this, never say you can't see it):",
         _format_today_schedule(today_events, now),
         "",
         "CALENDAR — last week through the next 3 weeks (past events for reference, "
