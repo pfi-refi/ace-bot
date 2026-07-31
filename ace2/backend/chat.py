@@ -1514,10 +1514,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                                  messages=messages, tools=voice_tools)
         else:
             # MCP folds into the TYPED loop only (fetched once, cached; empty when dormant).
+            # WEB_SEARCH (2026-07-31) rides here too — Anthropic executes it server-side, so
+            # the dispatch loop below never sees it (its blocks are 'server_tool_use', which
+            # the != 'tool_use' guard already skips). Typed only: voice stays native-fast.
             mcp_schemas = await mcp_client.tool_schemas()
             stream_kwargs = dict(
                 model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
-                tools=tools.TOOLS + mcp_schemas, thinking={"type": "adaptive"},
+                tools=tools.TOOLS + mcp_schemas + [tools.WEB_SEARCH],
+                thinking={"type": "adaptive"},
                 output_config={"effort": EFFORT},
             )
     except Exception as e:
@@ -1540,6 +1544,18 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
 
             if turn_text:
                 full_reply.append("".join(turn_text))
+
+            # Web-search receipts: the API already executed these server-side — nothing to
+            # run, but Brady should SEE that Ace looked something up (and what he searched).
+            for _b in final.content:
+                if getattr(_b, "type", "") == "server_tool_use":
+                    try:
+                        _q = (dict(getattr(_b, "input", {}) or {}).get("query") or "")[:60]
+                    except Exception:
+                        _q = ""
+                    await emit("tool", {"name": "web_search",
+                                        "label": "SEARCHED THE WEB" + (f": {_q}" if _q else ""),
+                                        "status": "done", "ui": False})
 
             if final.stop_reason == "max_tokens":
                 # Ran out of room (likely deep in thinking) before finishing —

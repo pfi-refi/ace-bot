@@ -426,7 +426,14 @@ BUILD_ON_SCREEN = {
 }
 
 # Short present-tense labels for the WS `tool` event (the orb shows "◈ CREATING EVENT…")
+# Anthropic SERVER-side web search (2026-07-31): executed by the API itself — no executor
+# here, no scraper, no extra vendor. Appended to the TYPED loop only (chat.py); voice stays
+# native-fast and hands internet questions to the screen. max_uses caps cost per turn
+# (searches bill ~$10/1k + tokens — 5/turn keeps a runaway loop impossible).
+WEB_SEARCH = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+
 TOOL_LABELS = {
+    "web_search": "SEARCHING THE WEB",
     "create_calendar_event": "CREATING EVENT",
     "delete_calendar_event": "REMOVING EVENT",
     "get_calendar_range": "READING CALENDAR",
