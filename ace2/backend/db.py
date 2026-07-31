@@ -303,10 +303,19 @@ _CANON_CAT = {c.lower(): c for c in CATEGORIES}
 
 
 def canon_tags(tags: list) -> list:
-    """Normalize category-ish tags to canonical case ('DEALS'→'Deals'); non-category
-    tags (e.g. 'migrated') pass through untouched."""
-    return [_CANON_CAT.get((t or "").strip().lower(), (t or "").strip())
-            for t in (tags or []) if (t or "").strip()]
+    """Normalize category-ish tags to canonical case ('DEALS'→'Deals') and dedupe
+    case-insensitively (order kept); non-category tags (e.g. 'migrated') pass through."""
+    out, seen = [], set()
+    for t in (tags or []):
+        t = (t or "").strip()
+        if not t:
+            continue
+        c = _CANON_CAT.get(t.lower(), t)
+        if c.lower() in seen:
+            continue
+        seen.add(c.lower())
+        out.append(c)
+    return out
 
 
 def read_items(active_only: bool = True) -> list:
