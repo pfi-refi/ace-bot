@@ -78,6 +78,11 @@ def _init_schema():
                 due      TEXT,
                 done_ts  TIMESTAMPTZ
             )""")
+        # Working-tree spine (2026-07-31, board-dedup review): the same supersede pattern the
+        # facts table already has, so twins can be MERGED (loser: status='dropped' +
+        # superseded_by=winner) and items can hang under a parent deal — never deleted.
+        cur.execute("ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS parent_id TEXT")
+        cur.execute("ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS superseded_by TEXT")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
         # active | archived; a retired fact is set tier='archived' + invalid_at (kept as dated
@@ -290,20 +295,38 @@ def recent_turns(limit: int = 12) -> list:
 
 
 # ── Data bank (replaces daybank.py's Drive store; Ace's task/deal system) ────────
+# Canonical board categories. Tags are normalized AT THE STORE (the single choke point) so
+# a sweep model shouting 'DEALS' can never mint a phantom column again — every reader
+# (panel, context, graph) matches these case-sensitively.
+CATEGORIES = ("Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals")
+_CANON_CAT = {c.lower(): c for c in CATEGORIES}
+
+
+def canon_tags(tags: list) -> list:
+    """Normalize category-ish tags to canonical case ('DEALS'→'Deals'); non-category
+    tags (e.g. 'migrated') pass through untouched."""
+    return [_CANON_CAT.get((t or "").strip().lower(), (t or "").strip())
+            for t in (tags or []) if (t or "").strip()]
+
+
 def read_items(active_only: bool = True) -> list:
     ensure_ready()
     try:
         with _conn() as c, c.cursor() as cur:
-            cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts FROM daybank_items")
+            cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
+                        "parent_id, superseded_by FROM daybank_items")
             rows = cur.fetchall()
         items = [{
             "id": r[0], "ts": r[1].isoformat(), "kind": r[2], "text": r[3], "status": r[4],
             "tags": r[5] or [], "due": r[6], "done_ts": r[7].isoformat() if r[7] else None,
+            "parent_id": r[8], "superseded_by": r[9],
         } for r in rows]
         if active_only:
+            # Active view = open items + anything CLOSED today (visible receipt, gone tomorrow).
+            # 'dropped' (archived twins/mistakes) behaves exactly like done here.
             today = datetime.now(EASTERN).strftime("%Y-%m-%d")
             items = [it for it in items if it["status"] == "open"
-                     or it["ts"][:10] == today or (it["done_ts"] or "")[:10] == today]
+                     or (it["done_ts"] or "")[:10] == today]
         items.sort(key=lambda it: it["ts"], reverse=True)
         return items
     except Exception as e:
@@ -313,14 +336,57 @@ def read_items(active_only: bool = True) -> list:
 
 _ITEM_STOP = {"the", "a", "an", "to", "for", "of", "and", "on", "in", "at", "with", "i", "my",
               "me", "he", "him", "his", "her", "we", "us", "get", "got", "need", "needs", "needto",
-              "follow", "followup", "up", "w", "re", "this", "that", "is", "are", "be", "do", "by"}
+              "follow", "followup", "up", "w", "re", "this", "that", "is", "are", "be", "do", "by",
+              # 2026-07-31 board-dedup review: connective words that made paraphrases look new
+              "about", "back", "again", "later", "also", "just", "still", "touch", "base",
+              "circle", "then", "than", "will", "would", "should", "them", "they", "their"}
+
+
+def _stem(t: str) -> str:
+    """Crude suffix strip so 'rescheduling'/'rescheduled' and 'needs'/'need' collide —
+    dup detection only, both sides get the same treatment so collisions are consistent."""
+    if len(t) > 5 and t.endswith("ing"):
+        return t[:-3]
+    if len(t) > 4 and (t.endswith("ed") or t.endswith("es")):
+        return t[:-2]
+    if len(t) > 3 and t.endswith("s"):
+        return t[:-1]
+    return t
 
 
 def _norm_item(text: str):
     """Token set for near-duplicate detection: lowercased alnum words minus stopwords."""
     import re
     toks = re.findall(r"[a-z0-9]+", (text or "").lower())
-    return frozenset(t for t in toks if len(t) > 1 and t not in _ITEM_STOP)
+    return frozenset(_stem(t) for t in toks if len(t) > 1 and t not in _ITEM_STOP)
+
+
+def find_items(query: str, status: str = "open") -> list:
+    """Fuzzy-find board items by text (for update-by-meaning: 'mark off the Kara follow-up').
+    Returns a SINGLE item when one match is clearly confident, else up to 4 candidates so the
+    caller can ask which. [] when nothing plausible."""
+    import difflib
+    query = (query or "").strip()
+    if not query:
+        return []
+    qn = _norm_item(query)
+    scored = []
+    for it in read_items(active_only=False):
+        if status and it.get("status") != status:
+            continue
+        on = _norm_item(it.get("text", ""))
+        if not on:
+            continue
+        inter = len(qn & on)
+        r1 = inter / min(len(qn), len(on)) if qn and on else 0.0
+        r2 = difflib.SequenceMatcher(None, query.lower(), (it.get("text") or "").lower()).ratio()
+        score = max(r1, r2)
+        if score >= 0.5 and (inter >= 1 or r2 >= 0.6):
+            scored.append((score, it))
+    scored.sort(key=lambda x: -x[0])
+    if scored and scored[0][0] >= 0.75 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.2):
+        return [scored[0][1]]
+    return [it for _s, it in scored[:4]]
 
 
 def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True) -> tuple:
@@ -331,19 +397,60 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     if kind not in KINDS:
         kind = "note"
     ensure_ready()
+    tags = canon_tags(tags)
     # Dedup against OPEN *and* DONE items so nothing duplicates or resurrects (the Google Tasks
     # bug in reverse): a near-match returns the existing item flagged {"dup": True} instead of
-    # inserting a twin. Data bank is small, so the full scan is cheap.
+    # inserting a twin. Hardened 2026-07-31 (Kara×2 / PFI-Hub×3 / Donna×2 leaked through the old
+    # 0.8-of-min gate): stemmed tokens, a looser band for longer items, plus a pg_trgm second
+    # opinion. A near-miss no longer vanishes silently — it rides back as "similar" so the
+    # caller (Ace) can choose update-over-twin. Data bank is small, so the full scan is cheap.
+    similar = None
     if dedup:
         norm = _norm_item(text)
         if norm:
+            best, best_score = None, 0.0
             for it in read_items(active_only=False):
                 other = _norm_item(it.get("text", ""))
                 if not other:
                     continue
                 inter = len(norm & other)
-                if other == norm or (inter >= 2 and inter / min(len(norm), len(other)) >= 0.8):
-                    return True, {**it, "dup": True}
+                union = len(norm | other) or 1
+                if other == norm:
+                    score = 1.0
+                elif inter >= 2 and inter / min(len(norm), len(other)) >= 0.8:
+                    score = 0.9
+                elif inter >= 3 and inter / min(len(norm), len(other)) >= 0.6:
+                    score = 0.85   # longer paraphrase: 'Book Donna's strategy session' vs
+                                   # 'Donna — … needs a strategy session'
+                elif inter / union >= 0.6:
+                    score = 0.85
+                else:
+                    score = inter / union
+                if score > best_score:
+                    best_score, best = score, it
+            if best and best_score >= 0.85:
+                return True, {**best, "dup": True}
+            # Trigram second opinion: catches rewordings token overlap can't (nicknames,
+            # typos, mashed words). Index already exists — this was only used by recall.
+            if _trgm_ok:
+                try:
+                    with _conn() as c, c.cursor() as cur:
+                        cur.execute(
+                            "SELECT id, text, status, word_similarity(%s, text) AS s "
+                            "FROM daybank_items ORDER BY s DESC LIMIT 1", (text,))
+                        row = cur.fetchone()
+                    if row and row[3] is not None:
+                        if float(row[3]) >= 0.72:
+                            ex = next((i for i in read_items(active_only=False)
+                                       if i["id"] == row[0]), None)
+                            if ex:
+                                return True, {**ex, "dup": True}
+                        elif float(row[3]) >= 0.5 and not similar:
+                            similar = {"id": row[0], "text": row[1], "status": row[2]}
+                except Exception:
+                    pass
+            if best and best_score >= 0.45 and not similar:
+                similar = {"id": best["id"], "text": best["text"], "status": best["status"]}
     item = {
         "id": uuid.uuid4().hex[:8], "ts": datetime.now(EASTERN).isoformat(),
         "kind": kind, "text": text, "status": "open", "tags": tags or [],
@@ -356,6 +463,8 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                 "INSERT INTO daybank_items (id, ts, kind, text, status, tags, due, done_ts) "
                 "VALUES (%s, %s::timestamptz, %s, %s, 'open', %s::jsonb, %s, NULL)",
                 (item["id"], item["ts"], kind, text, json.dumps(item["tags"]), item["due"]))
+        if similar:
+            item["similar"] = similar   # heads-up, not a block: caller can merge/update
         return True, item
     except Exception as e:
         logger.error("db add_item failed: %s", e)
@@ -369,7 +478,7 @@ def set_item_tags(item_id: str, tags: list) -> bool:
         import json
         with _conn() as c, c.cursor() as cur:
             cur.execute("UPDATE daybank_items SET tags = %s::jsonb WHERE id = %s",
-                        (json.dumps(tags or []), item_id))
+                        (json.dumps(canon_tags(tags)), item_id))
         return True
     except Exception as e:
         logger.warning("db set_item_tags failed: %s", e)
@@ -544,9 +653,22 @@ def remove_push_sub(endpoint: str) -> bool:
 
 
 def update_item(item_id: str, status: str = None, text: str = None,
-                tags: list = None, due: str = None) -> tuple:
-    """Edit a board item: status, text, tags (full replace), and/or due. due='' clears it."""
+                tags: list = None, due: str = None, match: str = None,
+                superseded_by: str = None) -> tuple:
+    """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
+    due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
+    doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
+    so the model can ask instead of guessing (the 'said it's done → new twin' fix)."""
     item_id = (item_id or "").strip()
+    if not item_id and (match or "").strip():
+        cands = find_items(match, status="open")
+        if len(cands) == 1:
+            item_id = cands[0]["id"]
+        elif not cands:
+            return False, f"no open item matching '{match}'"
+        else:
+            return False, ("AMBIGUOUS — did you mean: "
+                           + " | ".join(f"[{c['id']}] {(c.get('text') or '')[:60]}" for c in cands))
     if not item_id:
         return False, "no id"
     ensure_ready()
@@ -554,16 +676,20 @@ def update_item(item_id: str, status: str = None, text: str = None,
         import json
         with _conn() as c, c.cursor() as cur:
             sets, args = [], []
-            if status in ("open", "done"):
+            if status in ("open", "done", "dropped"):
                 sets.append("status = %s"); args.append(status)
+                # done_ts doubles as "closed at" for dropped, so the active view can show
+                # today's archives once then let them fall away — never deleted.
                 sets.append("done_ts = %s")
-                args.append(datetime.now(EASTERN).isoformat() if status == "done" else None)
+                args.append(datetime.now(EASTERN).isoformat() if status in ("done", "dropped") else None)
             if text and text.strip():
                 sets.append("text = %s"); args.append(text.strip())
             if tags is not None:
-                sets.append("tags = %s::jsonb"); args.append(json.dumps(tags))
+                sets.append("tags = %s::jsonb"); args.append(json.dumps(canon_tags(tags)))
             if due is not None:
                 sets.append("due = %s"); args.append(due.strip() or None)
+            if (superseded_by or "").strip():
+                sets.append("superseded_by = %s"); args.append(superseded_by.strip())
             if not sets:
                 return False, "nothing to update"
             args.append(item_id)

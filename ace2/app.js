@@ -713,11 +713,14 @@
         row.appendChild(day); row.appendChild(tm); row.appendChild(nm); body.appendChild(row);
       });
     } else if (panel === 'tasks') {
-      var body2 = cardShell('TASKS', slot);
+      // LEGACY surface (2026-07-31): Google Tasks was retired to Ace's own board. This card
+      // stays reachable but is clearly labeled and its checkbox-lookalikes are gone — they
+      // were unclickable and made pre-migration copies read as forever-unchecked tasks.
+      var body2 = cardShell('GOOGLE TASKS (LEGACY)', slot);
       var lists = data.lists || null;
       function taskRow(t) {
         var row = document.createElement('div'); row.className = 'c-task';
-        var box = document.createElement('span'); box.className = 'c-box';
+        var box = document.createElement('span'); box.textContent = '·'; box.style.opacity = '.5'; box.style.padding = '0 6px';
         var bd = document.createElement('span'); bd.style.flex = '1'; bd.appendChild(document.createTextNode(t.title || ''));
         if (t.due) { var due = document.createElement('span'); due.className = 'c-due'; due.textContent = '  ⏱ ' + t.due; bd.appendChild(due); }
         row.appendChild(box); row.appendChild(bd); return row;
@@ -835,7 +838,11 @@
   function toggleBankItem(id, status) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d && d.items) materializeCard('daybank', { items: d.items }); })
+      .then(function (d) {
+        if (d && d.items) materializeCard('daybank', { items: d.items });
+        // Keep an open Command board in step — same store, one truth (2026-07-31).
+        if (typeof cmdSync === 'function') cmdSync();
+      })
       .catch(function () {});
   }
 
@@ -1119,8 +1126,19 @@
     if(!v){ v=document.createElement('div'); v.id='command-view'; $('app').appendChild(v); }
     v.style.display='flex'; v.innerHTML='<div class="cmd-empty">loading…</div>';
     cmdFetch().then(cmdRender).catch(function(){});
+    // LIVE BOARD (2026-07-31): an open Command view used to be a stale snapshot — Ace could
+    // complete items by voice/chat and Brady would watch them stay open. Refresh on a slow
+    // pulse (skipping while he's mid-edit) so the board is always telling the truth.
+    if (cmd.timer) clearInterval(cmd.timer);
+    cmd.timer = setInterval(function(){
+      if (cmd.open && !cmd.min && !cmd.editing) cmdSync();
+    }, 25000);
   }
-  function cmdClose(){ cmd.open=false; var v=document.getElementById('command-view'); if(v) v.style.display='none'; }
+  function cmdClose(){ cmd.open=false; if(cmd.timer){ clearInterval(cmd.timer); cmd.timer=null; } var v=document.getElementById('command-view'); if(v) v.style.display='none'; }
+  function cmdSync(){   // refetch + rerender an open board; safe no-op otherwise
+    if (!cmd.open) return;
+    cmdFetch().then(function(){ if (cmd.open && !cmd.editing) cmdRender(); }).catch(function(){});
+  }
   function cmdRow(it){
     var c=cmdCatOf(it), col=CMD_CATS[c], done=it.status==='done';
     if (cmd.editing === it.id) {
@@ -1135,7 +1153,8 @@
         +'<textarea class="cmd-etext" rows="2">'+cmdEsc(dText)+'</textarea>'
         +'<div class="cmd-erow"><select class="cmd-ecat">'+opts+'</select>'
         +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(dDue)+'"></div>'
-        +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button></div>'
+        +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button>'
+        +'<button class="cmd-ecancel cmd-edrop" style="margin-left:auto;color:#ff8080;border-color:#ff808055" title="Archive this item (kept in history, never deleted)">REMOVE</button></div>'
         +'</div></div>';
     }
     return '<div class="cmd-row '+(done?'done':'')+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
@@ -1173,13 +1192,20 @@
     var LN={pipeline:'Pipeline',all:'All',done:'Done'};
     var lenses=['pipeline','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
     var items=cmd.items.filter(function(x){ return cmd.cat==='All'||cmdCatOf(x)===cmd.cat; });
+    // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
+    // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
+    // captures stop shoving to the top like a pile.
+    var nOpen=cmd.items.filter(function(x){return x.status==='open';}).length;
+    var nDone=cmd.items.filter(function(x){return x.status==='done';}).length;
+    function byAge(a,b){ return (a.ts||'')<(b.ts||'')?-1:1; }
     var body='';
-    if(cmd.lens==='done'){ body=items.filter(function(x){return x.status==='done';}).map(cmdRow).join(''); }
-    else if(cmd.lens==='all'){ body=items.filter(function(x){return x.status!=='done';}).map(cmdRow).join(''); }
-    else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status!=='done';}); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
+    if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
+    else if(cmd.lens==='all'){ body=items.slice().sort(byAge).filter(function(x){return x.status!=='dropped';}).map(cmdRow).join(''); }
+    else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status==='open';}).sort(byAge); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
     var addCat=cmd.cat==='All'?'Deals':cmd.cat;
     v.innerHTML='<div class="cmd-hd"><div class="cmd-orb"></div><div class="cmd-ttl">COMMAND</div>'
+      +'<div class="cmd-n" style="margin-left:8px;font-size:11px;letter-spacing:.08em;opacity:.65">'+nOpen+' open · '+nDone+' done</div>'
       +'<button class="cmd-ic" id="cmd-min" title="Clean view">⌄</button><button class="cmd-ic" id="cmd-x" title="Close">✕</button></div>'
       +'<div class="cmd-lens">'+lenses+'</div><div class="cmd-chips">'+chips+'</div>'
       +'<div class="cmd-list">'+body+'</div>'
@@ -1191,8 +1217,14 @@
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=function(){
       var id=b.parentNode.getAttribute('data-id');
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
+      // VERIFIED tick (2026-07-31): optimistic flip, but if the server doesn't confirm, the
+      // row reverts — a completion can no longer be silently lost to a 401/network blip.
+      var prev=it.status, prevTs=it.done_ts;
       var ns=it.status==='done'?'open':'done'; it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
-      fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:ns})}).catch(function(){});
+      fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:ns})})
+        .then(function(r){ if(r.status===401){ toLogin(); throw 0; } return r.json(); })
+        .then(function(d){ if(!d||!d.ok) throw 0; })
+        .catch(function(){ it.status=prev; it.done_ts=prevTs; cmdRender(); });
     }; });
     // FULL EDITING (Brady): ✎ opens the inline editor — rewrite text, move category, set due.
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-pencil'), function(b){ b.onclick=function(){
@@ -1200,6 +1232,16 @@
       cmd.editing = b.parentNode.getAttribute('data-id'); cmdRender();
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-ecancel'), function(b){ b.onclick=function(){
+      if (b.classList.contains('cmd-edrop')) {
+        // REMOVE = archive (status 'dropped') — Brady can finally prune Ace's twins himself.
+        var row = b.closest('.cmd-row'); var id = row && row.getAttribute('data-id'); if(!id) return;
+        b.textContent='REMOVING…'; b.disabled=true;
+        fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:'dropped'})})
+          .then(function(r){ return r.json(); })
+          .then(function(d){ if(!d||!d.ok) throw 0; cmd.editing=null; cmd.draft=null; return cmdFetch().then(cmdRender); })
+          .catch(function(){ b.textContent='RETRY REMOVE'; b.disabled=false; });
+        return;
+      }
       cmd.editing = null; cmd.draft = null; cmdRender();
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){

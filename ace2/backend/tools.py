@@ -330,11 +330,15 @@ TOOLS = [
     {
         "name": "capture_item",
         "description": (
-            "Add an item to Brady's TASK BOARD — Ace's OWN store, THE task & pipeline system "
+            "Add a NEW item to Brady's TASK BOARD — Ace's OWN store, THE task & pipeline system "
             "(what Brady sees in his Command panel). This is the ONLY place tasks go. Do this "
             "ON YOUR OWN, without being asked, whenever something worth not forgetting surfaces "
             "in conversation: a commitment he made, a follow-up, a 'don't forget to…', a loose "
-            "task, or a note. Always pick the best-fitting category. (For a hard-dated "
+            "task, or a note. BUT FIRST scan YOUR TASK BOARD in context: if this task is already "
+            "there — even worded differently — do NOT capture a twin; call update_item on the "
+            "existing item instead (complete it, or fold the new details into its text/due). "
+            "A completion ('I did X', 'X is handled') is NEVER a capture — it's update_item "
+            "status='done'. Always pick the best-fitting category. (For a hard-dated "
             "appointment, also create a calendar event.) One item per call."
         ),
         "input_schema": {
@@ -359,16 +363,22 @@ TOOLS = [
     {
         "name": "update_item",
         "description": (
-            "Update a TASK BOARD item by id: mark it done (status='done') when Brady says "
-            "he finished it, reopen it, rewrite its text, move it to another category, or "
-            "change its due. Use the item's id from YOUR TASK BOARD in context."
+            "Update a TASK BOARD item: mark it done when Brady says he finished it (however he "
+            "words it), reopen it, rewrite its text when he gives NEW INFO about it, move its "
+            "category, change its due, or status='dropped' to archive a mistake/dead item "
+            "(archived, never deleted). Use the item's id from YOUR TASK BOARD in context; if "
+            "you're not sure which id, pass match='a few words of the task' instead and the "
+            "board finds it — if it's ambiguous you'll get candidates back to choose from or "
+            "ask Brady. When Brady says something is finished, ALWAYS complete the existing "
+            "item — never capture_item a completion as a new task."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "The board item id"},
-                "status": {"type": "string", "enum": ["open", "done"], "description": "New status"},
-                "text": {"type": "string", "description": "Optional new text"},
+                "id": {"type": "string", "description": "The board item id (preferred when known)"},
+                "match": {"type": "string", "description": "No id? A few words of the item's text — fuzzy-resolved server-side"},
+                "status": {"type": "string", "enum": ["open", "done", "dropped"], "description": "New status ('dropped' archives it)"},
+                "text": {"type": "string", "description": "Optional new text (fold new details into the SAME item)"},
                 "category": {
                     "type": "string",
                     "enum": ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"],
@@ -376,7 +386,7 @@ TOOLS = [
                 },
                 "due": {"type": "string", "description": "Optional new due in plain words ('' clears it)"},
             },
-            "required": ["id"],
+            "required": [],
         },
     },
 ]
@@ -575,25 +585,40 @@ def _do_capture_item(kind="note", text="", due=None, category=None, **_):
     ok, res = daybank.add_item(kind, text, due=due, tags=tags)
     if ok:
         if isinstance(res, dict) and res.get("dup"):
-            return f"◆ Already on your board: {res.get('text', text)}"
+            # Actionable receipt (2026-07-31): id + status so the model can pivot to
+            # update_item instead of dead-ending (the old receipt had neither).
+            st = res.get("status", "open")
+            when = (res.get("done_ts") or "")[:10]
+            state = "open" if st == "open" else f"already {st}{f' {when}' if when else ''}"
+            return (f"◆ Already on your board as [{res.get('id')}] ({state}): "
+                    f"{res.get('text', text)} — to change or complete it, use update_item "
+                    f"with that id.")
         tail = f" (due {due})" if due else ""
         cat = f" [{category}]" if category else ""
-        return f"◆ Added to your board{cat}: {res['text']}{tail}"
+        out = f"◆ Added to your board{cat}: {res['text']}{tail}"
+        sim = res.get("similar") if isinstance(res, dict) else None
+        if sim:
+            out += (f"\n⚠ Similar existing item [{sim['id']}] ({sim['status']}): {sim['text']} — "
+                    f"if that's the same task, keep ONE: update_item the existing one and drop "
+                    f"this new one (status='dropped').")
+        return out
     return f"⚠️ Could not capture: {res}"
 
 
-def _do_update_item(id="", status=None, text=None, category=None, due=None, **_):
+def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None, **_):
     tags = None
     if category:
         _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
-        it = next((x for x in daybank.read_items(False) if x.get("id") == id), None)
+        it = next((x for x in daybank.read_items(False) if x.get("id") == id), None) if id else None
         keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
         tags = [category] + keep
-    ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due)
+    ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match)
     if ok:
-        verb = "Completed" if status == "done" else ("Reopened" if status == "open" else "Updated")
+        verb = {"done": "Completed", "open": "Reopened", "dropped": "Archived"}.get(status, "Updated")
         moved = f" → [{category}]" if category else ""
         return f"◆ {verb}{moved}: {res}"
+    # AMBIGUOUS / not-found comes back as guidance, not a dead end — the model can ask Brady
+    # or pick from the candidates and call again with the id.
     return f"⚠️ Could not update item: {res}"
 
 

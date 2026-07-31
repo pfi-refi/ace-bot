@@ -613,42 +613,71 @@ async def _learn_sweep_once(force: bool = False) -> dict:
             filed = len(facts)
             logger.info("learn sweep: filed %d candidate fact(s)", filed)
 
-        # TRIAGE → Ace's OWN data bank (not Google Tasks, as of 2026-07-27). Google Tasks writes
-        # caused duplication + resurrection (dedup only saw OPEN tasks, so completed items got
-        # re-added). The data bank dedups against OPEN *and* DONE items and completes by id, so
-        # nothing duplicates or comes back. A short CATEGORY rides along as a tag for the portal.
+        # TRIAGE → Ace's OWN data bank. REWORKED 2026-07-31 (board-dedup review): the old pass
+        # was a one-way valve — it could ONLY add, its "ALREADY TRACKED" guard was title-only
+        # and truncated at 150, and its "specific, dated" instruction manufactured paraphrases
+        # that slipped the dedup gate (Kara×2, PFI-Hub×3, Donna×2 on Brady's live board). Now it
+        # is a RECONCILER: it sees ids + status, it can emit DONE to close what Brady said he
+        # finished, and adding a reworded twin is explicitly forbidden. Same loop that piled the
+        # board up now drains it.
+        closed = 0
         try:
             from . import daybank
             existing = await asyncio.to_thread(daybank.read_items, False)
-            tracked = "\n".join(f"- {it.get('text', '')}" for it in existing[:150])
+            open_items = [it for it in existing if it.get("status") == "open"]
+            recent_closed = [it for it in existing if it.get("status") != "open"][:40]
+            tracked = "\n".join(f"- [{it['id']}] {it.get('text', '')}" for it in open_items)
+            tracked_closed = "\n".join(f"- [{it['id']}] {it.get('text', '')}" for it in recent_closed)
             resp2 = await client.messages.create(
                 model=LEARN_MODEL, max_tokens=1200,
                 messages=[{"role": "user", "content": (
-                    "You are Ace's background triage — Brady's safety net so nothing he says slips. "
-                    "From this whole conversation, extract EVERY actionable to-do or follow-up he "
-                    "needs to DO — concrete next actions AND soft follow-ups (e.g. 'respond to Nikki "
-                    "T's text', 'touch base with the wedding couple midweek', 'meet new agent "
-                    "Wednesday 2 PM'). Keep each title specific and self-contained (name + what + any "
-                    "date). Skip pure status notes and anything ALREADY tracked below. Give each a "
-                    "short CATEGORY from: Deals, Agents, Admin, Networking, Business, Tech, "
-                    "Personal, Goals. "
-                    "One per line, EXACTLY: CATEGORY :: task title. If none, reply NONE.\n\n"
-                    "ALREADY TRACKED:\n" + (tracked or "(none)") + "\n\n"
+                    "You are Ace's background board-keeper — Brady's safety net so nothing he says "
+                    "slips, AND the janitor who closes what he finished. Read the conversation and "
+                    "do BOTH:\n"
+                    "1) COMPLETIONS — if Brady said he finished / handled / sent / booked / already "
+                    "did something matching an OPEN item below (even worded differently), emit:\n"
+                    "DONE :: <id>\n"
+                    "2) NEW to-dos — extract genuinely NEW actionable to-dos or follow-ups he needs "
+                    "to DO. CRITICAL: a task that matches ANY item below — even reworded, shortened, "
+                    "expanded, or with a different date — is NOT new. Skip it (or emit DONE if he "
+                    "finished it). Never re-add a CLOSED item unless Brady explicitly reopened it. "
+                    "New info about a tracked task is NOT a new task. For real new ones emit:\n"
+                    "ADD :: CATEGORY :: task title\n"
+                    "(CATEGORY from: Deals, Agents, Admin, Networking, Business, Tech, Personal, "
+                    "Goals.) One per line, ONLY those two formats, no other text. If nothing, "
+                    "reply NONE.\n\n"
+                    "OPEN ITEMS:\n" + (tracked or "(none)") + "\n\n"
+                    "RECENTLY CLOSED (do not re-add):\n" + (tracked_closed or "(none)") + "\n\n"
                     f"CONVERSATION:\n{convo}")}])
             t2 = "".join(getattr(b, "text", "") for b in resp2.content).strip()
             if t2 and not t2.upper().startswith("NONE"):
+                open_ids = {it["id"] for it in open_items}
                 for ln in t2.split("\n"):
                     if "::" not in ln:
                         continue
-                    cat, title = ln.split("::", 1)
-                    cat, title = cat.strip("-•* ").strip(), title.strip()
+                    parts = [p.strip().strip("-•*[] ") for p in ln.split("::")]
+                    verb = parts[0].upper()
+                    if verb == "DONE" and len(parts) >= 2:
+                        iid = parts[1].split()[0].strip("[]") if parts[1] else ""
+                        if iid in open_ids:   # only close ids that are really open — never guess
+                            ok2, _r = await asyncio.to_thread(daybank.update_item, iid, "done")
+                            if ok2:
+                                closed += 1
+                        continue
+                    if verb == "ADD" and len(parts) >= 3:
+                        cat, title = parts[1], "::".join(parts[2:]).strip()
+                    elif verb not in ("DONE", "ADD") and len(parts) >= 2:
+                        # legacy 'CATEGORY :: title' lines still land safely
+                        cat, title = parts[0], "::".join(parts[1:]).strip()
+                    else:
+                        continue
                     if len(title) > 4:
-                        ok, res = await asyncio.to_thread(
+                        ok2, res2 = await asyncio.to_thread(
                             daybank.add_item, "todo", title, None, [cat] if cat else None)
-                        if ok and not (isinstance(res, dict) and res.get("dup")):
+                        if ok2 and not (isinstance(res2, dict) and res2.get("dup")):
                             routed += 1
-                if routed:
-                    logger.info("triage sweep: captured %d to-do(s) into the data bank", routed)
+                if routed or closed:
+                    logger.info("board-keeper sweep: +%d to-do(s), closed %d", routed, closed)
         except Exception as e:
             logger.warning("triage sweep (data bank) failed: %s", e)
 
@@ -681,7 +710,7 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                     logger.info("reflection: filed %d self-note(s)", len(notes))
         except Exception as e:
             logger.warning("reflection pass failed: %s", e)
-        return {"facts": filed, "tasks": routed}
+        return {"facts": filed, "tasks": routed, "closed": closed}
     except Exception as e:
         logger.warning("learn sweep failed: %s", e)
         return {"error": str(e)}

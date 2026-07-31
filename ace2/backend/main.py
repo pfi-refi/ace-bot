@@ -607,7 +607,7 @@ async def daybank_update(req: DaybankUpdateReq):
     """Edit a board item from the Command panel: toggle done, rewrite the text, move it
     to another category, or change its due — instant, no chat round-trip. Mutates Ace's
     OWN store only."""
-    status = req.status if req.status in ("open", "done") else None
+    status = req.status if req.status in ("open", "done", "dropped") else None
     text = req.text.strip() or None
     tags = None
     _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
