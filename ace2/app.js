@@ -1110,7 +1110,9 @@
   /* ============================================================ COMMAND PANEL
      Ace's OWN task/pipeline surface — replaces Google Tasks. A summonable full-screen
      overlay that collapses to a clean orb; reads/writes the data bank via /daybank. */
-  var CMD_CATS = { Deals:'#45ffa6', Agents:'#53e7ff', Admin:'#ffce7a', Networking:'#b79dff', Business:'#ff9e7a', Tech:'#7aa2ff', Personal:'#ff9ecb', Goals:'#ffd24a' };
+  // TACTICAL PALETTE (2026-08-01, Brady: pastels looked "girly") — command-console colors:
+  // money green, steel cyan, gunmetal, burnt orange, deep blue, indigo, signal red, amber.
+  var CMD_CATS = { Deals:'#2fd36b', Agents:'#38bdf8', Admin:'#94a3b8', Networking:'#ff8c1a', Business:'#3e7bfa', Tech:'#6d7cff', Personal:'#ff4757', Goals:'#ffb020' };
   var CMD_ORDER = ['Deals','Agents','Admin','Networking','Business','Tech','Personal','Goals'];
   var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[], editing:null };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }

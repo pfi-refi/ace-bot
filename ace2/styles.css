@@ -394,7 +394,7 @@ body {
 /* ---------- Suggestions + input ---------- */
 #quick { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .qa { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
-  color: var(--text-dim); cursor: pointer; padding: 7px 16px; border-radius: var(--r-pill);
+  color: var(--text-dim); cursor: pointer; padding: 7px 16px; border-radius: 7px;
   border: 1px solid transparent;
   background:
     linear-gradient(180deg, rgba(10,24,21,.5), rgba(5,13,15,.35)) padding-box,
@@ -419,32 +419,33 @@ body {
 .cmd-orb { width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto;
   background: radial-gradient(circle at 38% 34%, #eafff5, #45ffa6 36%, #0c6b47 74%, #03130d 100%); box-shadow: 0 0 14px -3px rgba(69,255,166,.5); }
 .cmd-ttl { flex: 1; font-family: var(--mono); font-size: 12px; letter-spacing: .22em; color: #eafaf4; }
-.cmd-ic { width: 32px; height: 32px; border-radius: 9px; border: 1px solid rgba(120,200,170,.16); background: transparent; color: #8fa4a0; font-size: 15px; cursor: pointer; }
+.cmd-ic { width: 32px; height: 32px; border-radius: 5px; border: 1px solid rgba(140,160,175,.2); background: transparent; color: #8fa4a0; font-size: 15px; cursor: pointer; }
 .cmd-ic:active { transform: scale(.92); }
 .cmd-lens { display: flex; gap: 4px; padding: 12px 14px 8px; }
-.cmd-lens button { flex: 1; font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; padding: 9px 4px; border-radius: 9px; border: 1px solid transparent; background: rgba(255,255,255,.03); color: #8fa4a0; cursor: pointer; }
+.cmd-lens button { flex: 1; font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; padding: 9px 4px; border-radius: 4px; border: 1px solid transparent; background: rgba(255,255,255,.03); color: #8fa4a0; cursor: pointer; }
 .cmd-lens button.on { color: #04080c; background: #45ffa6; font-weight: 700; }
 .cmd-chips { display: flex; gap: 7px; padding: 2px 14px 12px; overflow-x: auto; }
 .cmd-chips::-webkit-scrollbar { display: none; }
-.cmd-chip { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; padding: 6px 11px; border-radius: 999px; border: 1px solid rgba(120,200,170,.16); background: transparent; color: #8fa4a0; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
-.cmd-chip.on { border-color: rgba(120,200,170,.3); background: rgba(255,255,255,.06); color: #fff; }
-.cmd-d { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+/* Tactical menu pass (2026-08-01): pills → angular console buttons, dots → status blocks */
+.cmd-chip { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; padding: 6px 11px; border-radius: 4px; border: 1px solid rgba(140,160,175,.22); background: rgba(255,255,255,.02); color: #8fa4a0; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.cmd-chip.on { border-color: rgba(190,210,225,.45); background: rgba(255,255,255,.07); color: #fff; }
+.cmd-d { width: 8px; height: 8px; border-radius: 1px; display: inline-block; }
 .cmd-list { flex: 1; overflow-y: auto; padding: 2px 14px 100px; }
 .cmd-grp { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: #63796f; margin: 16px 4px 8px; display: flex; align-items: center; gap: 7px; }
 .cmd-sq { width: 8px; height: 8px; border-radius: 2px; }
-.cmd-row { display: flex; align-items: flex-start; gap: 11px; padding: 12px; border-radius: 13px; background: rgba(18,32,34,.55); border: 1px solid rgba(120,200,170,.14); margin-bottom: 8px; }
-.cmd-box { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; border-radius: 6px; border: 1.5px solid rgba(120,200,170,.28); cursor: pointer; position: relative; }
-.cmd-row.done .cmd-box { background: #45ffa6; border-color: #45ffa6; }
+.cmd-row { display: flex; align-items: flex-start; gap: 11px; padding: 12px; border-radius: 7px; background: rgba(16,24,30,.6); border: 1px solid rgba(140,160,175,.14); border-left-width: 3px; margin-bottom: 7px; }
+.cmd-box { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; border-radius: 4px; border: 1.5px solid rgba(160,180,195,.35); cursor: pointer; position: relative; }
+.cmd-row.done .cmd-box { background: #2fd36b; border-color: #2fd36b; }
 .cmd-row.done .cmd-box::after { content: "✓"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #03130d; font-size: 13px; font-weight: 800; }
 .cmd-b { flex: 1; min-width: 0; }
 .cmd-t { font-size: 14px; color: #eef7f3; line-height: 1.35; }
 .cmd-row.done .cmd-t { color: #63796f; text-decoration: line-through; }
 .cmd-m { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.cmd-tag { font-family: var(--mono); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; display: flex; align-items: center; gap: 5px; color: #8fa4a0; border: 1px solid rgba(120,200,170,.14); }
-.cmd-due { font-family: var(--mono); font-size: 9px; color: #53e7ff; border: 1px solid rgba(83,231,255,.28); background: rgba(83,231,255,.07); padding: 2px 7px; border-radius: 5px; }
+.cmd-tag { font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; display: flex; align-items: center; gap: 5px; color: #9db0bd; border: 1px solid rgba(140,160,175,.18); }
+.cmd-due { font-family: var(--mono); font-size: 9px; color: #38bdf8; border: 1px solid rgba(56,189,248,.3); background: rgba(56,189,248,.07); padding: 2px 7px; border-radius: 3px; }
 .cmd-empty { text-align: center; color: #63796f; font-size: 13px; padding: 50px; font-family: var(--mono); }
-.cmd-add { position: absolute; left: 14px; right: 14px; bottom: 16px; display: flex; gap: 9px; align-items: center; background: rgba(8,16,20,.94); border: 1px solid rgba(120,200,170,.26); border-radius: 14px; padding: 10px 12px; }
-.cmd-plus { width: 26px; height: 26px; border-radius: 8px; background: #45ffa6; color: #03130d; font-size: 18px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.cmd-add { position: absolute; left: 14px; right: 14px; bottom: 16px; display: flex; gap: 9px; align-items: center; background: rgba(8,14,18,.94); border: 1px solid rgba(140,160,175,.28); border-radius: 8px; padding: 10px 12px; }
+.cmd-plus { width: 26px; height: 26px; border-radius: 5px; background: #2fd36b; color: #03130d; font-size: 18px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
 .cmd-add input { flex: 1; background: transparent; border: 0; outline: 0; color: #eef7f3; font-size: 14px; }
 .cmd-clean { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 20px; }
 .cmd-orb-big { width: 110px; height: 110px; border-radius: 50%; cursor: pointer;
