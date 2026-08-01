@@ -1165,8 +1165,12 @@
       +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')+'</div></div>'
       +'<button class="cmd-pencil" title="Edit">✎</button></div>';
   }
-  function cmdRender(){
+  function cmdRender(resetScroll){
     var v=document.getElementById('command-view'); if(!v) return;
+    // KEEP YOUR PLACE (2026-08-01, Brady: "it jumps back to the top"): every re-render
+    // rebuilds the list, which zeroed the scroll on each checkbox tick. Capture and restore
+    // scrollTop; only a deliberate lens/category switch resets to the top.
+    var _ol=v.querySelector('.cmd-list'); var _keep=(!resetScroll && _ol) ? _ol.scrollTop : 0;
     // Preserve unsaved editor input across ANY re-render (checkbox ticks, lens/chip taps):
     // snapshot the open editor's values so the rebuilt form rehydrates them.
     if (cmd.editing) {
@@ -1210,10 +1214,11 @@
       +'<div class="cmd-lens">'+lenses+'</div><div class="cmd-chips">'+chips+'</div>'
       +'<div class="cmd-list">'+body+'</div>'
       +'<form class="cmd-add" id="cmd-add"><span class="cmd-plus">+</span><input id="cmd-input" placeholder="Add to '+addCat+'…" autocomplete="off"></form>';
+    var _nl=v.querySelector('.cmd-list'); if(_nl&&_keep) _nl.scrollTop=_keep;
     v.querySelector('#cmd-x').onclick=cmdClose;
     v.querySelector('#cmd-min').onclick=function(){ cmd.min=true; cmdRender(); };
-    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(); }; });
-    Array.prototype.forEach.call(v.querySelectorAll('.cmd-chip'), function(b){ b.onclick=function(){ cmd.cat=b.getAttribute('data-cat'); cmdRender(); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(true); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-chip'), function(b){ b.onclick=function(){ cmd.cat=b.getAttribute('data-cat'); cmdRender(true); }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=function(){
       var id=b.parentNode.getAttribute('data-id');
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
