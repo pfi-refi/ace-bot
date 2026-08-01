@@ -1643,14 +1643,14 @@
   $('command-btn').addEventListener('click', cmdOpen);
   // "Pulse" — the on-demand 'how's my business looking?' deep read.
   function runPulse() {
-    var btn = $('pulse-btn'); if (btn) { btn.textContent = '📊 Reading…'; btn.disabled = true; }
+    var btn = $('pulse-btn'); if (btn) { btn.innerHTML = '<span class="qg">▦</span>Reading…'; btn.disabled = true; }
     fetch(API + '/business/report', { method: 'POST', headers: headers() })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (d && d.text) { setChat(true); addAceMessage(d.text); }
       })
       .catch(function () {})
-      .then(function () { if (btn) { btn.textContent = '📊 Pulse'; btn.disabled = false; } });
+      .then(function () { if (btn) { btn.innerHTML = '<span class="qg">▦</span>Pulse'; btn.disabled = false; } });
   }
   $('pulse-btn').addEventListener('click', runPulse);
 

@@ -393,24 +393,37 @@ body {
 
 /* ---------- Suggestions + input ---------- */
 #quick { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
-.qa { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
-  color: var(--text-dim); cursor: pointer; padding: 7px 16px; border-radius: 7px;
-  border: 1px solid transparent;
+/* CARBON BLACKOUT (2026-08-01, Brady's pick: B1 armor + B4 restraint). Chamfered
+   carbon-weave graphite plates; category color lives ONLY in the glyph at rest and
+   IGNITES the plate's edges on hover. Command is the one plate that stays lit. */
+.qa { --c: #94a3b8;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
+  color: #93a4ae; cursor: pointer; padding: 8px 16px;
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  border: 1px solid rgba(150,168,180,.24); border-left: 3px solid rgba(150,168,180,.32);
   background:
-    linear-gradient(180deg, rgba(10,24,21,.5), rgba(5,13,15,.35)) padding-box,
-    linear-gradient(180deg, rgba(69,255,166,.22), rgba(69,255,166,.08)) border-box;
-  transition: color .18s, box-shadow .18s, transform .18s, background .18s; }
-.qa:hover { color: var(--aurora); transform: translateY(-1px);
-  box-shadow: 0 6px 18px -6px rgba(0,0,0,.5), 0 0 16px -2px var(--aurora-25);
-  background:
-    linear-gradient(180deg, rgba(12,30,25,.7), rgba(6,16,17,.5)) padding-box,
-    linear-gradient(180deg, var(--aurora-40), rgba(83,231,255,.15)) border-box; }
-.qa:focus-visible { outline: 2px solid var(--aurora); outline-offset: 2px; }
-.qa-cmd { color: var(--cyan);
-  background:
-    linear-gradient(180deg, rgba(83,231,255,.16), rgba(83,231,255,.05)) padding-box,
-    linear-gradient(180deg, rgba(83,231,255,.4), rgba(83,231,255,.14)) border-box; }
-.qa-cmd:hover { color: #eafff6; }
+    repeating-linear-gradient(135deg, rgba(255,255,255,.04) 0 2px, transparent 2px 5px),
+    linear-gradient(180deg, #10171d, #0a1015);
+  transition: color .15s, border-color .15s, transform .15s, box-shadow .15s; }
+.qa:hover { color: #eef7f3; transform: translateY(-1px);
+  border-color: var(--c); border-left-color: var(--c);
+  box-shadow: 0 6px 18px -6px rgba(0,0,0,.5), 0 0 14px -4px var(--c); }
+.qa:focus-visible { outline: 2px solid var(--c); outline-offset: 2px; }
+.qg { color: var(--c); margin-right: 7px; }
+/* category colors (glyph at rest, full plate on touch) */
+#command-btn, #plan-week-btn { --c: #2fd36b; }
+#pulse-btn { --c: #38bdf8; }
+#graph-btn { --c: #6d7cff; }
+.qa[data-panel="timeline"] { --c: #ffb020; }
+.qa[data-panel="inbox"] { --c: #ff8c1a; }
+.qa[data-panel="weather"] { --c: #94a3b8; }
+.qa[data-panel="memory"] { --c: #ff4757; }
+.qa[data-msg] { --c: #ffb020; }
+/* COMMAND — the prime plate: permanently lit green edge */
+.qa-cmd { color: #eafff6; border-color: rgba(47,211,107,.6); border-left-color: #2fd36b; }
+.qa-cmd:hover { color: #fff; }
+/* ACT / VIEW bank labels — desktop rail only (hidden in the phone dock) */
+.qlbl { display: none; }
 
 /* ── COMMAND PANEL — Ace's own task/pipeline surface (summonable, collapses to orb) ── */
 #command-view { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column;
@@ -454,16 +467,9 @@ body {
 .cmd-cap b { color: #45ffa6; }
 .cmd-up { font-size: 12.5px; color: #8fa4a0; max-width: 250px; text-align: center; line-height: 1.5; }
 .cmd-up span { color: #eef7f3; font-weight: 600; }
-/* "Plan my week" — the marquee quick-action: aurora-lit fill + text so it stands out from the daily three. */
-.qa-plan { color: var(--aurora);
-  background:
-    linear-gradient(180deg, rgba(69,255,166,.18), rgba(69,255,166,.06)) padding-box,
-    linear-gradient(180deg, var(--aurora-40), rgba(69,255,166,.18)) border-box;
-  box-shadow: 0 0 14px -4px var(--aurora-25); }
-.qa-plan:hover { color: #eafff6;
-  background:
-    linear-gradient(180deg, rgba(69,255,166,.28), rgba(69,255,166,.1)) padding-box,
-    linear-gradient(180deg, var(--aurora), rgba(83,231,255,.2)) border-box; }
+/* "Plan my week" — semi-prime in the Carbon Blackout scheme: green-hinted edge at rest. */
+.qa-plan { color: #cfe9db; border-color: rgba(47,211,107,.38); }
+.qa-plan:hover { color: #fff; }
 
 #input-bar { width: min(720px, 92vw); justify-self: center; display: flex; align-items: center; gap: 10px;
   padding: 10px 12px; border-radius: var(--r-lg);
@@ -661,14 +667,19 @@ body::after { content: ""; position: fixed; inset: 0 0 40% 0; z-index: 1; pointe
 /* ---------- THE RAIL: left-hand command dock on desktop ---------- */
 @media (min-width: 900px) and (min-height: 560px) {
   #quick { position: fixed; left: 16px; top: 50%; transform: translateY(-50%); z-index: 5;
-    flex-direction: column; align-items: stretch; gap: 7px; width: 138px;
-    padding: 12px 10px; border-radius: 18px; border: 1px solid transparent;
-    background: var(--panel-fill) padding-box, var(--panel-edge) border-box;
+    flex-direction: column; align-items: stretch; gap: 7px; width: 150px;
+    padding: 12px 10px; border-radius: 10px; border: 1px solid rgba(150,168,180,.22);
+    background: rgba(6,11,15,.88);
     backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2);
     box-shadow: var(--panel-shadow); }
   #quick::before { content: "◈ SURFACES"; font-family: var(--mono); font-size: 9px;
     letter-spacing: .24em; color: var(--text-faint); padding: 2px 6px 6px; }
   .qa { text-align: left; padding: 9px 12px; }
+  /* ACT / VIEW bank labels — visible only on the rail */
+  .qlbl { display: flex; align-items: center; gap: 7px; color: var(--text-faint);
+    font-family: var(--mono); font-size: 8px; letter-spacing: .3em; padding: 4px 2px 0; }
+  .qlbl::after { content: ""; flex: 1; height: 1px;
+    background: linear-gradient(90deg, rgba(140,170,190,.16), transparent); }
   #app { padding-left: 176px; }
 }
 
@@ -746,15 +757,8 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
   touch-action: none; cursor: grab; }
 #graph-canvas:active { cursor: grabbing; }
 /* Dock button — violet-lit so the map reads as its own kind of surface. */
-.qa-graph { color: #B9AEFF;
-  background:
-    linear-gradient(180deg, rgba(143,123,255,.18), rgba(143,123,255,.05)) padding-box,
-    linear-gradient(180deg, rgba(143,123,255,.45), rgba(83,231,255,.16)) border-box; }
-.qa-graph:hover { color: #eafff6;
-  background:
-    linear-gradient(180deg, rgba(143,123,255,.3), rgba(83,231,255,.1)) padding-box,
-    linear-gradient(180deg, var(--violet), rgba(83,231,255,.28)) border-box;
-  box-shadow: 0 6px 18px -6px rgba(0,0,0,.5), 0 0 16px -2px rgba(143,123,255,.4); }
+/* Graph rides the standard Carbon Blackout plate — its indigo lives in the glyph
+   and ignites on hover via --c (see the dock category map). */
 
 .gr-hd { position: absolute; left: 14px; right: 14px; top: calc(10px + env(safe-area-inset-top));
   display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 14px;
