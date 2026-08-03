@@ -225,6 +225,19 @@ def _anthropic() -> AsyncAnthropic:
     return _client
 
 
+def _mem_slim(mem_list: list, head: int = 40, tail: int = 70) -> list:
+    """SMART MEMORY TIER (2026-08-03, cost fix): the fact store crossed ~330 entries and
+    re-mailing ALL of it every turn was the single biggest per-message cost. Inline =
+    the head (core tier sorts first) + the most recent tail; everything in between is
+    one recall() away — Ace is TOLD that, so nothing is lost, just not re-sent."""
+    if len(mem_list) <= head + tail:
+        return mem_list
+    return (list(mem_list[:head])
+            + [f"… ({len(mem_list) - head - tail} older facts not shown — use recall to "
+               f"search them before ever saying you don't know or remember something)"]
+            + list(mem_list[-tail:]))
+
+
 async def _live_context() -> str:
     """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
     + data bank concurrently."""
@@ -244,7 +257,7 @@ async def _live_context() -> str:
     events = ok(cal_all, [])
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
-    mem_list = ok(memory, [])
+    mem_list = _mem_slim(ok(memory, []))
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
     today_sched = _format_today_schedule(today_events, now)
     bank_str = _format_daybank(ok(bank, []))
@@ -1396,7 +1409,7 @@ async def _fast_context() -> str:
     events = _CTX["events"]
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
-    mem_list = _CTX["memory"]
+    mem_list = _mem_slim(_CTX["memory"])
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
     bank = _CTX["bank"]
     wx = _CTX["wx"]
@@ -1564,10 +1577,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # mark them as a cached prefix — Haiku stops re-paying ~6k tokens of prefill
             # per turn, pulling first-token well under the lead-in threshold.
             voice_tools = [dict(t) for t in VOICE_TOOLS] + list(extra_tools or [])
-            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = {"type": "ephemeral"}
+            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
             cached_system = [
                 {"type": "text", "text": build_system_prompt(),
-                 "cache_control": {"type": "ephemeral"}},
+                 "cache_control": {"type": "ephemeral", "ttl": "1h"}},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
             ]
             stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=cached_system,
@@ -1581,11 +1594,15 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # + tool schemas are byte-stable, so mark them as a cached prefix. Once warm,
             # every typed turn re-reads ~10k prefix tokens at 10% price instead of full rate.
             mcp_schemas = await mcp_client.tool_schemas()
+            # 1-HOUR cache TTL (2026-08-03): Brady talks at human speed — the default 5-min
+            # cache expired between his turns, so every pause re-billed the whole ~40k
+            # prefix (prompt + 42 tool schemas) at full rate. 1h writes cost 2× ONCE, then
+            # the entire conversation reads the prefix at 10% price.
             typed_tools = [dict(t) for t in tools.TOOLS] + list(mcp_schemas) + [dict(tools.WEB_SEARCH)]
-            typed_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            typed_tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
             typed_system = [
                 {"type": "text", "text": build_system_prompt(),
-                 "cache_control": {"type": "ephemeral"}},
+                 "cache_control": {"type": "ephemeral", "ttl": "1h"}},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
             ]
             stream_kwargs = dict(
