@@ -52,7 +52,10 @@ from .system_prompt import build_system_prompt
 logger = logging.getLogger("ace2.chat")
 
 EASTERN = pytz.timezone("America/New_York")
-MODEL = os.environ.get("ACE2_MODEL", "claude-opus-4-8")
+# LEAN MODE (2026-08-03, money tight): typed brain on Sonnet 5 — intro pricing $2/$10
+# through 2026-08-31 (vs Opus $5/$25 = 60%+ cheaper), near-Opus quality for chief-of-staff
+# work. Revert when cash flows: set ACE2_MODEL=claude-opus-4-8 in Railway or flip this default.
+MODEL = os.environ.get("ACE2_MODEL", "claude-sonnet-5")
 # Live VOICE replies run on the FASTEST model, not Opus — conversational snappiness
 # (time-to-first-word) matters far more than depth per spoken sentence, and Opus's
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
@@ -64,7 +67,9 @@ VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
 # on all this invisible background work — the typed CHAT he actually interacts with stays MODEL.
 # Haiku was too weak here (a dense brain dump → 0 facts, most dropped); Sonnet 5 is the floor.
 # Override with ACE2_LEARN_MODEL (e.g. back to claude-opus-4-8) to trade cost for depth.
-LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", "claude-sonnet-5")
+# LEAN MODE: ALL background work (sweep, briefs, watchdog, recap, graph) rides this one
+# knob — Haiku 4.5 ($1/$5) does structured triage/recap work fine. Was Sonnet 5.
+LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", "claude-haiku-4-5-20251001")
 # On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
 # confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
 # says yes, only then does the second call actually send). Built once for cache stability.
@@ -157,7 +162,7 @@ def _confirm_gate(name: str, args: dict, turn_id: int):
         return False, clean
     _pending_confirm[name] = {"turn": turn_id, "ts": now}
     return True, clean
-EFFORT = os.environ.get("ACE2_EFFORT", "medium")   # low|medium|high|xhigh|max
+EFFORT = os.environ.get("ACE2_EFFORT", "low")   # low|medium|high|xhigh|max — LEAN MODE: was medium
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
 NOW_WINDOW_MIN = 90  # an event that started within this many minutes reads as "in progress"
@@ -553,7 +558,7 @@ async def prime_ctx() -> None:
 # ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───
 # himself — auto-extracting new durable facts (not only when he remembered to save one), on a
 # schedule, OFF the live conversation loop so he stays fast. This is "he builds himself" (Brady).
-_LEARN_INTERVAL = 45 * 60.0   # sweep ~every 45 min (was 25 — halved the sweep cost, no real loss)
+_LEARN_INTERVAL = 90 * 60.0   # LEAN MODE: sweep ~every 90 min (was 45 — hash-gated, so no loss when quiet)
 _learn_running = [False]
 _learn_state = {"last_hash": None}
 
@@ -1020,7 +1025,7 @@ async def _brief_loop() -> None:
 # spends a model call ONLY when something actually moved — an idle afternoon costs nothing.
 # The model's main job is to say NOTHING: an interruption Brady never asked for has to earn
 # its place, and a chatty watcher gets muted, which kills the whole feature. Hence the caps.
-_WATCH_INTERVAL = 12 * 60.0             # sweep ~every 12 min
+_WATCH_INTERVAL = 30 * 60.0             # LEAN MODE: pass ~every 30 min (was 12 — caps still gate nudges)
 _WATCH_WAKE = (7 * 60, 21 * 60 + 30)    # 7:00–21:30 Eastern — he is NEVER pinged outside this
 _WATCH_MAX_DAY = 3                      # a 4th nudge in one day is noise, not help
 _WATCH_GAP_SEC = 45 * 60                # ...and never two back-to-back
@@ -1517,10 +1522,20 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # WEB_SEARCH (2026-07-31) rides here too — Anthropic executes it server-side, so
             # the dispatch loop below never sees it (its blocks are 'server_tool_use', which
             # the != 'tool_use' guard already skips). Typed only: voice stays native-fast.
+            # LEAN MODE prompt caching (2026-08-03): same trick as voice — the static prompt
+            # + tool schemas are byte-stable, so mark them as a cached prefix. Once warm,
+            # every typed turn re-reads ~10k prefix tokens at 10% price instead of full rate.
             mcp_schemas = await mcp_client.tool_schemas()
+            typed_tools = [dict(t) for t in tools.TOOLS] + list(mcp_schemas) + [dict(tools.WEB_SEARCH)]
+            typed_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            typed_system = [
+                {"type": "text", "text": build_system_prompt(),
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
+            ]
             stream_kwargs = dict(
-                model=MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages,
-                tools=tools.TOOLS + mcp_schemas + [tools.WEB_SEARCH],
+                model=MODEL, max_tokens=MAX_TOKENS, system=typed_system, messages=messages,
+                tools=typed_tools,
                 thinking={"type": "adaptive"},
                 output_config={"effort": EFFORT},
             )
