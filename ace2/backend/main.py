@@ -524,10 +524,9 @@ async def brief_run(kind: str = "morning"):
     game plan + business snapshot; 'eod' = the evening recap. Lands in the conversation
     thread and pushes to any open HUD."""
     kind = kind if kind in ("morning", "eod") else "morning"
-    text = await chat.generate_brief(kind)
+    text = await chat.generate_brief(kind)   # deliver_brief inside handles thread+push+HUD
     if text:
-        reached = await publish_stage_event("brief", {"kind": kind, "text": text})
-        return {"ok": True, "kind": kind, "chars": len(text), "hud_clients": reached}
+        return {"ok": True, "kind": kind, "chars": len(text)}
     return {"ok": False, "error": "brief generation failed"}
 
 
@@ -1712,6 +1711,78 @@ async def push_test():
         return {"ok": False, "error": "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set", "results": []}
     results = await asyncio.to_thread(_push_now, "ACE", "Phone alerts are live. ◈", "/")
     return {"ok": any(r.get("ok") for r in results), "devices": len(results), "results": results}
+
+
+# ── MAX BRIDGE — Brady's iMac runs Ace's heavy background thinking on his Claude ──
+# Max plan ($0/token) instead of the metered API. The server stays the ONE brain:
+# it composes the exact prompts its own loops use and applies results through the
+# exact same guarded stores (reconcile-on-write memory, dedup'd board, claim-first
+# briefs) — the worker just supplies the electricity. Mac asleep? The in-server
+# loops run on the API exactly as before. NO function ever depends on the bridge.
+# Auth: header X-Bridge-Key must equal env ACE2_BRIDGE_KEY (unset → bridge dormant).
+def _bridge_check(request: Request):
+    key = os.environ.get("ACE2_BRIDGE_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail="bridge disabled — set ACE2_BRIDGE_KEY")
+    if request.headers.get("x-bridge-key", "") != key:
+        raise HTTPException(status_code=401, detail="bad bridge key")
+
+
+@app.get("/bridge/jobs")
+async def bridge_jobs(request: Request):
+    """Due background jobs with ready-to-run prompts. Briefs are CLAIMED here
+    (claim-first, same rule as the loop) so bridge + loop can never double-send."""
+    _bridge_check(request)
+    from . import db as _db
+    jobs = []
+    now = chat.datetime.now(chat.EASTERN)
+    today = now.strftime("%Y-%m-%d")
+    cur = now.hour * 60 + now.minute
+    for kind, (hh, mm) in chat._BRIEF_TIMES.items():
+        if not (0 <= cur - (hh * 60 + mm) <= 120):
+            continue   # only within the 2h window — same rule as _brief_loop
+        if chat._brief_sent.get(kind) == today:
+            continue
+        last = await asyncio.to_thread(_db.latest_summary, f"brief_{kind}")
+        if (last.get("text") or "") == today:
+            chat._brief_sent[kind] = today
+            continue
+        prompt = await chat.compose_brief_prompt(kind)
+        if not prompt:
+            continue
+        chat._brief_sent[kind] = today                                # claim-first
+        await asyncio.to_thread(_db.add_summary, today, f"brief_{kind}")
+        jobs.append({"job": "brief", "kind": kind, "prompt": prompt, "max_tokens": 400})
+    sweep = await chat.compose_sweep()
+    if not sweep.get("skipped"):
+        jobs.append({"job": "sweep", "hash": sweep["hash"],
+                     "facts_prompt": sweep["facts_prompt"],
+                     "triage_prompt": sweep["triage_prompt"],
+                     "reflection_prompt": sweep["reflection_prompt"]})
+    return {"jobs": jobs, "server_time": now.isoformat()}
+
+
+class BridgeResultReq(BaseModel):
+    job: str = ""          # "brief" | "sweep"
+    kind: str = ""         # brief: morning | eod
+    text: str = ""         # brief body
+    hash: int = 0          # sweep conversation hash (stamps last_hash on apply)
+    facts: str = ""
+    triage: str = ""
+    reflection: str = ""
+
+
+@app.post("/bridge/complete")
+async def bridge_complete(req: BridgeResultReq, request: Request):
+    """Apply one finished job through the same guarded delivery/filing paths."""
+    _bridge_check(request)
+    if req.job == "brief" and req.kind in ("morning", "eod"):
+        delivered = await chat.deliver_brief(req.kind, req.text)
+        return {"ok": bool(delivered), "kind": req.kind}
+    if req.job == "sweep":
+        res = await chat.apply_sweep(req.hash, req.facts, req.triage, req.reflection)
+        return {"ok": "error" not in res, **res}
+    return {"ok": False, "error": "unknown job"}
 
 
 # ── Static frontend (mounted last so API routes win) ────────────────────────────

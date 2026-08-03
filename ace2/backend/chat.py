@@ -563,13 +563,13 @@ _learn_running = [False]
 _learn_state = {"last_hash": None}
 
 
-async def _learn_sweep_once(force: bool = False) -> dict:
-    if _learn_running[0]:
-        return {"skipped": "busy"}
-    _learn_running[0] = True
-    filed, routed = 0, 0
+async def compose_sweep(force: bool = False) -> dict:
+    """Build one learning sweep's inputs + prompts WITHOUT spending a model call — the
+    MAX BRIDGE (Brady's iMac running Claude Code on his Max plan, $0/token) pulls this,
+    runs the prompts locally, and posts outputs to apply_sweep(). The in-server runner
+    below uses the exact same pair, so there is ONE sweep brain on either path."""
     try:
-        from . import db
+        from . import db, daybank
         if not db.enabled():
             return {"skipped": "no db"}
         turns = await asyncio.to_thread(db.recent_turns, 40)
@@ -582,12 +582,8 @@ async def _learn_sweep_once(force: bool = False) -> dict:
         h = hash(convo)
         if not force and h == _learn_state.get("last_hash"):
             return {"skipped": "no change"}   # nothing new since the last sweep — don't burn a call
-        _learn_state["last_hash"] = h
         existing = await asyncio.to_thread(brain.read_memory)
-        client = _anthropic()
-        resp = await client.messages.create(
-            model=LEARN_MODEL, max_tokens=1500,
-            messages=[{"role": "user", "content": (
+        facts_prompt = (
                 "You are Ace's background LEARNING sweep — Brady's second brain. Read this whole "
                 "conversation and extract EVERY new durable fact worth remembering. Be THOROUGH, "
                 "not conservative: he is brain-dumping and trusts you to catch all of it. Capture "
@@ -603,39 +599,15 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                 "Err toward capturing — a missed fact is worse than a slightly redundant one. "
                 "If truly nothing new, reply with the single word NONE.\n\n"
                 "KNOWN FACTS:\n" + ("\n".join(f"- {m}" for m in (existing or [])[:80]) or "(none)")
-                + f"\n\nCONVERSATION:\n{convo}")}])
-        text = "".join(getattr(b, "text", "") for b in resp.content).strip()
-        # No NEW facts is fine — but the two halves are INDEPENDENT. A bare `return` here
-        # (the old bug) skipped task-triage entirely whenever nothing new was learnable, which
-        # is the common case once a day's facts are already filed. Fall through to triage.
-        if not text or text.upper().startswith("NONE"):
-            facts = []
-        else:
-            facts = [ln.strip("-•* ").strip() for ln in text.split("\n")
-                     if len(ln.strip()) > 8 and not ln.strip().upper().startswith("NONE")]
-        if facts:
-            await asyncio.to_thread(brain.add_memory, facts, "sweep")
-            filed = len(facts)
-            logger.info("learn sweep: filed %d candidate fact(s)", filed)
-
-        # TRIAGE → Ace's OWN data bank. REWORKED 2026-07-31 (board-dedup review): the old pass
-        # was a one-way valve — it could ONLY add, its "ALREADY TRACKED" guard was title-only
-        # and truncated at 150, and its "specific, dated" instruction manufactured paraphrases
-        # that slipped the dedup gate (Kara×2, PFI-Hub×3, Donna×2 on Brady's live board). Now it
-        # is a RECONCILER: it sees ids + status, it can emit DONE to close what Brady said he
-        # finished, and adding a reworded twin is explicitly forbidden. Same loop that piled the
-        # board up now drains it.
-        closed = 0
-        try:
-            from . import daybank
-            existing = await asyncio.to_thread(daybank.read_items, False)
-            open_items = [it for it in existing if it.get("status") == "open"]
-            recent_closed = [it for it in existing if it.get("status") != "open"][:40]
-            tracked = "\n".join(f"- [{it['id']}] {it.get('text', '')}" for it in open_items)
-            tracked_closed = "\n".join(f"- [{it['id']}] {it.get('text', '')}" for it in recent_closed)
-            resp2 = await client.messages.create(
-                model=LEARN_MODEL, max_tokens=1200,
-                messages=[{"role": "user", "content": (
+                + f"\n\nCONVERSATION:\n{convo}")
+        # TRIAGE prompt — the RECONCILER (2026-07-31 board-dedup review): sees ids + status,
+        # can emit DONE to close what Brady said he finished, forbidden to re-add rewordings.
+        existing_items = await asyncio.to_thread(daybank.read_items, False)
+        open_items = [it for it in existing_items if it.get("status") == "open"]
+        recent_closed = [it for it in existing_items if it.get("status") != "open"][:40]
+        tracked = "\n".join(f"- [{it['id']}] {it.get('text', '')}" for it in open_items)
+        tracked_closed = "\n".join(f"- [{it['id']}] {it.get('text', '')}" for it in recent_closed)
+        triage_prompt = (
                     "You are Ace's background board-keeper — Brady's safety net so nothing he says "
                     "slips, AND the janitor who closes what he finished. Read the conversation and "
                     "do BOTH:\n"
@@ -653,10 +625,49 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                     "reply NONE.\n\n"
                     "OPEN ITEMS:\n" + (tracked or "(none)") + "\n\n"
                     "RECENTLY CLOSED (do not re-add):\n" + (tracked_closed or "(none)") + "\n\n"
-                    f"CONVERSATION:\n{convo}")}])
-            t2 = "".join(getattr(b, "text", "") for b in resp2.content).strip()
+                    f"CONVERSATION:\n{convo}")
+        # REFLECTION prompt — the self-building seed: Ace notices where he fell short or
+        # where Brady wants more; results become ACE SELF-NOTE facts (his dev backlog).
+        reflection_prompt = (
+            "You are Ace reflecting on how to serve Brady better. From this conversation, "
+            "list up to 3 SELF-IMPROVEMENT notes — ONLY genuine signals like: something "
+            "Brady asked for that Ace couldn't do or got wrong, a capability he wished "
+            "for, repeated manual work Ace should automate, or a misroute/miss. ~15 words "
+            "each. One per line, EXACTLY: NOTE :: <the note>. No other text. If none, "
+            "reply NONE.\n\n"
+            f"CONVERSATION:\n{convo}")
+        return {"hash": h, "facts_prompt": facts_prompt, "triage_prompt": triage_prompt,
+                "reflection_prompt": reflection_prompt}
+    except Exception as e:
+        logger.warning("compose_sweep failed: %s", e)
+        return {"skipped": f"compose failed: {e}"}
+
+
+async def apply_sweep(h: int, facts_text: str, triage_text: str, reflection_text: str) -> dict:
+    """File one sweep's outputs through the SAME guarded stores (reconcile-on-write memory,
+    dedup'd board, DONE only for really-open ids) and stamp last_hash so the in-server loop
+    never re-burns a call on a conversation the MAX BRIDGE already digested. One brain,
+    one set of rules — only the electricity comes from a different place."""
+    from . import daybank
+    filed, routed, closed = 0, 0, 0
+    try:
+        if h:
+            _learn_state["last_hash"] = h
+        text = (facts_text or "").strip()
+        if not text or text.upper().startswith("NONE"):
+            facts = []
+        else:
+            facts = [ln.strip("-•* ").strip() for ln in text.split("\n")
+                     if len(ln.strip()) > 8 and not ln.strip().upper().startswith("NONE")]
+        if facts:
+            await asyncio.to_thread(brain.add_memory, facts, "sweep")
+            filed = len(facts)
+            logger.info("learn sweep: filed %d candidate fact(s)", filed)
+        try:
+            t2 = (triage_text or "").strip()
             if t2 and not t2.upper().startswith("NONE"):
-                open_ids = {it["id"] for it in open_items}
+                existing_items = await asyncio.to_thread(daybank.read_items, False)
+                open_ids = {it["id"] for it in existing_items if it.get("status") == "open"}
                 for ln in t2.split("\n"):
                     if "::" not in ln:
                         continue
@@ -684,23 +695,9 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                 if routed or closed:
                     logger.info("board-keeper sweep: +%d to-do(s), closed %d", routed, closed)
         except Exception as e:
-            logger.warning("triage sweep (data bank) failed: %s", e)
-
-        # REFLECTION (third pass) — the self-building seed: Ace notices where he fell short
-        # or where Brady wants more, and files it as a SELF-NOTE fact. These become the
-        # backlog for upgrading Ace himself (reviewed in chats/briefs, built out in dev).
+            logger.warning("triage apply (data bank) failed: %s", e)
         try:
-            resp3 = await client.messages.create(
-                model=LEARN_MODEL, max_tokens=300,
-                messages=[{"role": "user", "content": (
-                    "You are Ace reflecting on how to serve Brady better. From this conversation, "
-                    "list up to 3 SELF-IMPROVEMENT notes — ONLY genuine signals like: something "
-                    "Brady asked for that Ace couldn't do or got wrong, a capability he wished "
-                    "for, repeated manual work Ace should automate, or a misroute/miss. ~15 words "
-                    "each. One per line, EXACTLY: NOTE :: <the note>. No other text. If none, "
-                    "reply NONE.\n\n"
-                    f"CONVERSATION:\n{convo}")}])
-            t3 = "".join(getattr(b, "text", "") for b in resp3.content).strip()
+            t3 = (reflection_text or "").strip()
             if t3 and not t3.upper().startswith("NONE"):
                 notes = []
                 for ln in t3.split("\n"):
@@ -714,8 +711,43 @@ async def _learn_sweep_once(force: bool = False) -> dict:
                     await asyncio.to_thread(brain.add_memory, notes, "reflection")
                     logger.info("reflection: filed %d self-note(s)", len(notes))
         except Exception as e:
-            logger.warning("reflection pass failed: %s", e)
+            logger.warning("reflection apply failed: %s", e)
         return {"facts": filed, "tasks": routed, "closed": closed}
+    except Exception as e:
+        logger.warning("apply_sweep failed: %s", e)
+        return {"error": str(e), "facts": filed, "tasks": routed, "closed": closed}
+
+
+async def _learn_sweep_once(force: bool = False) -> dict:
+    """In-server sweep runner (the API fallback): compose → model → apply. The MAX BRIDGE
+    runs the same compose/apply pair with the model call on Brady's Max plan instead."""
+    if _learn_running[0]:
+        return {"skipped": "busy"}
+    _learn_running[0] = True
+    try:
+        job = await compose_sweep(force)
+        if job.get("skipped"):
+            return job
+        client = _anthropic()
+
+        async def _run(prompt: str, max_tokens: int) -> str:
+            resp = await client.messages.create(
+                model=LEARN_MODEL, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}])
+            return "".join(getattr(b, "text", "") for b in resp.content).strip()
+
+        facts_text = await _run(job["facts_prompt"], 1500)
+        try:
+            triage_text = await _run(job["triage_prompt"], 1200)
+        except Exception as e:
+            triage_text = ""
+            logger.warning("triage sweep (data bank) failed: %s", e)
+        try:
+            reflection_text = await _run(job["reflection_prompt"], 300)
+        except Exception as e:
+            reflection_text = ""
+            logger.warning("reflection pass failed: %s", e)
+        return await apply_sweep(job["hash"], facts_text, triage_text, reflection_text)
     except Exception as e:
         logger.warning("learn sweep failed: %s", e)
         return {"error": str(e)}
@@ -816,8 +848,10 @@ def _board_stats() -> str:
     return "\n".join(lines)
 
 
-async def generate_brief(kind: str = "morning") -> str:
-    """Build one brief and deliver it: thread + summary marker. Returns the text."""
+async def compose_brief_prompt(kind: str = "morning") -> str:
+    """Everything the brief knows, minus the model call — split out (2026-08-03) so the
+    MAX BRIDGE can run the same brief on Brady's Claude Max plan ($0/token); this server
+    only composes the inputs and delivers the finished text. '' on failure."""
     from . import db
     try:
         stats = await asyncio.to_thread(_board_stats)
@@ -849,7 +883,6 @@ async def generate_brief(kind: str = "morning") -> str:
             fb_line = "\n\nNOTE: Brady thumbed-down the last brief — tighten it, drop filler, sharper priorities."
         elif fb.get("text", "").endswith(":up"):
             fb_line = "\n\nNOTE: Brady liked the last brief — keep this style."
-        client = _anthropic()
         if kind == "morning":
             ask = (
                 "Write Brady's MORNING BRIEF as Ace — his JARVIS-style chief of staff waking up "
@@ -866,36 +899,64 @@ async def generate_brief(kind: str = "morning") -> str:
                 "(top 2-3, from open board items + tomorrow's first event); (3) one genuine "
                 "one-line push tied to his goals. Plain text, no markdown headers."
             )
+        return (
+            f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
+            f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
+            f"{stats}\n\nHIS GOALS:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+            + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
+               + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
+            + fb_line
+            + "\n\nRECENT THREAD (for what happened):\n" + _format_thread(ok(convo, [])))
+    except Exception as e:
+        logger.warning("compose_brief_prompt(%s) failed: %s", kind, e)
+        return ""
+
+
+async def deliver_brief(kind: str, text: str) -> str:
+    """Deliver one finished brief through the ONE guarded path: thread + day marker +
+    phone push + HUD publish. Used by generate_brief AND the MAX BRIDGE — so however
+    the brief got written, delivery (and double-send protection) is identical."""
+    from . import db
+    text = (text or "").strip()
+    if not text:
+        return ""
+    now = datetime.now(EASTERN)
+    label = "☀ MORNING BRIEF" if kind == "morning" else "◈ EVENING RECAP"
+    delivered = f"{label}\n\n{text}"
+    await asyncio.to_thread(history.append, "assistant", delivered)
+    await asyncio.to_thread(db.add_summary, now.strftime("%Y-%m-%d"), f"brief_{kind}")
+    _brief_sent[kind] = now.strftime("%Y-%m-%d")
+    logger.info("brief delivered: %s (%d chars)", kind, len(text))
+    # …and to the PHONE. The HUD push (publish_stage_event) only reaches an OPEN tab;
+    # this is the one that lands on a locked screen. Fire-and-forget, threaded, and
+    # completely inert until the VAPID keys are set — a brief never waits on it and
+    # never fails because of it.
+    try:
+        from .main import send_push
+        send_push("ACE · Morning Brief" if kind == "morning" else "ACE · Evening Recap",
+                  text, "/")
+    except Exception as e:
+        logger.warning("brief phone push skipped: %s", e)
+    try:
+        from .main import publish_stage_event
+        await publish_stage_event("brief", {"kind": kind, "text": text})
+    except Exception:
+        pass
+    return delivered
+
+
+async def generate_brief(kind: str = "morning") -> str:
+    """Compose → model → deliver (the in-server / API fallback path)."""
+    try:
+        prompt = await compose_brief_prompt(kind)
+        if not prompt:
+            return ""
+        client = _anthropic()
         resp = await client.messages.create(
             model=LEARN_MODEL, max_tokens=400,
-            messages=[{"role": "user", "content": (
-                f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
-                f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
-                f"{stats}\n\nHIS GOALS:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
-                + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
-                   + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
-                + fb_line
-                + "\n\nRECENT THREAD (for what happened):\n" + _format_thread(ok(convo, [])))}])
+            messages=[{"role": "user", "content": prompt}])
         text = "".join(getattr(b, "text", "") for b in resp.content).strip()
-        if not text:
-            return ""
-        label = "☀ MORNING BRIEF" if kind == "morning" else "◈ EVENING RECAP"
-        delivered = f"{label}\n\n{text}"
-        await asyncio.to_thread(history.append, "assistant", delivered)
-        await asyncio.to_thread(db.add_summary, now.strftime("%Y-%m-%d"), f"brief_{kind}")
-        logger.info("brief delivered: %s (%d chars)", kind, len(text))
-        # …and to the PHONE. The HUD push (publish_stage_event) only reaches an OPEN tab;
-        # this is the one that lands on a locked screen. Fire-and-forget, threaded, and
-        # completely inert until the VAPID keys are set — a brief never waits on it and
-        # never fails because of it. Both brief paths (the loop and /brief/run) come
-        # through here, so one call site covers morning and EOD.
-        try:
-            from .main import send_push
-            send_push("ACE · Morning Brief" if kind == "morning" else "ACE · Evening Recap",
-                      text, "/")
-        except Exception as e:
-            logger.warning("brief phone push skipped: %s", e)
-        return delivered
+        return await deliver_brief(kind, text)
     except Exception as e:
         logger.warning("generate_brief(%s) failed: %s", kind, e)
         return ""
@@ -1006,13 +1067,7 @@ async def _brief_loop() -> None:
                 _brief_sent[kind] = today
                 if not await asyncio.to_thread(db.add_summary, today, f"brief_{kind}"):
                     continue   # db write failed: keep the local claim, try again tomorrow
-                text = await generate_brief(kind)
-                if text:
-                    try:
-                        from .main import publish_stage_event
-                        await publish_stage_event("brief", {"kind": kind, "text": text})
-                    except Exception:
-                        pass
+                await generate_brief(kind)   # deliver_brief handles thread + push + HUD
         except asyncio.CancelledError:
             break
         except Exception:
