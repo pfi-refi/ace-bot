@@ -1577,10 +1577,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # mark them as a cached prefix — Haiku stops re-paying ~6k tokens of prefill
             # per turn, pulling first-token well under the lead-in threshold.
             voice_tools = [dict(t) for t in VOICE_TOOLS] + list(extra_tools or [])
-            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = {"type": "ephemeral"}
             cached_system = [
                 {"type": "text", "text": build_system_prompt(),
-                 "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                 "cache_control": {"type": "ephemeral"}},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
             ]
             stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=cached_system,
@@ -1594,15 +1594,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # + tool schemas are byte-stable, so mark them as a cached prefix. Once warm,
             # every typed turn re-reads ~10k prefix tokens at 10% price instead of full rate.
             mcp_schemas = await mcp_client.tool_schemas()
-            # 1-HOUR cache TTL (2026-08-03): Brady talks at human speed — the default 5-min
-            # cache expired between his turns, so every pause re-billed the whole ~40k
-            # prefix (prompt + 42 tool schemas) at full rate. 1h writes cost 2× ONCE, then
-            # the entire conversation reads the prefix at 10% price.
+            # NOTE: 1-hour cache TTL needs the anthropic-beta: extended-cache-ttl-2025-04-11
+            # header; passing ttl without it broke every call (2026-08-03). Reverted to the
+            # standard 5-min ephemeral cache — safe. Re-add 1h WITH the header, verified.
             typed_tools = [dict(t) for t in tools.TOOLS] + list(mcp_schemas) + [dict(tools.WEB_SEARCH)]
-            typed_tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+            typed_tools[-1]["cache_control"] = {"type": "ephemeral"}
             typed_system = [
                 {"type": "text", "text": build_system_prompt(),
-                 "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                 "cache_control": {"type": "ephemeral"}},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
             ]
             stream_kwargs = dict(
