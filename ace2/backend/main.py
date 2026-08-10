@@ -572,7 +572,7 @@ async def daybank_categorize():
     panel's Pipeline view groups everything correctly."""
     import re
     from . import chat, db as _db
-    CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
+    CATS = set(db.CATEGORIES)
     items = await asyncio.to_thread(daybank.read_items, False)
     untagged = [it for it in items if it.get("status") != "done"
                 and not any(t in CATS for t in (it.get("tags") or []))]
@@ -609,7 +609,7 @@ async def daybank_update(req: DaybankUpdateReq):
     status = req.status if req.status in ("open", "done", "dropped") else None
     text = req.text.strip() or None
     tags = None
-    _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
+    _CATS = set(db.CATEGORIES)
     if req.category and req.category in _CATS:
         it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
                    if x.get("id") == req.id), None)
@@ -1021,8 +1021,7 @@ async def stt(request: Request):
 # endpoint strictly additive: it cannot break a single existing route.
 CAPTURE_MAX_BYTES = 18 * 1024 * 1024          # ~18MB — anything bigger is a video, not a capture
 CAPTURE_IMAGE_MAX_BYTES = 5 * 1024 * 1024     # Anthropic's per-image ceiling; the UI downscales first
-CAPTURE_CATEGORIES = ("Deals", "Agents", "Admin", "Networking", "Business", "Tech",
-                      "Personal", "Goals")
+CAPTURE_CATEGORIES = db.CATEGORIES
 CAPTURE_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 
 _CAPTURE_ASK = (

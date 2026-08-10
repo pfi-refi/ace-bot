@@ -316,7 +316,7 @@ def _format_daybank(items: list) -> str:
         return "(nothing captured yet)"
     open_items = [it for it in items if it.get("status") == "open"]
     done_today = [it for it in items if it.get("status") == "done"]
-    _CATS = {"Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"}
+    _CATS = {"Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
 
     def _cat(it):
         for t in (it.get("tags") or []):
@@ -823,7 +823,7 @@ _BRIEF_TIMES = {"morning": (9, 0), "eod": (20, 15)}   # Eastern — Brady wants 
 def _board_stats() -> str:
     """Deterministic business snapshot from Ace's own store — no LLM guessing."""
     from . import db
-    _CATS = ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"]
+    _CATS = ["Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
     try:
         items = db.read_items(active_only=False)
     except Exception:
@@ -992,7 +992,7 @@ async def generate_business_report() -> str:
         def ok(v, d):
             return d if isinstance(v, Exception) else v
         items, facts, events = ok(items, []), ok(facts, []), ok(events, [])
-        _CATS = ["Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals"]
+        _CATS = ["Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
         def cat(it):
             for t in (it.get("tags") or []):
                 if t in _CATS:

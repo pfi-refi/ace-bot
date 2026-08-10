@@ -298,7 +298,10 @@ def recent_turns(limit: int = 12) -> list:
 # Canonical board categories. Tags are normalized AT THE STORE (the single choke point) so
 # a sweep model shouting 'DEALS' can never mint a phantom column again — every reader
 # (panel, context, graph) matches these case-sensitively.
-CATEGORIES = ("Deals", "Agents", "Admin", "Networking", "Business", "Tech", "Personal", "Goals")
+# 2026-08-10 LIFE PIVOT: Brady stepped back from GFI/PFI to personal clients + a stable job
+# while he digs out financially. New priority columns lead; the old business ones back-burner.
+CATEGORIES = ("Money", "Bills", "Job Hunt", "Goals", "Personal",
+              "Deals", "Agents", "Admin", "Networking", "Business", "Tech")
 _CANON_CAT = {c.lower(): c for c in CATEGORIES}
 
 

@@ -1112,8 +1112,10 @@
      overlay that collapses to a clean orb; reads/writes the data bank via /daybank. */
   // TACTICAL PALETTE (2026-08-01, Brady: pastels looked "girly") — command-console colors:
   // money green, steel cyan, gunmetal, burnt orange, deep blue, indigo, signal red, amber.
-  var CMD_CATS = { Deals:'#2fd36b', Agents:'#38bdf8', Admin:'#94a3b8', Networking:'#ff8c1a', Business:'#3e7bfa', Tech:'#6d7cff', Personal:'#ff4757', Goals:'#ffb020' };
-  var CMD_ORDER = ['Deals','Agents','Admin','Networking','Business','Tech','Personal','Goals'];
+  // LIFE PIVOT (2026-08-10): recovery columns lead in VIVID tactical colors; the old business
+  // columns recede to MUTED slate — the board is visual-first on what matters now.
+  var CMD_CATS = { 'Money':'#2fd36b', 'Bills':'#ff8c1a', 'Job Hunt':'#38bdf8', 'Goals':'#ffb020', 'Personal':'#ff4757', 'Deals':'#8091a8', 'Agents':'#748097', 'Admin':'#8b95a3', 'Networking':'#6f7d95', 'Business':'#79869c', 'Tech':'#828da0' };
+  var CMD_ORDER = ['Money','Bills','Job Hunt','Goals','Personal','Deals','Agents','Admin','Networking','Business','Tech'];
   var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[], editing:null };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
@@ -1209,7 +1211,7 @@
     else if(cmd.lens==='all'){ body=items.slice().sort(byAge).filter(function(x){return x.status!=='dropped';}).map(cmdRow).join(''); }
     else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status==='open';}).sort(byAge); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
-    var addCat=cmd.cat==='All'?'Deals':cmd.cat;
+    var addCat=cmd.cat==='All'?'Money':cmd.cat;
     v.innerHTML='<div class="cmd-hd"><div class="cmd-orb"></div><div class="cmd-ttl">COMMAND</div>'
       +'<div class="cmd-n" style="margin-left:8px;font-size:11px;letter-spacing:.08em;opacity:.65">'+nOpen+' open · '+nDone+' done</div>'
       +'<button class="cmd-ic" id="cmd-min" title="Clean view">⌄</button><button class="cmd-ic" id="cmd-x" title="Close">✕</button></div>'
