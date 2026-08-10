@@ -837,17 +837,19 @@ def _board_stats() -> str:
     open_items = [i for i in items if i.get("status") == "open"]
     lines = ["BOARD: " + " · ".join(
         f"{c} {n}" for c in _CATS if (n := sum(1 for i in open_items if cat(i) == c)))]
-    stale = []
-    for i in open_items:
-        if cat(i) == "Deals":
-            try:
-                age = (now - datetime.fromisoformat(i["ts"])).days
-                if age >= 7:
-                    stale.append(f"{i.get('text','')[:48]} ({age}d)")
-            except Exception:
-                pass
-    if stale:
-        lines.append("STALE DEALS (no touch 7+ days): " + "; ".join(stale[:5]))
+    # PIVOT (2026-08-10): the brief now leads with the RECOVERY, so hand it the actual open
+    # Money actions and the Bills register (with due days) — the model flags what's imminent.
+    money = [i.get("text", "") for i in open_items if cat(i) == "Money"]
+    if money:
+        lines.append("OPEN MONEY ACTIONS (priority — flag anything time-critical):\n"
+                     + "\n".join(f"  - {t[:110]}" for t in money[:12]))
+    bills = [i.get("text", "") for i in open_items if cat(i) == "Bills"]
+    if bills:
+        lines.append("BILLS ON FILE (each notes its due day — call out any due in the next few days):\n"
+                     + "\n".join(f"  - {t[:90]}" for t in bills[:18]))
+    jobs = [i.get("text", "") for i in open_items if cat(i) == "Job Hunt"]
+    if jobs:
+        lines.append("JOB HUNT / INCOME MOVES:\n" + "\n".join(f"  - {t[:90]}" for t in jobs[:6]))
     # Wins from memory (the win-logger writes "Deal won:" / "Goal reached:" facts)
     try:
         wins = [f for f in db.read_facts_full()
@@ -896,21 +898,31 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             fb_line = "\n\nNOTE: Brady thumbed-down the last brief — tighten it, drop filler, sharper priorities."
         elif fb.get("text", "").endswith(":up"):
             fb_line = "\n\nNOTE: Brady liked the last brief — keep this style."
+        # PIVOT (2026-08-10): Brady stepped back from GFI/PFI to dig out financially. The brief
+        # leads with the RECOVERY — money/tax deadlines, bills due, income moves — NOT the old
+        # EMD/business chase. Never mention EMD. Keep the Gabby situation OUT of the pushed text
+        # (this lands on his lock screen where she might see) unless he himself raised it today.
         if kind == "morning":
             ask = (
-                "Write Brady's MORNING BRIEF as Ace — his JARVIS-style chief of staff waking up "
-                "with him. Punchy, warm, zero fluff, ~140 words max. Structure: (1) one-line "
-                "greeting with the weather beat; (2) TODAY — his schedule turned into a game "
-                "plan, top 3 moves in priority order; (3) BUSINESS PULSE — one tight line from "
-                "the board stats (deals moving, anything stale to touch, wins momentum); "
-                "(4) one EMD-goal push line. Plain text, short lines, no markdown headers."
+                "Write Brady's MORNING BRIEF as Ace — his chief of staff for his FINANCIAL "
+                "RECOVERY right now. Punchy, warm, steady, zero fluff, ~140 words max. Structure: "
+                "(1) one-line greeting with the weather beat; (2) TODAY — top 3 moves in priority "
+                "order, leading with anything TIME-CRITICAL from the money/bills data below "
+                "(an approaching tax or IRS deadline, a bill due in the next few days, a job-hunt "
+                "step), blended with his schedule; (3) MONEY PULSE — one tight, honest line on "
+                "where the recovery stands (a deadline, a bill coming due, an income move, or a "
+                "win); (4) one grounded push toward the stable-income floor / getting out of the "
+                "hole. Do NOT mention EMD or the old business goals. Do NOT put anything about "
+                "Gabby or the money he hid in this text. Plain text, short lines, no markdown."
             )
         else:
             ask = (
-                "Write Brady's END-OF-DAY RECAP as Ace. Warm, brief, ~110 words max. Structure: "
-                "(1) what got DONE today (from the thread/board); (2) what carries to tomorrow "
-                "(top 2-3, from open board items + tomorrow's first event); (3) one genuine "
-                "one-line push tied to his goals. Plain text, no markdown headers."
+                "Write Brady's END-OF-DAY RECAP as Ace, his recovery chief of staff. Warm, brief, "
+                "~110 words max. Structure: (1) what got DONE today (from the thread/board); "
+                "(2) what carries to tomorrow — top 2-3, leading with any imminent money/tax "
+                "deadline or bill due; (3) one genuine, steadying push toward the income floor / "
+                "digging out. Do NOT mention EMD. Do NOT reference the Gabby situation in this "
+                "text. Plain text, no markdown headers."
             )
         return (
             f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
