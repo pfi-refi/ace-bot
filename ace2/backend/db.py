@@ -439,7 +439,11 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     if dedup:
         norm = _norm_item(text)
         if norm:
-            best, best_score = None, 0.0
+            # Track the best SAME-COLUMN match and the best cross-column match separately, so a
+            # same-column twin always wins the dup decision even when a different column also
+            # scores high (else the newer cross-column item could shadow a real same-column dup).
+            best, best_score = None, 0.0           # best cross-column (different column) match
+            best_sc, best_sc_score = None, 0.0     # best SAME-column match
             for it in read_items(active_only=False):
                 other = _norm_item(it.get("text", ""))
                 if not other:
@@ -457,11 +461,14 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                     score = 0.85
                 else:
                     score = inter / union
-                if score > best_score:
+                if _same_col(it):
+                    if score > best_sc_score:
+                        best_sc_score, best_sc = score, it
+                elif score > best_score:
                     best_score, best = score, it
-            if best and best_score >= 0.85:
-                if _same_col(best):
-                    return True, {**best, "dup": True}
+            if best_sc and best_sc_score >= 0.85:
+                return True, {**best_sc, "dup": True}          # true same-column twin
+            if best and best_score >= 0.85:                     # only a cross-column match
                 similar = {"id": best["id"], "text": best["text"], "status": best["status"]}
             # Trigram second opinion: catches rewordings token overlap can't (nicknames,
             # typos, mashed words). Index already exists — this was only used by recall.
