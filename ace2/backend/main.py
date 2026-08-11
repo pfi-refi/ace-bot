@@ -583,17 +583,20 @@ async def daybank_categorize():
     resp = await client.messages.create(
         model=chat.LEARN_MODEL, max_tokens=1500,
         messages=[{"role": "user", "content": (
-            "Assign each of Brady's business tasks a single CATEGORY from exactly: Deals, Agents, "
-            "Admin, Networking, Business, Tech. Reply one per line, EXACTLY: <number>. <Category>\n\n"
+            "Assign each of Brady's tasks a single CATEGORY from exactly: "
+            + ", ".join(db.CATEGORIES)
+            + ". Reply one per line, EXACTLY: <number>. <Category>\n\n"
             + numbered)}])
     out = "".join(getattr(b, "text", "") for b in resp.content)
+    _CANON = {c.lower(): c for c in db.CATEGORIES}
     done = 0
     for ln in out.split("\n"):
-        m = re.match(r"\s*(\d+)\.\s*([A-Za-z]+)", ln)
+        m = re.match(r"\s*(\d+)\.\s*(.+?)\s*$", ln)   # capture the rest, so 'Job Hunt' survives
         if not m:
             continue
-        idx, cat = int(m.group(1)), m.group(2).capitalize()
-        if 0 <= idx < len(untagged) and cat in CATS:
+        idx = int(m.group(1))
+        cat = _CANON.get(m.group(2).strip().lower())   # case/space-insensitive → canonical
+        if cat and 0 <= idx < len(untagged) and cat in CATS:
             it = untagged[idx]
             newtags = [t for t in (it.get("tags") or []) if t not in CATS] + [cat]
             if await asyncio.to_thread(_db.set_item_tags, it["id"], newtags):
@@ -782,8 +785,8 @@ async def graph(refresh: int = 0):
         '  type "person"   — an agent, prospect, client, referral partner or family member\n'
         '  type "deal"     — a specific transaction or policy (e.g. "Kiana Wiggins deal", '
         '"Miller refi")\n'
-        '  type "category" — ONLY these eight board columns, and only when something '
-        "connects to them: Deals, Agents, Admin, Networking, Business, Tech, Personal, Goals\n\n"
+        '  type "category" — ONLY these board columns, and only when something connects to '
+        "them: " + ", ".join(db.CATEGORIES) + "\n\n"
         "EDGES — how they actually connect. `kind` is a short snake_case verb read "
         "source→target, e.g. deal_of, works_with, recruited_by, referred_by, client_of, "
         "married_to, owns, belongs_to. Example: {\"source\":\"Kiana Wiggins deal\","
@@ -1746,14 +1749,20 @@ async def bridge_jobs(request: Request):
         if (last.get("text") or "") == today:
             chat._brief_sent[kind] = today
             continue
+        # CLAIM FIRST — BEFORE the multi-second compose (2026-08-11 review fix). _brief_sent is
+        # shared in-process with _brief_loop, so claiming now makes the loop skip; claiming AFTER
+        # compose left a window where the loop could send the same brief (double push).
+        chat._brief_sent[kind] = today
+        await asyncio.to_thread(_db.add_summary, today, f"brief_{kind}")
         prompt = await chat.compose_brief_prompt(kind)
         if not prompt:
-            continue
-        chat._brief_sent[kind] = today                                # claim-first
-        await asyncio.to_thread(_db.add_summary, today, f"brief_{kind}")
+            continue   # claimed but nothing to compose (rare); never double-sends
         jobs.append({"job": "brief", "kind": kind, "prompt": prompt, "max_tokens": 400})
     sweep = await chat.compose_sweep()
     if not sweep.get("skipped"):
+        # Claim the sweep hash so the in-server _learn_loop won't ALSO run it on the metered API
+        # (the double-burn the Max bridge exists to prevent).
+        chat._learn_state["last_hash"] = sweep["hash"]
         jobs.append({"job": "sweep", "hash": sweep["hash"],
                      "facts_prompt": sweep["facts_prompt"],
                      "triage_prompt": sweep["triage_prompt"],

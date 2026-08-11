@@ -633,8 +633,10 @@ async def compose_sweep(force: bool = False) -> dict:
                     "finished it). Never re-add a CLOSED item unless Brady explicitly reopened it. "
                     "New info about a tracked task is NOT a new task. For real new ones emit:\n"
                     "ADD :: CATEGORY :: task title\n"
-                    "(CATEGORY from: Deals, Agents, Admin, Networking, Business, Tech, Personal, "
-                    "Goals.) One per line, ONLY those two formats, no other text. If nothing, "
+                    "(CATEGORY from — priority: Money, Bills, Job Hunt, Goals, Personal; "
+                    "back-burner: Deals, Agents, Admin, Networking, Business, Tech. A money/tax/"
+                    "debt move → Money; a recurring bill → Bills; a job or contract-income lead → "
+                    "Job Hunt.) One per line, ONLY those two formats, no other text. If nothing, "
                     "reply NONE.\n\n"
                     "OPEN ITEMS:\n" + (tracked or "(none)") + "\n\n"
                     "RECENTLY CLOSED (do not re-add):\n" + (tracked_closed or "(none)") + "\n\n"
@@ -1132,6 +1134,44 @@ def _watch_known_sender(sender: str, vocab: set) -> bool:
                if len(w) >= 4 and w not in _WATCH_GENERIC)
 
 
+_DUE_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+
+def _extract_due(text: str, due: str, today):
+    """Best-effort due DATE from a Money/Bills item's text or due field → date | None.
+    Handles 'Aug 17', 'due the 14th', 'due 25th', 'by Nov 1' (verified against Brady's board)."""
+    import re
+    blob = f"{due or ''} {text or ''}".lower()
+    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", blob)
+    if m:
+        mon, day = _DUE_MONTHS[m.group(1)], int(m.group(2))
+        try:
+            from datetime import date as _date
+            d = _date(today.year, mon, day)
+            if (today - d).days > 40:
+                d = _date(today.year + 1, mon, day)
+            return d
+        except ValueError:
+            return None
+    m = re.search(r"\b(?:due\s+(?:the\s+)?|the\s+)(\d{1,2})(?:st|nd|rd|th)\b", blob) \
+        or re.search(r"\bdue\s+(\d{1,2})\b", blob)
+    if m:
+        day = int(m.group(1))
+        if 1 <= day <= 31:
+            from datetime import date as _date
+            y, mo = today.year, today.month
+            if day < today.day:
+                mo += 1
+                if mo > 12:
+                    mo, y = 1, y + 1
+            try:
+                return _date(y, mo, day)
+            except ValueError:
+                return None
+    return None
+
+
 def _watch_scan(inbox: list, events: list, items: list, facts: list, prior: dict, now: datetime):
     """The cheap deterministic half: what a person would actually NOTICE since the last pass.
     Returns (signals, state) — state is the fingerprint set handed to the next pass, so each
@@ -1183,20 +1223,28 @@ def _watch_scan(inbox: list, events: list, items: list, facts: list, prior: dict
             flagged.append(key)
             fset.add(key)
 
+    # RECOVERY WATCH (2026-08-11 review fix): the old signal nudged 'Deals going cold' — but
+    # deals are back-burner now. Repoint at what matters: BILLS DUE and MONEY DEADLINES within
+    # the next 3 days, parsed from the item's text/due. Fired once per (item, due-date).
+    today = now.date()
     for it in items:
-        if "Deals" not in (it.get("tags") or []):
+        cat = next((t for t in (it.get("tags") or []) if t in ("Money", "Bills")), None)
+        if not cat:
             continue
-        key = "deal:" + str(it.get("id", ""))
+        d = _extract_due(it.get("text", ""), it.get("due", ""), today)
+        if not d:
+            continue
+        days = (d - today).days
+        if not (0 <= days <= 3):
+            continue
+        key = f"due:{it.get('id', '')}:{d.isoformat()}"
         if key in fset:
             continue
-        try:
-            age = (now - datetime.fromisoformat(it["ts"])).days
-        except Exception:
-            continue
-        if age >= _WATCH_COLD_DAYS:
-            signals.append(f"DEAL GOING COLD: {it.get('text', '')[:70]} — {age} days untouched")
-            flagged.append(key)
-            fset.add(key)
+        when = "TODAY" if days == 0 else ("TOMORROW" if days == 1 else f"in {days} days")
+        label = "BILL DUE" if cat == "Bills" else "MONEY DEADLINE"
+        signals.append(f"{label} {when}: {it.get('text', '')[:80]}")
+        flagged.append(key)
+        fset.add(key)
 
     mail_state = [m.get("id") for m in inbox if m.get("id")]
     mail_state += sorted(prior_mail - set(mail_state))   # sorted → a stable blob, so state
