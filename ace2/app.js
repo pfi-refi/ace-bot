@@ -22,6 +22,14 @@
   (function () {
     var canvas = $('matrix'), ctx = canvas.getContext('2d');
     var stars = [], meteors = [], running = true;
+    // COOL MODE (2026-08-11): this full-screen starfield redrew ~60x/sec nonstop — the main
+    // source of device heat + battery drain. Cap it (~30fps active, ~8fps when idle) and honor
+    // the OS 'reduce motion' setting. Purely visual — Ace's brain/tools/voice are untouched.
+    var _rm = false; try { _rm = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+    var _lastTouch = (typeof performance !== 'undefined' ? performance.now() : 0), _lastPaint = 0;
+    ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'].forEach(function (ev) {
+      window.addEventListener(ev, function () { _lastTouch = performance.now(); }, { passive: true });
+    });
     function resize() {
       canvas.width = window.innerWidth; canvas.height = window.innerHeight;
       stars = [];
@@ -35,6 +43,11 @@
     }
     function frame(now) {
       if (!running) return;
+      requestAnimationFrame(frame);
+      var idle = (now - _lastTouch) > 20000;                       // untouched 20s → chill
+      var gap = _rm ? (idle ? 400 : 66) : (idle ? 120 : 33);       // ms between paints
+      if (now - _lastPaint < gap) return;                          // FPS cap: skip the draw, keep the loop
+      _lastPaint = now;
       var t = now / 1000;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       for (var i = 0; i < stars.length; i++) {
@@ -55,7 +68,6 @@
         ctx.strokeStyle = g; ctx.lineWidth = 1.4;
         ctx.beginPath(); ctx.moveTo(mt.x - mt.vx * 6, mt.y - mt.vy * 6); ctx.lineTo(mt.x, mt.y); ctx.stroke();
       }
-      requestAnimationFrame(frame);
     }
     resize(); window.addEventListener('resize', resize);
     document.addEventListener('visibilitychange', function () {
@@ -74,6 +86,7 @@
     var W = 240, cx = 120, cy = 120, R = 112;
     ctx.scale(canvas.width / W, canvas.height / W);   // logical 240 coords → any backing size (now 640, crisp when large)
     var speed = 1, speedT = 1, glow = 0, glowT = 0, amp = 0;
+    var _orbPaint = 0, _orm = false; try { _orm = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
     var last = performance.now();
 
     // Nebula clouds — big soft color fields that slowly orbit and morph
@@ -133,6 +146,11 @@
     var pulses = [], lastPulse = 0;
 
     function frame(now) {
+      requestAnimationFrame(frame);
+      if (document.hidden) return;                       // COOL MODE: pause the orb in background
+      var gap = amp > 0.001 ? 0 : (_orm ? 80 : 40);      // voice = smooth 60fps; idle = ~25fps
+      if (now - _orbPaint < gap) return;
+      _orbPaint = now;
       var t = now / 1000; last = now;
       speed += (speedT - speed) * .04; glow += (glowT - glow) * .05;
       // THE BREATH — slow inhale/exhale of scale and light; voice deepens it
@@ -243,8 +261,6 @@
 
       ctx.globalCompositeOperation = 'source-over';
       ctx.restore();
-
-      requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
     return { setState: setState, setAmplitude: setAmplitude };
