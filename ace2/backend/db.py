@@ -305,6 +305,14 @@ CATEGORIES = ("Money", "Bills", "Job Hunt", "Goals", "Personal",
 _CANON_CAT = {c.lower(): c for c in CATEGORIES}
 
 
+def _item_cat(it: dict):
+    """The board column an item lives in (first canonical category tag), or None."""
+    for t in (it.get("tags") or []):
+        if t in CATEGORIES:
+            return t
+    return None
+
+
 def canon_tags(tags: list) -> list:
     """Normalize category-ish tags to canonical case ('DEALS'→'Deals') and dedupe
     case-insensitively (order kept); non-category tags (e.g. 'migrated') pass through."""
@@ -416,6 +424,17 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     # 0.8-of-min gate): stemmed tokens, a looser band for longer items, plus a pg_trgm second
     # opinion. A near-miss no longer vanishes silently — it rides back as "similar" so the
     # caller (Ace) can choose update-over-twin. Data bank is small, so the full scan is cheap.
+    # CATEGORY-AWARE DEDUP (2026-08-11 review fix): dedup used to scan EVERY column, so a Bills
+    # entry worded like a Money task got swallowed and never inserted (silent data loss). Now a
+    # cross-column strong match is NOT a hard dup — it rides back as "similar" and still inserts;
+    # only a same-column match (or when the new item has no category) collapses to a true dup.
+    in_cat = next((t for t in (tags or []) if t in CATEGORIES), None)
+
+    def _same_col(it) -> bool:
+        if not in_cat:
+            return True   # uncategorized capture: preserve old cross-board dedup
+        return _item_cat(it) == in_cat
+
     similar = None
     if dedup:
         norm = _norm_item(text)
@@ -441,10 +460,12 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                 if score > best_score:
                     best_score, best = score, it
             if best and best_score >= 0.85:
-                return True, {**best, "dup": True}
+                if _same_col(best):
+                    return True, {**best, "dup": True}
+                similar = {"id": best["id"], "text": best["text"], "status": best["status"]}
             # Trigram second opinion: catches rewordings token overlap can't (nicknames,
             # typos, mashed words). Index already exists — this was only used by recall.
-            if _trgm_ok:
+            if not similar and _trgm_ok:
                 try:
                     with _conn() as c, c.cursor() as cur:
                         cur.execute(
@@ -452,12 +473,11 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                             "FROM daybank_items ORDER BY s DESC LIMIT 1", (text,))
                         row = cur.fetchone()
                     if row and row[3] is not None:
-                        if float(row[3]) >= 0.72:
-                            ex = next((i for i in read_items(active_only=False)
-                                       if i["id"] == row[0]), None)
-                            if ex:
-                                return True, {**ex, "dup": True}
-                        elif float(row[3]) >= 0.5 and not similar:
+                        ex = next((i for i in read_items(active_only=False)
+                                   if i["id"] == row[0]), None)
+                        if float(row[3]) >= 0.72 and ex and _same_col(ex):
+                            return True, {**ex, "dup": True}
+                        if float(row[3]) >= 0.5 and ex and not similar:
                             similar = {"id": row[0], "text": row[1], "status": row[2]}
                 except Exception:
                     pass

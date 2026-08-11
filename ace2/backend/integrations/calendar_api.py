@@ -48,12 +48,24 @@ _EVENT_DENY = [s.strip().lower() for s in _os.environ.get(
 
 def _cal_dropped(cal_id: str, cal_name: str) -> bool:
     nid, nm = (cal_id or "").lower(), (cal_name or "").lower()
-    return any(d in nid for d in _CAL_DENY_IDS) or any(d in nm for d in _CAL_DENY)
+    if any(d in nid for d in _CAL_DENY_IDS) or any(d in nm for d in _CAL_DENY):
+        logger.info("cal filter: dropped whole calendar '%s'", cal_name)
+        return True
+    return False
 
 
 def _event_dropped(title: str) -> bool:
+    # WORD-BOUNDARY match (2026-08-11 review fix): a bare substring test would hide a real
+    # meeting whose title merely CONTAINS a deny word (e.g. 'bpm' inside another word). Match
+    # whole words/phrases only, and LOG every drop so over-filtering is diagnosable (a filtered
+    # day used to look identical to an empty one — that was the 'missing appointment' symptom).
+    import re
     t = (title or "").lower()
-    return any(d in t for d in _EVENT_DENY)
+    for d in _EVENT_DENY:
+        if re.search(r"(?<!\w)" + re.escape(d) + r"(?!\w)", t):
+            logger.info("cal filter: dropped event '%s' (matched '%s')", title, d)
+            return True
+    return False
 
 
 def get_events_structured(days: int = 7, back_days: int = 0) -> list:
@@ -125,7 +137,7 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
                     })
             except Exception as e:
                 logger.warning("Error fetching calendar '%s': %s", cal_name, e)
-        events.sort(key=lambda x: x["start"])
+        events.sort(key=lambda x: x["iso"])   # sort by tz-normalized time, not the raw start string
         return events
     except Exception as e:
         logger.error("Structured calendar fetch error: %s", e)
@@ -406,6 +418,10 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALE
         cal_ids = [calendar_id]
         try:
             for c in service.calendarList().list().execute().get("items", []):
+                # Never delete off a filtered (shared team/interview) calendar — Ace doesn't
+                # even show those, so a loose title match must not hard-delete another's event.
+                if _cal_dropped(c["id"], c.get("summary", c["id"])):
+                    continue
                 if c["id"] not in cal_ids:
                     cal_ids.append(c["id"])
         except Exception as e:
