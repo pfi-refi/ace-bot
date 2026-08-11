@@ -510,6 +510,34 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
         return False, str(e)
 
 
+def rollover_recurring_bills() -> int:
+    """RECURRING BILLS (2026-08-11, Brady chose 'roll over monthly'): a Bills item marked paid
+    (done) in a PRIOR month reopens for the new month, so the register stays a live picture of
+    what's due — instead of a paid bill vanishing forever. Idempotent; safe to call daily."""
+    ensure_ready()
+    try:
+        now = datetime.now(EASTERN)
+        ym = (now.year, now.month)
+        reopened = 0
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT id, tags, done_ts FROM daybank_items "
+                        "WHERE status = 'done' AND done_ts IS NOT NULL")
+            for iid, tags, done_ts in cur.fetchall():
+                if not tags or "Bills" not in tags:
+                    continue
+                dts = done_ts.astimezone(EASTERN) if getattr(done_ts, "tzinfo", None) else done_ts
+                if (dts.year, dts.month) < ym:
+                    cur.execute("UPDATE daybank_items SET status = 'open', done_ts = NULL "
+                                "WHERE id = %s", (iid,))
+                    reopened += 1
+        if reopened:
+            logger.info("rollover: reopened %d recurring bill(s) for the new month", reopened)
+        return reopened
+    except Exception as e:
+        logger.warning("rollover_recurring_bills failed: %s", e)
+        return 0
+
+
 def set_item_tags(item_id: str, tags: list) -> bool:
     """Replace an item's tags (used to backfill/repair categories). True on success."""
     ensure_ready()

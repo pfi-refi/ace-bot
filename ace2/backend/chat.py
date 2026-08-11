@@ -611,7 +611,9 @@ async def compose_sweep(force: bool = False) -> dict:
                 "relative dates to absolute. One fact per line, ~20 words, no bullets/numbering. "
                 "Err toward capturing — a missed fact is worse than a slightly redundant one. "
                 "If truly nothing new, reply with the single word NONE.\n\n"
-                "KNOWN FACTS:\n" + ("\n".join(f"- {m}" for m in (existing or [])[:80]) or "(none)")
+                # MOST-RECENT known facts (2026-08-11 review fix): was existing[:80] = core +
+                # OLDEST, so the sweep never saw recently-added facts and kept re-extracting them.
+                "KNOWN FACTS:\n" + ("\n".join(f"- {m}" for m in (existing or [])[-80:]) or "(none)")
                 + f"\n\nCONVERSATION:\n{convo}")
         # TRIAGE prompt — the RECONCILER (2026-07-31 board-dedup review): sees ids + status,
         # can emit DONE to close what Brady said he finished, forbidden to re-add rewordings.
@@ -804,11 +806,20 @@ async def _graph_warm_loop() -> None:
             break                            # is raised to match so taps still hit the cache.
 
 
+_last_rollover = [None]   # date the recurring-bill rollover last ran (once per day)
+
+
 async def _ctx_keepwarm() -> None:
     while True:
         try:
             await asyncio.sleep(30)
             await _refresh_ctx()
+            # Recurring bills: reopen last month's paid bills once when the day turns over.
+            from . import db
+            today = datetime.now(EASTERN).date()
+            if db.enabled() and _last_rollover[0] != today:
+                _last_rollover[0] = today
+                await asyncio.to_thread(db.rollover_recurring_bills)
         except asyncio.CancelledError:
             break
         except Exception:

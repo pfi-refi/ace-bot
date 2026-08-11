@@ -136,8 +136,15 @@ def add_memory(new_items: list, source: str = "ace2") -> bool:
 def _reconcile_and_store(text: str, db, source: str = "ace2") -> None:
     """Decide NOOP / UPDATE / ADD for one new fact and act. UPDATE archives the superseded fact
     (kept as history — Brady's rule) and adds the fresh one, so memory compounds instead of piling."""
-    active = [f for f in db.read_facts_full()
-              if not f.get("invalid_at") and f.get("tier") != "archived"]
+    # BOUNDED candidate set (2026-08-11 review fix): reconcile used to inline ALL ~700 active
+    # facts into a Haiku prompt on EVERY fact write — O(facts²) as the store grows. Cap to core
+    # (always) + the most-recent 150 others, so the prompt stays small and cost stays flat.
+    active_all = [f for f in db.read_facts_full()
+                  if not f.get("invalid_at") and f.get("tier") != "archived"]
+    core = [f for f in active_all if f.get("tier") == "core"]
+    rest = sorted((f for f in active_all if f.get("tier") != "core"),
+                  key=lambda f: f.get("id", 0), reverse=True)[:150]
+    active = core + rest
     decision, target = _reconcile_fact(text, active)
     if decision == "noop":
         return
