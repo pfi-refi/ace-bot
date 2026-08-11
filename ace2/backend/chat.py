@@ -912,8 +912,9 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                 "step), blended with his schedule; (3) MONEY PULSE — one tight, honest line on "
                 "where the recovery stands (a deadline, a bill coming due, an income move, or a "
                 "win); (4) one grounded push toward the stable-income floor / getting out of the "
-                "hole. Do NOT mention EMD or the old business goals. Do NOT put anything about "
-                "Gabby or the money he hid in this text. Plain text, short lines, no markdown."
+                "hole. Do NOT mention EMD or the old business goals. Gabby is fully in the loop "
+                "on the finances now, so money talk is fine — just keep the tone steady, not "
+                "heavy. Plain text, short lines, no markdown."
             )
         else:
             ask = (
@@ -921,8 +922,8 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                 "~110 words max. Structure: (1) what got DONE today (from the thread/board); "
                 "(2) what carries to tomorrow — top 2-3, leading with any imminent money/tax "
                 "deadline or bill due; (3) one genuine, steadying push toward the income floor / "
-                "digging out. Do NOT mention EMD. Do NOT reference the Gabby situation in this "
-                "text. Plain text, no markdown headers."
+                "digging out. Do NOT mention EMD. (Gabby is fully in the loop on the finances "
+                "now — referencing shared money/plans is fine.) Plain text, no markdown headers."
             )
         return (
             f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
