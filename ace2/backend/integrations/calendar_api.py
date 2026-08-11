@@ -30,6 +30,32 @@ _PRIMARY_CAL_IDS = ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimp
 
 
 # ── Structured read (for the Schedule panel) ────────────────────────────────────
+# CALENDAR FILTER (2026-08-10, Brady's pivot): Ace should surface ONLY his client + personal
+# appointments — NOT the PFI team calendar, BPM/hiring interviews, or interview calendars
+# shared onto his account. Those live on shared calendars others rely on, so we FILTER his
+# VIEW (never delete). Two gates, both env-tunable so Brady can adjust without a code change:
+#   ACE2_CAL_DENY      — calendar NAME substrings to drop whole (default: the team calendar)
+#   ACE2_CAL_DENY_IDS  — calendar ID substrings to drop whole (default: the interview calendar)
+#   ACE2_EVENT_DENY    — event TITLE substrings to drop even off a kept calendar (BPM etc.)
+import os as _os
+_CAL_DENY = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY", "team calendar").split(",") if s.strip()]
+_CAL_DENY_IDS = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com").split(",") if s.strip()]
+_EVENT_DENY = [s.strip().lower() for s in _os.environ.get(
+    "ACE2_EVENT_DENY",
+    "bpm,hiring,interview,hierarchy training,base shop,rblc,live calling,gfi lgnds,momentum monday",
+).split(",") if s.strip()]
+
+
+def _cal_dropped(cal_id: str, cal_name: str) -> bool:
+    nid, nm = (cal_id or "").lower(), (cal_name or "").lower()
+    return any(d in nid for d in _CAL_DENY_IDS) or any(d in nm for d in _CAL_DENY)
+
+
+def _event_dropped(title: str) -> bool:
+    t = (title or "").lower()
+    return any(d in t for d in _EVENT_DENY)
+
+
 def get_events_structured(days: int = 7, back_days: int = 0) -> list:
     """Return events across all calendars as a list of dicts.
 
@@ -54,6 +80,8 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
         for calendar in calendars:
             cal_id = calendar["id"]
             cal_name = calendar.get("summary", cal_id)
+            if _cal_dropped(cal_id, cal_name):
+                continue   # team / interview calendar — never surfaced to Ace
             try:
                 result = service.events().list(
                     calendarId=cal_id,
@@ -68,6 +96,8 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
                         continue
                     seen_ids.add(event_id)
                     summary = event.get("summary", "No title")
+                    if _event_dropped(summary):
+                        continue   # BPM / interview / training block — filtered from his view
                     start = event.get("start", {})
                     start_dt_str = start.get("dateTime", start.get("date", ""))
                     if "T" in start_dt_str:
@@ -117,6 +147,8 @@ def get_calendar_range(start_offset_days: int = 0, num_days: int = 7) -> str:
         win_end = win_start + timedelta(days=num_days)
         events, seen = [], set()
         for cal in service.calendarList().list().execute().get("items", []):
+            if _cal_dropped(cal["id"], cal.get("summary", cal["id"])):
+                continue   # team / interview calendar — filtered from Ace's view
             try:
                 res = service.events().list(
                     calendarId=cal["id"], timeMin=win_start.isoformat(), timeMax=win_end.isoformat(),
@@ -127,6 +159,8 @@ def get_calendar_range(start_offset_days: int = 0, num_days: int = 7) -> str:
                     if eid in seen:
                         continue
                     seen.add(eid)
+                    if _event_dropped(ev.get("summary", "")):
+                        continue   # BPM / interview / training block
                     start = ev.get("start", {})
                     s = start.get("dateTime", start.get("date", ""))
                     if "T" in s:
