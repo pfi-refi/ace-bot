@@ -443,6 +443,58 @@
     checkConvai();
     loadHistory();   // renders the recent thread, then drops the greeting under it
     maybePushPrompt();   // one-time "let Ace reach your phone" offer (no-op if unsupported/unset)
+    syncDiscreet();      // reflect the saved Discreet Mode state on the 🔒 toggle
+    maybeAutoListen();   // opened via the "Ace" Siri Shortcut? start listening hands-free
+  }
+
+  /* DISCREET MODE (2026-08-11): a 🔒 toggle so Ace won't say dollar figures out loud when
+     Brady's around people — he offers to read them or show them on screen instead. Server-side
+     setting (so voice + brief pushes both respect it); the button just mirrors/flips it. */
+  var discreetOn = false;
+  function paintDiscreet() {
+    var b = $('discreet-btn'); if (!b) return;
+    b.classList.toggle('on', discreetOn);
+    b.setAttribute('aria-pressed', String(discreetOn));
+    b.textContent = discreetOn ? '🔒' : '🔓';
+    b.title = discreetOn
+      ? 'Discreet mode ON — Ace keeps money quiet (tap to turn off)'
+      : 'Discreet mode OFF — tap when you’re around people so Ace won’t say money out loud';
+  }
+  function syncDiscreet() {
+    fetch(API + '/settings', { headers: headers() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d) { discreetOn = !!d.discreet; paintDiscreet(); } })
+      .catch(function () {});
+  }
+  (function () {
+    var b = $('discreet-btn'); if (!b) return;
+    b.addEventListener('click', function () {
+      var want = !discreetOn;
+      discreetOn = want; paintDiscreet();   // optimistic
+      fetch(API + '/settings/discreet', { method: 'POST', headers: headers(), body: JSON.stringify({ on: want }) })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d) { discreetOn = !!d.discreet; } paintDiscreet(); addAceMessage(discreetOn ? '🔒 Discreet mode on — I’ll keep the money talk off the speaker and offer to show you instead.' : '🔓 Discreet mode off — back to normal.'); })
+        .catch(function () { discreetOn = !want; paintDiscreet(); });
+    });
+  })();
+
+  /* AUTO-LISTEN (2026-08-11): the "Ace" Siri Shortcut opens the app with ?listen=1 (or #listen)
+     so Ace starts listening the moment he loads — a wake word via Siri. iOS may still require one
+     tap to grant the mic (Apple blocks auto-mic without a gesture); if so, the mic button pulses. */
+  function maybeAutoListen() {
+    var want = /[?&#]listen(=1)?\b/.test(location.search + location.hash);
+    if (!want) return;
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}   // don't re-trigger on refresh
+    setTimeout(function () {
+      try {
+        if (aceMode !== 'voice') setMode('voice');
+        state.handsFree = true; startMic();
+      } catch (e) {}
+      // If the browser blocked the mic without a tap, draw the eye to the mic button.
+      setTimeout(function () {
+        if (!state.micActive) { var m = $('mic-btn'); if (m) { m.classList.add('active'); setTimeout(function(){ if(!state.micActive) m.classList.remove('active'); }, 4000); } }
+      }, 900);
+    }, 700);
   }
   /* Last ~18 turns of Ace 2.0's own history, preloaded so the panel opens with
      context instead of empty (Brady: "see history without always asking him").

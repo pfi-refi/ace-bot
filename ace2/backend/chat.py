@@ -167,6 +167,47 @@ MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers t
 MAX_TOOL_ITERS = 8
 NOW_WINDOW_MIN = 90  # an event that started within this many minutes reads as "in progress"
 
+# ── DISCREET MODE (2026-08-11, Brady) — when he's around people, Ace must not AIR OUT his
+# finances out loud. Single-user setting, stored in the db (kind='setting_discreet') and mirrored
+# in this process flag for free reads. Set via POST /settings/discreet; loaded at boot.
+_discreet = [False]
+
+
+def load_discreet() -> bool:
+    try:
+        from . import db
+        if db.enabled():
+            _discreet[0] = (db.latest_summary("setting_discreet").get("text") or "off") == "on"
+    except Exception:
+        pass
+    return _discreet[0]
+
+
+def set_discreet(on: bool) -> bool:
+    _discreet[0] = bool(on)
+    try:
+        from . import db
+        if db.enabled():
+            db.add_summary("on" if on else "off", "setting_discreet")
+    except Exception:
+        pass
+    return _discreet[0]
+
+
+def _discreet_note() -> str:
+    """Behavior directive injected into live context when Discreet Mode is on."""
+    if not _discreet[0]:
+        return ""
+    return (
+        "\n\n★ DISCREET MODE IS ON — Brady may be around other people, so do NOT say exact "
+        "dollar amounts, balances, debts, or financial specifics OUT LOUD on a spoken turn. "
+        "When he asks about money by voice, OFFER first — naturally, e.g. \"I've got your "
+        "numbers — want me to read them out, or just put them on your screen?\" — and use "
+        "display_card to show them silently if he'd rather. Read figures aloud ONLY if he says "
+        "yes or that he's private. TYPED replies MAY include the numbers (he's reading them, "
+        "not broadcasting). Non-financial talk is completely normal — this only guards money."
+    )
+
 _client = None
 
 
@@ -559,6 +600,7 @@ async def prime_ctx() -> None:
     """Warm the cache at startup and start the background loops (called once from main.py):
     the context keep-warm AND the learning sweep (Ace teaching himself from conversations)."""
     await _refresh_ctx()
+    await asyncio.to_thread(load_discreet)   # remember the Discreet Mode setting across restarts
     if not _ctx_keepwarm_started[0]:
         _ctx_keepwarm_started[0] = True
         asyncio.create_task(_ctx_keepwarm())
@@ -972,8 +1014,12 @@ async def deliver_brief(kind: str, text: str) -> str:
     # never fails because of it.
     try:
         from .main import send_push
-        send_push("ACE · Morning Brief" if kind == "morning" else "ACE · Evening Recap",
-                  text, "/")
+        title = "ACE · Morning Brief" if kind == "morning" else "ACE · Evening Recap"
+        # DISCREET MODE: keep dollar figures OFF the lock screen — send a generic teaser and
+        # keep the real brief inside the app (it's in the thread + HUD already).
+        body = ("Your game plan's ready — open Ace to read it." if _discreet[0]
+                else text)
+        send_push(title, body, "/")
     except Exception as e:
         logger.warning("brief phone push skipped: %s", e)
     try:
@@ -1621,7 +1667,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
 
     try:
         ctx = await (_fast_context() if fast else _live_context())
-        system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + ctx
+        system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()
         messages = await _load_messages(user_text, prior)
     except Exception as e:
         logger.error("context build failed: %s", e)
@@ -1653,7 +1699,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             cached_system = [
                 {"type": "text", "text": build_system_prompt(),
                  "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
+                {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()},
             ]
             stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=cached_system,
                                  messages=messages, tools=voice_tools)
@@ -1674,7 +1720,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             typed_system = [
                 {"type": "text", "text": build_system_prompt(),
                  "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx},
+                {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()},
             ]
             stream_kwargs = dict(
                 model=MODEL, max_tokens=MAX_TOKENS, system=typed_system, messages=messages,

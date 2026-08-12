@@ -304,6 +304,23 @@ async def session():
     return {"ok": True}
 
 
+@app.get("/settings", dependencies=[Depends(require_auth)])
+async def get_settings():
+    """Client reads these on load to sync toggle state (e.g. Discreet Mode)."""
+    return {"discreet": chat._discreet[0]}
+
+
+class DiscreetReq(BaseModel):
+    on: bool = False
+
+
+@app.post("/settings/discreet", dependencies=[Depends(require_auth)])
+async def set_discreet(req: DiscreetReq):
+    """DISCREET MODE: when on, Ace won't speak dollar figures aloud (offers to read them or
+    show them on screen) and phone-brief pushes go generic. Persisted across restarts."""
+    return {"discreet": await asyncio.to_thread(chat.set_discreet, req.on)}
+
+
 # ── Data ────────────────────────────────────────────────────────────────────────
 @app.get("/calendar", dependencies=[Depends(require_auth)])
 async def calendar(days: int = 7):
