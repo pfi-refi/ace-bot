@@ -210,6 +210,28 @@ def _discreet_note() -> str:
         "actually flip it — do NOT just claim it's already off. Non-financial talk is normal."
     )
 
+
+_PRIV_OFF = ("normal mode", "private mode off", "privacy off", "privacy is off",
+             "turn off private", "turn private off", "turn off privacy",
+             "you can say my numbers", "not private anymore")
+_PRIV_ON = ("private mode", "go private", "privacy mode", "privacy on", "discreet mode",
+            "don't say my numbers", "dont say my numbers", "keep my numbers quiet")
+
+
+def maybe_toggle_privacy(text: str):
+    """DETERMINISTIC Discreet-Mode toggle (2026-08-11): a privacy request must never depend on
+    the model choosing the tool. Match the magic phrases and flip the setting directly, BEFORE
+    the turn's context is built — so state is guaranteed correct and the directive updates the
+    same turn. OFF is checked first so 'private mode off' turns it off, not on."""
+    t = (text or "").lower()
+    if any(p in t for p in _PRIV_OFF):
+        set_discreet(False)
+        return "off"
+    if any(p in t for p in _PRIV_ON):
+        set_discreet(True)
+        return "on"
+    return None
+
 _client = None
 
 
@@ -1666,6 +1688,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     if not user_text:
         await emit("error", {"text": "Empty message"})
         return ""
+    maybe_toggle_privacy(user_text)   # flip Discreet Mode deterministically before context is built
 
     try:
         ctx = await (_fast_context() if fast else _live_context())
