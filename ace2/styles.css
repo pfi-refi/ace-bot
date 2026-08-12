@@ -833,3 +833,5 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
 
 /* Discreet-mode toggle active state (2026-08-11) */
 #discreet-btn.on { color: #ffb020; text-shadow: 0 0 10px rgba(255,176,32,.55); }
+/* Discreet toggle is a VOICE-only concern — hide it in chat mode (typed is private anyway) */
+body.mode-chat #discreet-btn { display: none; }
