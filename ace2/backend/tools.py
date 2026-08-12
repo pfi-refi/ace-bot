@@ -389,6 +389,24 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "set_privacy",
+        "description": (
+            "Turn DISCREET / PRIVATE MODE on or off. Call with on=true when Brady says something "
+            "like 'private mode', 'go private', 'don't say my numbers', 'I'm around people' — while "
+            "PRIVATE, you never say dollar amounts, balances, or financial specifics OUT LOUD; you "
+            "offer to show them on screen or read them only if he confirms he's alone. Call with "
+            "on=false when he says 'normal mode', 'off', 'I'm alone now', 'you can say numbers'. "
+            "Confirm in one short line. (Typed replies are always fine to show numbers.)"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "on": {"type": "boolean", "description": "true = go private/discreet; false = normal"},
+            },
+            "required": ["on"],
+        },
+    },
 ]
 
 # Voice-only handoff tool. NOT part of TOOLS (so the typed path, which already has the full
@@ -446,6 +464,7 @@ TOOL_LABELS = {
     "recall": "SEARCHING MEMORY",
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
+    "set_privacy": "PRIVACY",
     "capture_item": "CAPTURING",
     "update_item": "UPDATING BANK",
     "display_card": "PROJECTING",
@@ -577,6 +596,14 @@ def _do_search_drive(query, **_):
         return f"⚠️ Drive search failed: {e}"
 
 
+def _do_set_privacy(on=True, **_):
+    # Lazy import avoids a chat<->tools circular import at module load.
+    from . import chat
+    state = chat.set_discreet(bool(on))
+    return ("🔒 Private mode ON — I'll keep your money off the speaker; say 'normal mode' when you're clear."
+            if state else "🔓 Private mode OFF — I can say your numbers out loud again.")
+
+
 def _do_save_memory(fact, **_):
     try:
         # add_memory routes to the Postgres brain (uncapped append, dedup) when live, else the
@@ -660,6 +687,7 @@ _DISPATCH = {
     "save_memory": _do_save_memory,
     "capture_item": _do_capture_item,
     "update_item": _do_update_item,
+    "set_privacy": _do_set_privacy,
 }
 
 
