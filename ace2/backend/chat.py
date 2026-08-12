@@ -199,13 +199,15 @@ def _discreet_note() -> str:
     if not _discreet[0]:
         return ""
     return (
-        "\n\n★ DISCREET MODE IS ON — Brady may be around other people, so do NOT say exact "
-        "dollar amounts, balances, debts, or financial specifics OUT LOUD on a spoken turn. "
-        "When he asks about money by voice, OFFER first — naturally, e.g. \"I've got your "
-        "numbers — want me to read them out, or just put them on your screen?\" — and use "
-        "display_card to show them silently if he'd rather. Read figures aloud ONLY if he says "
-        "yes or that he's private. TYPED replies MAY include the numbers (he's reading them, "
-        "not broadcasting). Non-financial talk is completely normal — this only guards money."
+        "\n\n★ PRIVACY / DISCREET MODE IS CURRENTLY ON (state = ON). Brady may be around other "
+        "people, so do NOT say exact dollar amounts, balances, debts, or financial specifics OUT "
+        "LOUD on a spoken turn. When he asks about money by voice, OFFER first — naturally, e.g. "
+        "\"want me to read them out, or just put them on your screen?\" — and use display_card to "
+        "show them silently if he'd rather. Read figures aloud ONLY if he says yes or that he's "
+        "private. TYPED replies MAY include the numbers (he's reading, not broadcasting). "
+        "TURNING IT OFF: privacy is ON right now — if Brady says 'normal mode', 'turn it off', "
+        "'I'm alone now', or 'you can say my numbers', you MUST call set_privacy(on=false) to "
+        "actually flip it — do NOT just claim it's already off. Non-financial talk is normal."
     )
 
 _client = None
