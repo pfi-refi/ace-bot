@@ -1505,6 +1505,16 @@ async def _watch_pass_once(force: bool = False, dry_run: bool = False) -> dict:
             await publish_stage_event("nudge", {"text": delivered})
         except Exception:
             pass
+        # …and to the PHONE (Stage ⑦, 2026-08-13). The HUD nudge only reaches an OPEN tab — this
+        # is the one that lands on a locked screen when he's away from the desk (the concrete-pour
+        # case). Discreet mode keeps the specifics (dollars, names) OFF the lock screen: generic
+        # teaser out, full text stays in-app. Fire-and-forget; inert until VAPID keys are set.
+        try:
+            from .main import send_push
+            body = ("Ace has a heads-up for you — open to read." if _discreet[0] else text)
+            send_push("ACE · Heads-up", body, "/")
+        except Exception as e:
+            logger.warning("nudge phone push skipped: %s", e)
         logger.info("nudge delivered (%d today): %s", sent_today + 1, text[:80])
         return {"nudged": True, "text": delivered, "count_today": sent_today + 1, "signals": signals}
     except Exception as e:
