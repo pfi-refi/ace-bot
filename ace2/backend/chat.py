@@ -999,37 +999,75 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             fb_line = "\n\nNOTE: Brady thumbed-down the last brief — tighten it, drop filler, sharper priorities."
         elif fb.get("text", "").endswith(":up"):
             fb_line = "\n\nNOTE: Brady liked the last brief — keep this style."
+        # SITUATIONAL DELTA (Stage ③, 2026-08-13): hand the brief the CHANGE since the last one —
+        # what Brady closed and what landed on the board — so it SYNTHESIZES the day (leads with
+        # "here's what moved") instead of reciting the whole register. Morning looks back ~20h
+        # (yesterday + overnight); EOD looks back to 4am (today's work). This is the fix for his
+        # "briefs are generic and repetitive" complaint: no delta some days → the brief says so.
+        try:
+            all_items = await asyncio.to_thread(db.read_items, False)
+        except Exception:
+            all_items = []
+        cutoff = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
+                  else now - timedelta(hours=20))
+        cut_iso = cutoff.isoformat()
+        _CATS = ("Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals",
+                 "Agents", "Admin", "Networking", "Business", "Tech")
+        def _cat_of(it):
+            return next((t for t in (it.get("tags") or []) if t in _CATS), "")
+        done_recent = [i for i in all_items
+                       if i.get("status") == "done" and (i.get("done_ts") or "") >= cut_iso]
+        new_recent = [i for i in all_items
+                      if i.get("status") == "open" and (i.get("ts") or "") >= cut_iso]
+        dl = []
+        if done_recent:
+            dl.append("KNOCKED OUT since the last brief:")
+            dl += [f"  ✓ {i['text'][:72]}" for i in done_recent[:8]]
+        if new_recent:
+            dl.append("NEW on the board since the last brief:")
+            dl += [f"  + {i['text'][:72]}" + (f"  [{c}]" if (c := _cat_of(i)) else "")
+                   for i in new_recent[:8]]
+        delta_block = "\n".join(dl) or "(nothing closed or added since the last brief)"
         # PIVOT (2026-08-10): Brady stepped back from GFI/PFI to dig out financially. The brief
         # leads with the RECOVERY — money/tax deadlines, bills due, income moves — NOT the old
         # EMD/business chase. Never mention EMD. Keep the Gabby situation OUT of the pushed text
         # (this lands on his lock screen where she might see) unless he himself raised it today.
         if kind == "morning":
             ask = (
-                "Write Brady's MORNING BRIEF as Ace — his chief of staff for his FINANCIAL "
-                "RECOVERY right now. Punchy, warm, steady, zero fluff, ~140 words max. Structure: "
-                "(1) one-line greeting with the weather beat; (2) TODAY — top 3 moves in priority "
-                "order, leading with anything TIME-CRITICAL from the money/bills data below "
-                "(an approaching tax or IRS deadline, a bill due in the next few days, a job-hunt "
-                "step), blended with his schedule; (3) MONEY PULSE — one tight, honest line on "
-                "where the recovery stands (a deadline, a bill coming due, an income move, or a "
-                "win); (4) one grounded push toward the stable-income floor / getting out of the "
-                "hole. Do NOT mention EMD or the old business goals. Gabby is fully in the loop "
-                "on the finances now, so money talk is fine — just keep the tone steady, not "
-                "heavy. Plain text, short lines, no markdown."
+                "You are Ace, Brady's chief of staff, writing his MORNING BRIEF for his FINANCIAL "
+                "RECOVERY. This is NOT a template to fill — it's a SYNTHESIS. Read the CHANGE SINCE "
+                "THE LAST BRIEF, the recent thread, his REAL schedule, and the board data below, "
+                "then tell him the true shape of today in your own words, woven naturally (never as "
+                "labeled sections): a one-line human open with the weather beat; then — only if "
+                "there's something real — what he moved since the last brief and what's new; then "
+                "the 1-3 things that GENUINELY matter today, led by anything time-critical from the "
+                "money/bills data (a tax/IRS deadline, a bill due within ~3 days, an income move) "
+                "blended with his actual appointments; then one honest, steadying line on where the "
+                "recovery stands. HARD RULES: surface only what's IMMINENT or decision-worthy — do "
+                "NOT list every bill or open item; the board data is REFERENCE to pull from, never "
+                "to recite. Vary it day to day — never open the same way twice. On a quiet day, say "
+                "so plainly instead of manufacturing urgency. ~130 words. No EMD, no old business "
+                "goals. Gabby is fully in the loop on the money, so referencing it is fine — keep "
+                "the tone steady, not heavy. Plain text, short lines, no markdown, no section labels."
             )
         else:
             ask = (
-                "Write Brady's END-OF-DAY RECAP as Ace, his recovery chief of staff. Warm, brief, "
-                "~110 words max. Structure: (1) what got DONE today (from the thread/board); "
-                "(2) what carries to tomorrow — top 2-3, leading with any imminent money/tax "
-                "deadline or bill due; (3) one genuine, steadying push toward the income floor / "
-                "digging out. Do NOT mention EMD. (Gabby is fully in the loop on the finances "
-                "now — referencing shared money/plans is fine.) Plain text, no markdown headers."
+                "You are Ace, Brady's recovery chief of staff, writing his END-OF-DAY recap. A "
+                "SYNTHESIS, not a template. From the CHANGE SINCE THE LAST BRIEF and the thread, "
+                "tell him honestly how today actually went and what tomorrow really needs, woven "
+                "naturally (no section labels): what he genuinely moved today — name real things "
+                "from the delta/thread, never invent progress; then the 1-3 that carry to tomorrow, "
+                "led by any imminent money/tax deadline or bill due; then one steadying line toward "
+                "the income floor. Surface only what matters — don't recite the board. Vary it; if "
+                "it was a slow day, own it. ~100 words. No EMD. Gabby's in the loop, so shared money "
+                "talk is fine. Plain text, no markdown, no section labels."
             )
         return (
             f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
             f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
-            f"{stats}\n\nHIS GOALS:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+            f"CHANGE SINCE THE LAST BRIEF:\n{delta_block}\n\n"
+            f"BOARD DATA (reference — pull only what's imminent, do NOT recite):\n{stats}\n\nHIS GOALS:\n"
+            + ("\n".join(f"- {g}" for g in goals) or "(none)")
             + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
                + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
             + fb_line
