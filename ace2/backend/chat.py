@@ -928,16 +928,26 @@ def _board_stats() -> str:
     open_items = [i for i in items if i.get("status") == "open"]
     lines = ["BOARD: " + " · ".join(
         f"{c} {n}" for c in _CATS if (n := sum(1 for i in open_items if cat(i) == c)))]
-    # PIVOT (2026-08-10): the brief now leads with the RECOVERY, so hand it the actual open
-    # Money actions and the Bills register (with due days) — the model flags what's imminent.
-    money = [i.get("text", "") for i in open_items if cat(i) == "Money"]
+    # PIVOT (2026-08-10) + deterministic dates (2026-08-13): hand the brief the open Money
+    # actions and the Bills register with a PRE-COMPUTED [DUE ...] label per item, so the model
+    # never guesses timing (it was saying 'tomorrow' for something 5 days out).
+    def _line(i, cap=104):
+        t = (i.get("text", "") or "")[:cap]
+        dd = i.get("due_days")
+        if dd is None:
+            return f"  - {t}"
+        when = ("DUE TODAY" if dd == 0 else "DUE TOMORROW" if dd == 1
+                else f"due in {dd} days" if dd > 0 else f"{abs(dd)} days OVERDUE")
+        on = i.get("due_on") or ""
+        return f"  - {t}  [{when}{f' — {on}' if on else ''}]"
+    money = [i for i in open_items if cat(i) == "Money"]
     if money:
         lines.append("OPEN MONEY ACTIONS (priority — flag anything time-critical):\n"
-                     + "\n".join(f"  - {t[:110]}" for t in money[:12]))
-    bills = [i.get("text", "") for i in open_items if cat(i) == "Bills"]
+                     + "\n".join(_line(i) for i in sorted(money, key=lambda x: (x.get("due_days") is None, x.get("due_days", 999)))[:12]))
+    bills = [i for i in open_items if cat(i) == "Bills"]
     if bills:
-        lines.append("BILLS ON FILE (each notes its due day — call out any due in the next few days):\n"
-                     + "\n".join(f"  - {t[:90]}" for t in bills[:18]))
+        lines.append("BILLS (the [DUE ...] label is EXACT — use it, never compute a date yourself):\n"
+                     + "\n".join(_line(i) for i in sorted(bills, key=lambda x: (x.get("due_days") is None, x.get("due_days", 999)))[:18]))
     jobs = [i.get("text", "") for i in open_items if cat(i) == "Job Hunt"]
     if jobs:
         lines.append("JOB HUNT / INCOME MOVES:\n" + "\n".join(f"  - {t[:90]}" for t in jobs[:6]))
@@ -1227,42 +1237,8 @@ def _watch_known_sender(sender: str, vocab: set) -> bool:
                if len(w) >= 4 and w not in _WATCH_GENERIC)
 
 
-_DUE_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
-
-
-def _extract_due(text: str, due: str, today):
-    """Best-effort due DATE from a Money/Bills item's text or due field → date | None.
-    Handles 'Aug 17', 'due the 14th', 'due 25th', 'by Nov 1' (verified against Brady's board)."""
-    import re
-    blob = f"{due or ''} {text or ''}".lower()
-    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", blob)
-    if m:
-        mon, day = _DUE_MONTHS[m.group(1)], int(m.group(2))
-        try:
-            from datetime import date as _date
-            d = _date(today.year, mon, day)
-            if (today - d).days > 40:
-                d = _date(today.year + 1, mon, day)
-            return d
-        except ValueError:
-            return None
-    m = re.search(r"\b(?:due\s+(?:the\s+)?|the\s+)(\d{1,2})(?:st|nd|rd|th)\b", blob) \
-        or re.search(r"\bdue\s+(\d{1,2})\b", blob)
-    if m:
-        day = int(m.group(1))
-        if 1 <= day <= 31:
-            from datetime import date as _date
-            y, mo = today.year, today.month
-            if day < today.day:
-                mo += 1
-                if mo > 12:
-                    mo, y = 1, y + 1
-            try:
-                return _date(y, mo, day)
-            except ValueError:
-                return None
-    return None
+# Due-date parsing now lives canonically in db.parse_due and read_items computes due_days per
+# item, so the watchdog just reads it['due_days'] (2026-08-13 — one parser for brief/watch/UI).
 
 
 def _watch_scan(inbox: list, events: list, items: list, facts: list, prior: dict, now: datetime):
@@ -1319,18 +1295,14 @@ def _watch_scan(inbox: list, events: list, items: list, facts: list, prior: dict
     # RECOVERY WATCH (2026-08-11 review fix): the old signal nudged 'Deals going cold' — but
     # deals are back-burner now. Repoint at what matters: BILLS DUE and MONEY DEADLINES within
     # the next 3 days, parsed from the item's text/due. Fired once per (item, due-date).
-    today = now.date()
     for it in items:
         cat = next((t for t in (it.get("tags") or []) if t in ("Money", "Bills")), None)
         if not cat:
             continue
-        d = _extract_due(it.get("text", ""), it.get("due", ""), today)
-        if not d:
+        days = it.get("due_days")   # deterministic, computed in db.read_items
+        if days is None or not (0 <= days <= 3):
             continue
-        days = (d - today).days
-        if not (0 <= days <= 3):
-            continue
-        key = f"due:{it.get('id', '')}:{d.isoformat()}"
+        key = f"due:{it.get('id', '')}:{it.get('due_on', '')}"
         if key in fset:
             continue
         when = "TODAY" if days == 0 else ("TOMORROW" if days == 1 else f"in {days} days")

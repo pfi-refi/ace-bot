@@ -329,6 +329,46 @@ def canon_tags(tags: list) -> list:
     return out
 
 
+_DUE_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+
+def parse_due(text: str, due: str = None, today=None):
+    """Best-effort DUE DATE from an item's text/due field → a date | None. ONE canonical
+    parser (2026-08-13) so the brief, watchdog, and the 'Due Today' lens all agree on dates —
+    no more the model guessing 'tomorrow' for the 18th. Handles 'Aug 17', 'due the 14th',
+    'due 25th', 'by Nov 1'."""
+    import re
+    from datetime import date as _date
+    if today is None:
+        today = datetime.now(EASTERN).date()
+    blob = f"{due or ''} {text or ''}".lower()
+    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", blob)
+    if m:
+        try:
+            d = _date(today.year, _DUE_MONTHS[m.group(1)], int(m.group(2)))
+            if (today - d).days > 40:
+                d = _date(today.year + 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
+            return d
+        except ValueError:
+            return None
+    m = re.search(r"\b(?:due\s+(?:the\s+)?|the\s+)(\d{1,2})(?:st|nd|rd|th)\b", blob) \
+        or re.search(r"\bdue\s+(\d{1,2})\b", blob)
+    if m:
+        day = int(m.group(1))
+        if 1 <= day <= 31:
+            y, mo = today.year, today.month
+            if day < today.day:
+                mo += 1
+                if mo > 12:
+                    mo, y = 1, y + 1
+            try:
+                return _date(y, mo, day)
+            except ValueError:
+                return None
+    return None
+
+
 def read_items(active_only: bool = True) -> list:
     ensure_ready()
     try:
@@ -336,11 +376,19 @@ def read_items(active_only: bool = True) -> list:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
                         "parent_id, superseded_by FROM daybank_items")
             rows = cur.fetchall()
-        items = [{
-            "id": r[0], "ts": r[1].isoformat(), "kind": r[2], "text": r[3], "status": r[4],
-            "tags": r[5] or [], "due": r[6], "done_ts": r[7].isoformat() if r[7] else None,
-            "parent_id": r[8], "superseded_by": r[9],
-        } for r in rows]
+        _today = datetime.now(EASTERN).date()
+        items = []
+        for r in rows:
+            it = {
+                "id": r[0], "ts": r[1].isoformat(), "kind": r[2], "text": r[3], "status": r[4],
+                "tags": r[5] or [], "due": r[6], "done_ts": r[7].isoformat() if r[7] else None,
+                "parent_id": r[8], "superseded_by": r[9],
+            }
+            # Deterministic due date (computed once here so brief / watchdog / UI all agree).
+            _d = parse_due(it["text"], it["due"], _today)
+            it["due_on"] = _d.isoformat() if _d else None
+            it["due_days"] = (_d - _today).days if _d else None
+            items.append(it)
         if active_only:
             # Active view = open items + anything CLOSED today (visible receipt, gone tomorrow).
             # 'dropped' (archived twins/mistakes) behaves exactly like done here.

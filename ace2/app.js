@@ -1265,8 +1265,8 @@
       var dot=c==='All'?'':'<span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>';
       return '<button class="cmd-chip '+(c===cmd.cat?'on':'')+'" data-cat="'+c+'">'+dot+c+'</button>';
     }).join('');
-    var LN={pipeline:'Pipeline',all:'All',done:'Done'};
-    var lenses=['pipeline','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
+    var LN={due:'Due',pipeline:'Pipeline',all:'All',done:'Done'};
+    var lenses=['due','pipeline','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
     var items=cmd.items.filter(function(x){ return cmd.cat==='All'||cmdCatOf(x)===cmd.cat; });
     // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
     // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
@@ -1275,7 +1275,16 @@
     var nDone=cmd.items.filter(function(x){return x.status==='done';}).length;
     function byAge(a,b){ return (a.ts||'')<(b.ts||'')?-1:1; }
     var body='';
-    if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
+    if(cmd.lens==='due'){
+      // DUE lens (2026-08-13): what's due, no sifting. Open items with a computed due date,
+      // grouped Overdue / Today / Tomorrow / This week (next 7d). due_days comes from the server.
+      var due=items.filter(function(x){ return x.status==='open' && x.due_days!=null && x.due_days<=7; })
+                   .sort(function(a,b){ return a.due_days-b.due_days; });
+      var buckets=[['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]];
+      buckets.forEach(function(bk){ var g=due.filter(function(x){return bk[1](x.due_days);}); if(g.length){ body+='<div class="cmd-grp">'+bk[0]+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } });
+      if(!body) body='<div class="cmd-empty">nothing due in the next 7 days ✓</div>';
+    }
+    else if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
     else if(cmd.lens==='all'){ body=items.slice().sort(byAge).filter(function(x){return x.status!=='dropped';}).map(cmdRow).join(''); }
     else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status==='open';}).sort(byAge); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
