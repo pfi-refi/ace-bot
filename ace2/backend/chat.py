@@ -349,9 +349,11 @@ async def _live_context() -> str:
         _format_weather(ok(wx, {})),
         "",
         "YOUR TASK BOARD (Ace's OWN store — THE task & pipeline system; Brady sees this as his "
-        "Command panel, organized by category. Each item has an id: complete/reopen with "
-        "update_item, capture new ones with capture_item. Google Tasks is retired — never route "
-        "tasks there unless Brady explicitly says 'Google'):",
+        "Command panel. PRIORITY columns are shown in full; back-burner is capped for focus — the "
+        "board is BIGGER than what's here. Complete/reopen with update_item, capture with "
+        "capture_item. If an item ISN'T listed below, DON'T say it doesn't exist — call update_item "
+        "with a few words in `match` and the server resolves it against the whole board. Google "
+        "Tasks is retired — never route tasks there unless Brady explicitly says 'Google'):",
         bank_str,
     ]
     return "\n".join(parts)
@@ -375,27 +377,63 @@ def _format_weather(w) -> str:
     return (" ".join(lead) + tail + loc) or "(unavailable)"
 
 
+_PRIORITY_CATS = ("Money", "Bills", "Job Hunt", "Goals", "Personal")
+_BACKBURNER_CATS = ("Deals", "Agents", "Admin", "Networking", "Business", "Tech")
+_ALL_CATS = _PRIORITY_CATS + _BACKBURNER_CATS
+
+
+def _due_tag(it) -> str:
+    """Deterministic due label from db-computed due_days — never let the model guess a date."""
+    dd = it.get("due_days")
+    if dd is None:
+        return ""
+    on = it.get("due_on") or ""
+    when = ("DUE TODAY" if dd == 0 else "DUE TOMORROW" if dd == 1
+            else f"due in {dd}d" if dd > 0 else f"{abs(dd)}d OVERDUE")
+    return f"  [{when}{f' · {on}' if on else ''}]"
+
+
 def _format_daybank(items: list) -> str:
-    """Render the data bank for Ace's context: open items first, then today's done."""
+    """Render the board for Ace's per-turn context. Stage ④ (2026-08-13): PRIORITY columns
+    (Money/Bills/Job Hunt/Goals/Personal) are shown in full, due-sorted, with EXACT due labels
+    so Ace reasons about what's imminent instead of reciting a flat 88-line wall. Back-burner
+    columns are capped and summarized — the FULL board is still reachable: update_item/complete
+    resolve by `match` text server-side, so an item Ace can't see here is still completable by a
+    few words. This cuts per-turn tokens AND sharpens what matters (his 'reason, don't recite')."""
     if not items:
         return "(nothing captured yet)"
     open_items = [it for it in items if it.get("status") == "open"]
     done_today = [it for it in items if it.get("status") == "done"]
-    _CATS = {"Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
 
     def _cat(it):
-        for t in (it.get("tags") or []):
-            if t in _CATS:
-                return f" [{t}]"
-        return ""
+        return next((t for t in (it.get("tags") or []) if t in _ALL_CATS), "Admin")
 
-    lines = []
-    for it in open_items:
-        due = f" (due {it['due']})" if it.get("due") else ""
-        lines.append(f"- [{it.get('id','?')}]{_cat(it)} {it.get('kind','note')}: {it.get('text','')}{due}")
-    for it in done_today:
-        lines.append(f"- [{it.get('id','?')}] ✓ done: {it.get('text','')}")
-    return "\n".join(lines)
+    def _row(it):
+        return f"- [{it.get('id','?')}] {(it.get('text','') or '')[:100]}{_due_tag(it)}"
+
+    def _due_key(it):
+        dd = it.get("due_days")
+        return (dd is None, dd if dd is not None else 999)
+
+    lines, back = [], []
+    for c in _PRIORITY_CATS:
+        col = sorted((it for it in open_items if _cat(it) == c), key=_due_key)
+        if col:
+            lines.append(f"{c} ({len(col)}):")
+            lines += [f"  {_row(it)[2:]}" for it in col]
+    bb = [it for it in open_items if _cat(it) in _BACKBURNER_CATS]
+    if bb:
+        bb.sort(key=_due_key)
+        CAP = 14
+        back.append(f"BACK-BURNER ({len(bb)} items — Deals/Agents/Admin/Networking/Business/Tech):")
+        back += [f"  {_row(it)[2:]}  [{_cat(it)}]" for it in bb[:CAP]]
+        if len(bb) > CAP:
+            back.append(f"  …+{len(bb) - CAP} more back-burner items (say a few words to pull or complete any — resolved by match)")
+    out = ["PRIORITY (money & life — act on these first):"] + lines + [""] + back
+    if done_today:
+        out += ["", f"DONE TODAY ({len(done_today)}): " + " · ".join(
+            (it.get('text','') or '')[:40] for it in done_today[:12])]
+    return "\n".join(out).strip()
 
 
 async def _load_messages(user_text: str, prior=None) -> list:
@@ -1606,8 +1644,10 @@ async def _fast_context() -> str:
         _format_calendar_window(events, now),
         "",
         "HIS TASK BOARD (Ace's OWN store — THE task & pipeline system, what Brady sees in his "
-        "Command panel. To mark one done, match what he says to an item below and call "
-        "update_item with its id; capture new tasks with capture_item):",
+        "Command panel. PRIORITY columns shown in full; back-burner capped — the board is BIGGER "
+        "than this. To mark one done, call update_item: use its id if it's listed, otherwise put a "
+        "few words in `match` and the server finds it across the whole board — never tell him an "
+        "item doesn't exist just because it's not shown. Capture new tasks with capture_item):",
         _format_daybank(ok(bank, [])),
         "",
         "WEATHER RIGHT NOW:",
