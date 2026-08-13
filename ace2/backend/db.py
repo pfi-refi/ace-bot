@@ -333,17 +333,14 @@ _DUE_MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 
 
-def parse_due(text: str, due: str = None, today=None):
-    """Best-effort DUE DATE from an item's text/due field → a date | None. ONE canonical
-    parser (2026-08-13) so the brief, watchdog, and the 'Due Today' lens all agree on dates —
-    no more the model guessing 'tomorrow' for the 18th. Handles 'Aug 17', 'due the 14th',
-    'due 25th', 'by Nov 1'."""
+def _find_date(s: str, today):
+    """Find the first date in a string — month+day ('aug 17') or ordinal day ('the 18th')."""
     import re
     from datetime import date as _date
-    if today is None:
-        today = datetime.now(EASTERN).date()
-    blob = f"{due or ''} {text or ''}".lower()
-    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", blob)
+    if not s:
+        return None
+    s = s.lower()
+    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", s)
     if m:
         try:
             d = _date(today.year, _DUE_MONTHS[m.group(1)], int(m.group(2)))
@@ -352,8 +349,7 @@ def parse_due(text: str, due: str = None, today=None):
             return d
         except ValueError:
             return None
-    m = re.search(r"\b(?:due\s+(?:the\s+)?|the\s+)(\d{1,2})(?:st|nd|rd|th)\b", blob) \
-        or re.search(r"\bdue\s+(\d{1,2})\b", blob)
+    m = re.search(r"\b(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b", s)
     if m:
         day = int(m.group(1))
         if 1 <= day <= 31:
@@ -366,6 +362,25 @@ def parse_due(text: str, due: str = None, today=None):
                 return _date(y, mo, day)
             except ValueError:
                 return None
+    return None
+
+
+def parse_due(text: str, due: str = None, today=None):
+    """Canonical DUE-DATE parser (2026-08-13) so the brief, watchdog, and the 'Due' lens all
+    agree — no more the model guessing 'tomorrow' for the 18th. To avoid grabbing CONTEXTUAL
+    dates ('Walter's statements Aug 6', 'Aug 4 after gym'), a date in the TEXT only counts when
+    it directly follows a due/by/pay marker; the explicit `due` FIELD is always taken as-is."""
+    import re
+    if today is None:
+        today = datetime.now(EASTERN).date()
+    d = _find_date(due, today)          # the due FIELD is unambiguous — any date in it is the due
+    if d:
+        return d
+    t = (text or "").lower()            # in TEXT, only a date right after 'due' / 'by' / 'pay'
+    for m in re.finditer(r"\b(?:due|by|pay(?:ment)?)\b", t):
+        d = _find_date(t[m.end():m.end() + 22], today)
+        if d:
+            return d
     return None
 
 
