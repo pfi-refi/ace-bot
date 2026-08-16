@@ -556,6 +556,13 @@ async def watch_run(force: bool = False, dry_run: bool = False):
     return await chat._watch_pass_once(force=force, dry_run=dry_run)
 
 
+@app.post("/reminder/run", dependencies=[Depends(require_auth)])
+async def reminder_run(force: bool = False, dry_run: bool = False):
+    """Fire ONE deterministic due-soon reminder now (test hook for the afternoon loop). force
+    skips the time-window + daily-claim gates; dry_run builds the message without delivering."""
+    return await chat._reminder_once(force=force, dry_run=dry_run)
+
+
 @app.post("/daybank/import_personal_goals", dependencies=[Depends(require_auth)])
 async def daybank_import_personal_goals(req: MigrateReq):
     """One-time: bring Brady's Google PERSONAL + GOALS lists into Ace's store (tagged Personal /

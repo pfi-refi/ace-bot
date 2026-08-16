@@ -669,6 +669,7 @@ async def prime_ctx() -> None:
         asyncio.create_task(_learn_loop())
         asyncio.create_task(_brief_loop())   # proactive: morning game plan + EOD recap
         asyncio.create_task(_watch_loop())   # ambient: he notices things and speaks up unasked
+        asyncio.create_task(_reminder_loop())   # reliable: deterministic due-today/overdue phone push
         asyncio.create_task(_graph_warm_loop())   # keep the knowledge map instant to open
 
 
@@ -1530,6 +1531,91 @@ async def _watch_loop() -> None:
         try:
             await asyncio.sleep(_WATCH_INTERVAL)
             await _watch_pass_once()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+# ── DETERMINISTIC REMINDERS — the RELIABLE due-soon ping (2026-08-16) ─────────────
+# The watchdog above is DISCRETIONARY: a model decides whether something is worth
+# interrupting Brady for, and it defaults to silence (max 3/day). Brady asked for reliable
+# reminders "outside the briefs" and got none — because each watch signal fires ONCE, to an
+# open tab, and the model usually stays quiet. THIS is the other half: a deterministic,
+# once-a-day phone push of open PRIORITY items that are overdue or due today/tomorrow. No
+# model gate — it ALWAYS fires when something's due. Runs early afternoon so it catches what
+# the morning brief flagged but he hasn't closed yet.
+_REMINDER_TIME = (13, 0)          # 1:00pm ET
+_REMINDER_WINDOW_MIN = 180        # may fire anytime in the 3h after the target, once/day
+_reminder_sent = {"date": None}   # process-local claim, mirrors the db marker
+
+
+def _reminder_scan(items: list) -> list:
+    prio = ("Money", "Bills", "Job Hunt", "Goals", "Personal")
+    hot = [i for i in items if i.get("status") == "open"
+           and any(t in prio for t in (i.get("tags") or []))
+           and i.get("due_days") is not None and i["due_days"] <= 1]
+    hot.sort(key=lambda x: x["due_days"])
+    return hot
+
+
+async def _reminder_once(force: bool = False, dry_run: bool = False) -> dict:
+    """One reminder pass. force skips the time-window + daily-claim gates (for the test hook);
+    dry_run builds the message but delivers nothing and claims nothing."""
+    from . import db
+    if not db.enabled():
+        return {"skipped": "no db"}
+    now = datetime.now(EASTERN)
+    today = now.strftime("%Y-%m-%d")
+    cur = now.hour * 60 + now.minute
+    if not force:
+        tgt = _REMINDER_TIME[0] * 60 + _REMINDER_TIME[1]
+        if not (0 <= cur - tgt <= _REMINDER_WINDOW_MIN):
+            return {"skipped": "outside window"}
+        if _reminder_sent.get("date") == today:
+            return {"skipped": "already today"}
+        mark = await asyncio.to_thread(db.latest_summary, "reminder_sent")
+        if (mark.get("text") or "") == today:
+            _reminder_sent["date"] = today
+            return {"skipped": "already today (db)"}
+    items = await asyncio.to_thread(db.read_items, False)
+    hot = _reminder_scan(items)
+    if not hot:
+        return {"skipped": "nothing due", "count": 0}   # don't claim — let it fire if one crosses later
+    def _lbl(d):
+        return "overdue" if d < 0 else "today" if d == 0 else "tomorrow"
+    def _short(t):
+        return (t.split("—")[0].split(" - ")[0]).strip()[:30]
+    parts = [f"{_short(i['text'])} ({_lbl(i['due_days'])})" for i in hot[:4]]
+    body = "Due now — " + "; ".join(parts) + (f" +{len(hot) - 4} more" if len(hot) > 4 else "")
+    if dry_run:
+        return {"would_push": True, "body": body, "count": len(hot)}
+    # CLAIM FIRST so a deploy-overlap twin can't double-push the same day
+    _reminder_sent["date"] = today
+    await asyncio.to_thread(db.add_summary, today, "reminder_sent")
+    await asyncio.to_thread(history.append, "assistant", "⏰ REMINDER — " + body)
+    try:
+        from .main import send_push
+        push_body = ("You've got items due — open Ace." if _discreet[0] else body)
+        send_push("ACE · Due Now", push_body, "/")
+    except Exception as e:
+        logger.warning("reminder push skipped: %s", e)
+    try:
+        from .main import publish_stage_event
+        await publish_stage_event("nudge", {"text": "⏰ REMINDER — " + body})
+    except Exception:
+        pass
+    logger.info("reminder pushed (%d due): %s", len(hot), body[:90])
+    return {"pushed": True, "body": body, "count": len(hot)}
+
+
+async def _reminder_loop() -> None:
+    """Sleeps first (like the others). The time-window + once-a-day db claim gate delivery, so
+    a 5-min tick is cheap and just means 'fire promptly once we're in the afternoon window'."""
+    while True:
+        try:
+            await asyncio.sleep(300)
+            await _reminder_once()
         except asyncio.CancelledError:
             break
         except Exception:
