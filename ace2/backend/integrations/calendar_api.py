@@ -432,6 +432,10 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALE
         except Exception as e:
             logger.warning("delete: calendarList failed (%s) — PFI only", e)
 
+        # Collect matches ACROSS all calendars FIRST, then act — deleting matches[0] blind (old
+        # behavior) silently removed the wrong event when two same-day titles shared a keyword
+        # (2026-08-19 audit). More than one hit → refuse and hand back candidates to disambiguate.
+        all_matches = []
         for cid in cal_ids:
             try:
                 events = service.events().list(
@@ -444,11 +448,19 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALE
             except Exception as e:
                 logger.warning("delete: list failed on %s: %s", cid, e)
                 continue
-            matches = [e for e in events if title_lower in e.get("summary", "").lower()]
-            if matches:
-                service.events().delete(calendarId=cid, eventId=matches[0]["id"]).execute()
-                return True, matches[0].get("summary", title)
-        return False, f"No event matching '{title}' on {date_str} on any calendar"
+            all_matches += [(cid, e) for e in events if title_lower in e.get("summary", "").lower()]
+        if not all_matches:
+            return False, f"No event matching '{title}' on {date_str} on any calendar"
+        if len(all_matches) > 1:
+            def _when(e):
+                s = e.get("start", {})
+                return (s.get("dateTime", "")[11:16] or "all-day")
+            opts = " | ".join(f"'{e.get('summary', '')}' ({_when(e)})" for _, e in all_matches[:6])
+            return False, ("AMBIGUOUS — more than one event matches '" + title + "' on "
+                           + date_str + ": " + opts + ". Ask Brady which one before deleting.")
+        cid, ev = all_matches[0]
+        service.events().delete(calendarId=cid, eventId=ev["id"]).execute()
+        return True, ev.get("summary", title)
     except Exception as e:
         logger.error("Calendar delete error: %s", e)
         return False, str(e)

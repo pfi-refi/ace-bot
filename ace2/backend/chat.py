@@ -147,6 +147,15 @@ def _needs_confirm(name: str, args: dict) -> bool:
     return False
 
 
+def _args_sig(clean: dict) -> str:
+    """Stable signature of the payload the confirm was ARMED on, so a 'yes' can only execute the
+    exact action Brady saw. Excludes the confirm flags (already stripped in `clean`)."""
+    try:
+        return json.dumps(clean, sort_keys=True, default=str)
+    except Exception:
+        return repr(clean)
+
+
 def _confirm_gate(name: str, args: dict, turn_id: int):
     """Returns (blocked: bool, clean_args: dict). Arms/consumes per-tool tickets.
     clean_args always has confirm flags stripped so they never reach an executor."""
@@ -156,11 +165,16 @@ def _confirm_gate(name: str, args: dict, turn_id: int):
     now = time.time()
     for k in [k for k, v in _pending_confirm.items() if now - v["ts"] > _CONFIRM_TTL_SEC]:
         _pending_confirm.pop(k, None)
+    sig = _args_sig(clean)
     ticket = _pending_confirm.get(name)
-    if args.get("confirmed") and ticket and ticket["turn"] < turn_id:
+    # A 'yes' only passes if it matches the SAME payload that was armed (2026-08-19 audit): the
+    # ticket used to key on tool NAME only, so a confirmed delete/send could execute DIFFERENT
+    # args than the ones Brady approved. Binding the signature closes that gap — a changed target
+    # falls through and RE-ARMS (asks again) instead of silently acting on the wrong thing.
+    if args.get("confirmed") and ticket and ticket["turn"] < turn_id and ticket.get("sig") == sig:
         _pending_confirm.pop(name, None)   # single-use — a fresh call must re-arm
         return False, clean
-    _pending_confirm[name] = {"turn": turn_id, "ts": now}
+    _pending_confirm[name] = {"turn": turn_id, "ts": now, "sig": sig}
     return True, clean
 EFFORT = os.environ.get("ACE2_EFFORT", "low")   # low|medium|high|xhigh|max — LEAN MODE: was medium
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
@@ -290,11 +304,27 @@ def _anthropic() -> AsyncAnthropic:
     return _client
 
 
+def _is_meta_fact(f: str) -> bool:
+    """Ace's own dev-backlog + save-narration — NOT a durable fact about Brady. The audit found
+    ~23% of the store was 'ACE SELF-NOTE:' + assistant save-confirmations, and the recent tail was
+    dominated by them, diluting every per-turn context. Filter them out of the LIVE context only
+    (the brief's self-note path and recall still read the raw store)."""
+    s = (f or "").strip().lower()
+    return (s.startswith("ace self-note")
+            or s.startswith("saved ")
+            or s.startswith("memory sweep complete")
+            or s.startswith("noting ")
+            or "new memory files written" in s)
+
+
 def _mem_slim(mem_list: list, head: int = 40, tail: int = 70) -> list:
     """SMART MEMORY TIER (2026-08-03, cost fix): the fact store crossed ~330 entries and
     re-mailing ALL of it every turn was the single biggest per-message cost. Inline =
     the head (core tier sorts first) + the most recent tail; everything in between is
-    one recall() away — Ace is TOLD that, so nothing is lost, just not re-sent."""
+    one recall() away — Ace is TOLD that, so nothing is lost, just not re-sent.
+    (2026-08-19) Ace's own SELF-NOTE / save-narration are stripped here so they never crowd
+    the live context — they remain in the raw store for the brief backlog + recall."""
+    mem_list = [m for m in mem_list if not _is_meta_fact(m)]
     if len(mem_list) <= head + tail:
         return mem_list
     return (list(mem_list[:head])
