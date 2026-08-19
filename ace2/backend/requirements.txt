@@ -6,6 +6,8 @@ pytz>=2024.1
 google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 google-api-python-client>=2.130.0
-mcp>=1.0             # MCP client SDK — dormant until MCP_SERVER_URL is set (see integrations/mcp_client.py)
+mcp>=1.6,<2          # MCP client SDK. PINNED <2: mcp 2.0.0 renamed streamablehttp_client AND changed the
+                     # streamable-http transport to yield 2 values not 3 (broke _load's 3-tuple unpack →
+                     # Workspace went dormant Aug 2026). Stay on 1.x until mcp_client is ported to the 2.x API.
 psycopg2-binary>=2.9  # Postgres driver — dormant until DATABASE_URL is set (see db.py)
 pywebpush>=1.14       # web push (VAPID) — dormant until VAPID_* are set (see main.py, docs/PUSH_SETUP.md)
