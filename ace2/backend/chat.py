@@ -43,8 +43,8 @@ from .integrations.calendar_api import (
 )
 from .integrations import mcp_client
 from .integrations.tasks_api import (
-    add_task, get_gmail_summary, get_inbox_structured, get_task_lists_grouped, get_tasks,
-    get_tasks_structured,
+    add_task, get_gmail_summary, get_inbox_structured, get_personal_inbox_structured,
+    get_task_lists_grouped, get_tasks, get_tasks_structured,
 )
 from .integrations.weather import get_weather
 from .system_prompt import build_system_prompt
@@ -336,11 +336,12 @@ def _mem_slim(mem_list: list, head: int = 40, tail: int = 70) -> list:
 async def _live_context() -> str:
     """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
     + data bank concurrently."""
-    memory, cal_all, bank, inbox, wx = await asyncio.gather(
+    memory, cal_all, bank, inbox, personal, wx = await asyncio.gather(
         asyncio.to_thread(brain.read_memory),
         asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
         asyncio.to_thread(daybank.read_items, True),
         asyncio.to_thread(get_gmail_summary),
+        asyncio.to_thread(get_personal_inbox_structured, 5),   # dormant until GOOGLE_TOKEN_JSON_PERSONAL set
         get_weather(),
         return_exceptions=True,
     )
@@ -356,6 +357,8 @@ async def _live_context() -> str:
     mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
     today_sched = _format_today_schedule(today_events, now)
     bank_str = _format_daybank(ok(bank, []))
+    p_list = ok(personal, [])   # [] until Brady links br80mcgraw — nothing shows before then
+    personal_block = "\n".join(f"- {m['from']}: {m['subject']}" for m in p_list)
     parts = [
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
@@ -372,8 +375,13 @@ async def _live_context() -> str:
         "planning; answer any date-range question from this directly):",
         _format_calendar_window(events, now),
         "",
-        "UNREAD PRIORITY INBOX (last 2 days — scan it; flag anything that needs a reply):",
+        "UNREAD PRIORITY INBOX — PFI / business (last 2 days — scan it; flag anything that needs a reply):",
         ok(inbox, "(unavailable)"),
+        *(["",
+           "PERSONAL INBOX — br80mcgraw (SEPARATE from PFI, READ-ONLY; Brady replies himself. Flag "
+           "anything that needs him — a job/recruiter reply, a personal-client note — but never send "
+           "from here):",
+           personal_block] if personal_block else []),
         "",
         "WEATHER RIGHT NOW (factor it into his day when it matters):",
         _format_weather(ok(wx, {})),

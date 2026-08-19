@@ -38,7 +38,7 @@ _PRIMARY_CAL_IDS = ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimp
 #   ACE2_CAL_DENY_IDS  — calendar ID substrings to drop whole (default: the interview calendar)
 #   ACE2_EVENT_DENY    — event TITLE substrings to drop even off a kept calendar (BPM etc.)
 import os as _os
-_CAL_DENY = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY", "team calendar").split(",") if s.strip()]
+_CAL_DENY = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY", "team calendar,lincoln troyer").split(",") if s.strip()]
 _CAL_DENY_IDS = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com").split(",") if s.strip()]
 _EVENT_DENY = [s.strip().lower() for s in _os.environ.get(
     "ACE2_EVENT_DENY",

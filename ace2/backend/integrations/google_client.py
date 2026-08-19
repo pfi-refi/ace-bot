@@ -64,3 +64,29 @@ def get_google_creds() -> Credentials:
         creds.refresh(Request())
         logger.info("Google credentials refreshed.")
     return creds
+
+
+def get_google_creds_personal():
+    """Brady's PERSONAL Gmail (br80mcgraw@gmail.com), kept SEPARATE from PFI and READ-ONLY — he
+    replies himself. DORMANT until GOOGLE_TOKEN_JSON_PERSONAL is set (VAPID/MCP dormancy pattern):
+    Ace never sees the personal inbox until Brady authorizes it and pastes the token. Returns None
+    when unset so every caller degrades to 'no personal inbox' instead of erroring."""
+    raw = os.environ.get("GOOGLE_TOKEN_JSON_PERSONAL", "").strip()
+    if not raw:
+        return None
+    try:
+        token_data = json.loads(raw)
+        creds = Credentials(
+            token=token_data.get("token"),
+            refresh_token=token_data.get("refresh_token"),
+            token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=token_data.get("client_id"),
+            client_secret=token_data.get("client_secret"),
+            scopes=token_data.get("scopes"),
+        )
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
+    except Exception as e:
+        logger.warning("personal Google creds failed to load: %s", e)
+        return None

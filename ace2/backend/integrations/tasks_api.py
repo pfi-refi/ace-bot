@@ -25,6 +25,7 @@ from .google_client import (
     EASTERN,
     MORNING_SKIP_LISTS,
     get_google_creds,
+    get_google_creds_personal,
 )
 
 logger = logging.getLogger("ace_portal.tasks")
@@ -441,6 +442,41 @@ def get_inbox_structured(max_results: int = 6) -> list:
         return out
     except Exception as e:
         logger.error("inbox structured error: %s", e)
+        return []
+
+
+def get_personal_inbox_structured(max_results: int = 5) -> list:
+    """Brady's PERSONAL inbox (br80mcgraw), kept separate from PFI. Returns [] — SILENTLY — until
+    GOOGLE_TOKEN_JSON_PERSONAL is set, so nothing shows or errors before he links it. Read-only."""
+    try:
+        creds = get_google_creds_personal()
+        if not creds:
+            return []
+        service = build("gmail", "v1", credentials=creds)
+        n = max(1, min(int(max_results), 12))
+        results = service.users().messages().list(
+            userId="me", q="is:unread newer_than:2d -category:promotions -category:social",
+            maxResults=n,
+        ).execute()
+        out = []
+        for msg in results.get("messages", []):
+            md = service.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["From", "Subject"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in md.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "Unknown")
+            if "<" in sender:
+                sender = sender.split("<")[0].strip().strip('"')
+            out.append({
+                "id": msg["id"],
+                "from": sender[:40],
+                "subject": headers.get("Subject", "No subject")[:90],
+                "snippet": md.get("snippet", "")[:120],
+            })
+        return out
+    except Exception as e:
+        logger.warning("personal inbox error (dormant until token set): %s", e)
         return []
 
 
