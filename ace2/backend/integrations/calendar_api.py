@@ -42,7 +42,12 @@ _CAL_DENY = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY", "team c
 _CAL_DENY_IDS = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com").split(",") if s.strip()]
 _EVENT_DENY = [s.strip().lower() for s in _os.environ.get(
     "ACE2_EVENT_DENY",
-    "bpm,hiring,interview,hierarchy training,base shop,rblc,live calling,gfi lgnds,momentum monday",
+    # 2026-08-19 review: DROPPED bare 'hiring' + 'interview' — they word-matched Brady's OWN
+    # job-hunt interviews, which are a top-3 priority now (Job Hunt column, system_prompt 8b),
+    # and a filtered day looks identical to an empty one. The GFI recruiting interview calendar
+    # is already dropped wholesale by ACE2_CAL_DENY_IDS, so those two generic words were pure
+    # downside. Keep only GFI-specific phrases that can't collide with a real client/job event.
+    "bpm,hierarchy training,base shop,rblc,live calling,gfi lgnds,momentum monday",
 ).split(",") if s.strip()]
 
 
