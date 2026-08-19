@@ -643,7 +643,14 @@ def _do_update_item(id="", match=None, status=None, text=None, category=None, du
     tags = None
     if category:
         _CATS = {"Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
-        it = next((x for x in daybank.read_items(False) if x.get("id") == id), None) if id else None
+        it = None
+        if id:
+            it = next((x for x in daybank.read_items(False) if x.get("id") == id), None)
+        elif match:   # resolve by match too, else re-categorizing wipes non-category tags (audit #7)
+            from . import db
+            cands = db.find_items(match, status="open")
+            if len(cands) == 1:
+                it = cands[0]
         keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
         tags = [category] + keep
     ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match)
