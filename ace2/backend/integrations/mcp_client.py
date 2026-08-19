@@ -24,13 +24,22 @@ import os
 logger = logging.getLogger("ace2.mcp")
 
 _SDK_ERR = ""
+_SDK_NAMES = ""
 try:  # the `mcp` SDK is only needed once MCP is activated; never break boot without it
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    try:
+        from mcp.client.streamable_http import streamablehttp_client
+    except ImportError:  # a newer mcp renamed the streamable-http client — accept the snake_case form
+        from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
     _SDK = True
 except Exception as _e:  # pragma: no cover — capture WHY so /diag/mcp can report it
     _SDK = False
     _SDK_ERR = f"{type(_e).__name__}: {_e}"[:300]
+    try:  # list the module's client-ish exports so we can see the real name if the guess missed
+        import mcp.client.streamable_http as _m
+        _SDK_NAMES = ",".join(n for n in dir(_m) if "client" in n.lower() and not n.startswith("__"))
+    except Exception:
+        pass
 
 _lock = asyncio.Lock()
 _schemas: list = []          # Anthropic-shaped tool schemas (cached once)

@@ -1309,6 +1309,7 @@ async def diag_mcp():
             "url_set": bool(mcp_client._url()),
             "sdk": mcp_client._SDK,
             "sdk_error": getattr(mcp_client, "_SDK_ERR", ""),
+            "sdk_names": getattr(mcp_client, "_SDK_NAMES", ""),
             "count": len(schemas),
             "tools": sorted(s["name"] for s in schemas)}
 
