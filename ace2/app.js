@@ -1771,7 +1771,10 @@
       // screenshot (well under that) goes through UNTOUCHED — the canvas step is exactly what
       // returned a BLANK image on iOS for big screenshots (Brady: "he said it was blank").
       if (!/^image\//.test(file.type || '') || file.size < 4500000) return resolve(file);
-      var url = URL.createObjectURL(file), img = new Image();
+      var done = false, url = URL.createObjectURL(file), img = new Image();
+      function finish(f) { if (done) return; done = true; try { URL.revokeObjectURL(url); } catch (e) {} resolve(f); }
+      // Never let a slow/stuck decode hang the whole capture — fall back to the original file.
+      setTimeout(function () { finish(file); }, 8000);
       img.onload = function () {
         try {
           var s = Math.min(1, 1568 / Math.max(img.width, img.height));
@@ -1781,13 +1784,12 @@
           ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height);   // no transparent→black
           ctx.drawImage(img, 0, 0, c.width, c.height);
           c.toBlob(function (b) {
-            URL.revokeObjectURL(url);
             // If the canvas blanked out (iOS) the blob is tiny — fall back to the original file.
-            resolve(b && b.size > 3000 ? new File([b], 'capture.jpg', { type: 'image/jpeg' }) : file);
+            finish(b && b.size > 3000 ? new File([b], 'capture.jpg', { type: 'image/jpeg' }) : file);
           }, 'image/jpeg', 0.86);
-        } catch (e) { URL.revokeObjectURL(url); resolve(file); }
+        } catch (e) { finish(file); }
       };
-      img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+      img.onerror = function () { finish(file); };
       img.src = url;
     });
   }
@@ -1848,8 +1850,12 @@
 
   $('clip-btn').addEventListener('click', function () { $('capture-file').click(); });
   $('capture-file').addEventListener('change', function (e) {
-    var files = e.target.files;
+    // Copy the FileList out before touching .value (iOS can clear it out from under us).
+    var files = e.target.files ? Array.prototype.slice.call(e.target.files) : [];
     e.target.value = '';        // so the SAME file picked twice still fires change
+    if (!files.length) return;
+    captureBusy = false;        // a fresh pick ALWAYS wins — never let a stuck flag swallow it silently
+    setChat(true);              // guarantee he SEES the read, even if he tapped 📎 from the orb dashboard
     captureFiles(files);
   });
 

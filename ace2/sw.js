@@ -8,7 +8,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v36';   // v36: phone push (push + notificationclick); v35 NETWORK-FIRST shell
+const CACHE_VERSION = 'ace2-shell-v37';   // v37: msg timestamps + calmer greeting + robust capture; v36 phone push
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 
