@@ -45,6 +45,7 @@ _lock = asyncio.Lock()
 _schemas: list = []          # Anthropic-shaped tool schemas (cached once)
 _names: set = set()
 _loaded = False
+_LOAD_ERR = ""               # why the last _load() failed (surfaced by /diag/mcp)
 
 # Brady granted FULL read/write INCLUDING delete (explicit, 2026-07-19: "get the
 # delete access granted for when i ask for it"). No client-side tool filtering.
@@ -84,6 +85,8 @@ async def _load():
                 _names.add(f"mcp_{name}")
             logger.info("MCP: loaded %d read tools from %s", len(_schemas), _url())
         except Exception as e:
+            global _LOAD_ERR
+            _LOAD_ERR = f"{type(e).__name__}: {e}"[:400]
             logger.warning("MCP: load failed (%s) — staying dormant this process", e)
         finally:
             _loaded = True

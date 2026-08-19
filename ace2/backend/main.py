@@ -1310,6 +1310,7 @@ async def diag_mcp():
             "sdk": mcp_client._SDK,
             "sdk_error": getattr(mcp_client, "_SDK_ERR", ""),
             "sdk_names": getattr(mcp_client, "_SDK_NAMES", ""),
+            "load_error": getattr(mcp_client, "_LOAD_ERR", ""),
             "count": len(schemas),
             "tools": sorted(s["name"] for s in schemas)}
 
