@@ -1092,8 +1092,26 @@ def _capture_part(body: bytes, content_type: str):
     return None, None, None
 
 
-def _capture_kind(ctype: str, filename: str) -> str:
-    """image | pdf | audio | '' — falls back to the extension because iOS loves octet-stream."""
+def _sniff_image_media(data: bytes) -> str:
+    """Detect the real image type from magic bytes → an Anthropic-accepted media_type, or ''.
+    iOS hands a PWA-picked screenshot to /capture with an EMPTY or octet-stream MIME, which made
+    the endpoint reject a perfectly good PNG as 'HEIC?'. The bytes never lie — trust them."""
+    if not data:
+        return ""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _capture_kind(ctype: str, filename: str, data: bytes = b"") -> str:
+    """image | pdf | audio | '' — falls back to the extension, then to magic bytes, because iOS
+    loves octet-stream and empty MIME types on PWA uploads."""
     ctype = (ctype or "").lower()
     if ctype.startswith("image/"):
         return "image"
@@ -1108,6 +1126,10 @@ def _capture_kind(ctype: str, filename: str) -> str:
         return "pdf"
     if ext in (".m4a", ".mp3", ".wav", ".webm", ".ogg", ".aac", ".mp4", ".caf"):
         return "audio"
+    if _sniff_image_media(data):          # last resort: the bytes are an image even if nothing said so
+        return "image"
+    if data[:5] == b"%PDF-":
+        return "pdf"
     return ""
 
 
@@ -1152,7 +1174,7 @@ async def capture(request: Request, dry_run: bool = False):
     if len(data) > CAPTURE_MAX_BYTES:
         return {"ok": False, "error": "That file is too big (over 18MB). Send a photo or a shorter clip."}
 
-    kind = _capture_kind(ctype, filename or "")
+    kind = _capture_kind(ctype, filename or "", data)
     if not kind:
         return {"ok": False, "error": "I can read images, PDFs and audio. That one I can't."}
 
@@ -1160,6 +1182,8 @@ async def capture(request: Request, dry_run: bool = False):
     b64 = ""
     if kind == "image":
         media = (ctype or "").lower()
+        if media not in CAPTURE_IMAGE_TYPES:
+            media = _sniff_image_media(data)   # iOS mislabels/omits the MIME — trust the bytes
         if media not in CAPTURE_IMAGE_TYPES:
             return {"ok": False, "error": "That image format won't open (HEIC?). Send it as a JPEG or PNG."}
         if len(data) > CAPTURE_IMAGE_MAX_BYTES:
