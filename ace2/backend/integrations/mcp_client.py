@@ -23,12 +23,14 @@ import os
 
 logger = logging.getLogger("ace2.mcp")
 
+_SDK_ERR = ""
 try:  # the `mcp` SDK is only needed once MCP is activated; never break boot without it
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
     _SDK = True
-except Exception:  # pragma: no cover
+except Exception as _e:  # pragma: no cover — capture WHY so /diag/mcp can report it
     _SDK = False
+    _SDK_ERR = f"{type(_e).__name__}: {_e}"[:300]
 
 _lock = asyncio.Lock()
 _schemas: list = []          # Anthropic-shaped tool schemas (cached once)

@@ -1306,6 +1306,9 @@ async def diag_mcp():
     from .integrations import mcp_client
     schemas = await mcp_client.tool_schemas()
     return {"enabled": mcp_client.enabled(),
+            "url_set": bool(mcp_client._url()),
+            "sdk": mcp_client._SDK,
+            "sdk_error": getattr(mcp_client, "_SDK_ERR", ""),
             "count": len(schemas),
             "tools": sorted(s["name"] for s in schemas)}
 
