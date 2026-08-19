@@ -223,6 +223,7 @@ body {
   color: var(--aurora); margin-bottom: 6px; text-shadow: 0 0 4px var(--aurora-40); }
 .msg .ts { font-family: var(--mono); font-size: 10px; color: var(--text-faint); margin-top: 7px;
   letter-spacing: .5px; font-variant-numeric: tabular-nums; }
+.msg.user .ts { text-align: right; }
 .msg .cursor { display: inline-block; width: 7px; background: var(--aurora);
   box-shadow: 0 0 8px var(--aurora-60); animation: blink 1s step-end infinite; margin-left: 2px; }
 @keyframes blink { 50% { opacity: 0; } }

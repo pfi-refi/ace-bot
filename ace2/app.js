@@ -500,28 +500,38 @@
      context instead of empty (Brady: "see history without always asking him").
      Guarded so a re-login can't duplicate it, and INSERTED AT THE TOP so a message
      Brady fires off before the fetch resolves still reads in order. */
-  var historyLoaded = false, greeted = false;
+  var historyLoaded = false, greeted = false, lastThreadTs = null;
+  // Apple-Messages feel: don't stack a fresh greeting on a thread you were JUST in. Only greet on
+  // a genuinely fresh start — empty thread, or the last message is more than a few hours old.
+  function maybeGreet() {
+    if (greeted) return; greeted = true;
+    if (lastThreadTs) { var age = Date.now() - new Date(lastThreadTs).getTime();
+      if (!isNaN(age) && age < 4 * 3600 * 1000) return; }
+    greeting();
+  }
   function loadHistory() {
-    if (historyLoaded) { if (!greeted) { greeted = true; greeting(); } return; }
+    if (historyLoaded) { maybeGreet(); return; }
     historyLoaded = true;
     fetch(API + '/thread?limit=18', { headers: headers() })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         var msgs = (d && d.messages) || [];
         if (!msgs.length) return;
+        var last = msgs[msgs.length - 1]; if (last && last.ts) lastThreadTs = last.ts;
         var frag = document.createDocumentFragment();
         msgs.forEach(function (m) {
           var el = document.createElement('div');
           el.className = 'msg ' + (m.role === 'user' ? 'user' : 'ace') + ' hist';
           if (m.role !== 'user') { var s = document.createElement('div'); s.className = 'sender'; s.textContent = 'ACE'; el.appendChild(s); }
           el.appendChild(document.createTextNode(m.text));
+          var lab = tsLabel(m.ts); if (lab) el.appendChild(stampEl(lab));
           frag.appendChild(el);
         });
         var sep = document.createElement('div'); sep.className = 'hist-sep'; sep.textContent = '— now —'; frag.appendChild(sep);
         messagesEl.insertBefore(frag, messagesEl.firstChild);
       })
       .catch(function () {})
-      .then(function () { if (!greeted) { greeted = true; greeting(); } scrollBottom(); });
+      .then(function () { maybeGreet(); scrollBottom(); });
   }
   function greeting() {
     var d = new Date(), days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -628,7 +638,19 @@
   var messagesEl = $('messages');
   function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
   function nowLabel() { var d = new Date(), h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12; return h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap; }
-  function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); messagesEl.appendChild(m); scrollBottom(); }
+  // Apple-Messages-style stamp for a given ISO time: time only if today, else a short day/date prefix.
+  function tsLabel(iso) {
+    if (!iso) return nowLabel();
+    var d = new Date(iso); if (isNaN(d.getTime())) return '';
+    var h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12;
+    var t = h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap;
+    var now = new Date();
+    if (d.toDateString() === now.toDateString()) return t;
+    var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return ((now - d) < 7 * 864e5 ? days[d.getDay()] : (d.getMonth() + 1) + '/' + d.getDate()) + ' ' + t;
+  }
+  function stampEl(label) { var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = label; return ts; }
+  function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); m.appendChild(stampEl(nowLabel())); messagesEl.appendChild(m); scrollBottom(); }
   function addAceMessage(t) { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; m.appendChild(document.createTextNode(t)); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); m.appendChild(ts); messagesEl.appendChild(m); scrollBottom(); markUnread(); return m; }
   function beginAceStream() { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; var b = document.createElement('span'); m.appendChild(b); var c = document.createElement('span'); c.className = 'cursor'; c.textContent = ' '; m.appendChild(c); messagesEl.appendChild(m); scrollBottom(); return { el: m, body: b, cursor: c, text: '' }; }
   function appendToStream(s, t) { s.text += t; s.body.textContent = s.text; scrollBottom(); }

@@ -1052,7 +1052,7 @@ CAPTURE_CATEGORIES = db.CATEGORIES
 CAPTURE_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 
 _CAPTURE_ASK = (
-    "You are Ace, Brady Cochran's chief of staff at Platinum Fortune Impact (life insurance / "
+    "You are Ace, Brady McGraw's chief of staff at Platinum Fortune Impact (life insurance / "
     "agency building). Read EVERYTHING in this capture — handwriting included: names, phone "
     "numbers, emails, dollar figures, carriers, dates, times, scribbles in the margin.\n\n"
     "Return ONLY strict JSON. No prose, no markdown fence, nothing outside the object:\n"
@@ -1191,7 +1191,10 @@ async def capture(request: Request, dry_run: bool = False):
         parsed = _capture_json("".join(getattr(b, "text", "") for b in resp.content))
     except Exception as e:
         logger.error("capture: extraction failed (%s): %s", kind, e)
-        return {"ok": False, "error": "I couldn't read that one. Try again in a second."}
+        out = {"ok": False, "error": "I couldn't read that one. Try again in a second."}
+        if dry_run:   # surface the real cause through the safe preview path for debugging
+            out["detail"] = (type(e).__name__ + ": " + str(e))[:400]
+        return out
 
     # Contacts are facts with a shape — fold them in rather than inventing a second store.
     facts = [f.strip() for f in (parsed.get("facts") or []) if isinstance(f, str) and f.strip()]
