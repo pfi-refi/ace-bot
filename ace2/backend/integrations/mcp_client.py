@@ -86,7 +86,12 @@ async def _load():
             logger.info("MCP: loaded %d read tools from %s", len(_schemas), _url())
         except Exception as e:
             global _LOAD_ERR
-            _LOAD_ERR = f"{type(e).__name__}: {e}"[:400]
+            def _flat(x, d=0):
+                out = [("  " * d) + f"{type(x).__name__}: {x}"]
+                for se in (getattr(x, "exceptions", None) or [])[:3]:
+                    out += _flat(se, d + 1)
+                return out
+            _LOAD_ERR = " | ".join(_flat(e))[:600]
             logger.warning("MCP: load failed (%s) — staying dormant this process", e)
         finally:
             _loaded = True

@@ -1304,8 +1304,14 @@ async def diag_mcp():
     """What Google Workspace (MCP) tools Ace's TYPED loop currently has loaded — the create/
     write surface that voice never carries. Read-only; empty/count 0 = connection dormant."""
     from .integrations import mcp_client
+    try:
+        from importlib.metadata import version as _pkgver
+        _mcp_ver = _pkgver("mcp")
+    except Exception:
+        _mcp_ver = "?"
     schemas = await mcp_client.tool_schemas()
     return {"enabled": mcp_client.enabled(),
+            "mcp_version": _mcp_ver,
             "url_set": bool(mcp_client._url()),
             "sdk": mcp_client._SDK,
             "sdk_error": getattr(mcp_client, "_SDK_ERR", ""),
