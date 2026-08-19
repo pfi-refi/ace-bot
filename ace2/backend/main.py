@@ -1299,6 +1299,17 @@ async def diag():
     }
 
 
+@app.get("/diag/mcp", dependencies=[Depends(require_auth)])
+async def diag_mcp():
+    """What Google Workspace (MCP) tools Ace's TYPED loop currently has loaded — the create/
+    write surface that voice never carries. Read-only; empty/count 0 = connection dormant."""
+    from .integrations import mcp_client
+    schemas = await mcp_client.tool_schemas()
+    return {"enabled": mcp_client.enabled(),
+            "count": len(schemas),
+            "tools": sorted(s["name"] for s in schemas)}
+
+
 @app.get("/convai/config", dependencies=[Depends(require_auth)])
 async def convai_config():
     on = voice.convai_enabled()
