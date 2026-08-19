@@ -1049,15 +1049,22 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             all_items = []
         cutoff = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
                   else now - timedelta(hours=20))
-        cut_iso = cutoff.isoformat()
         _CATS = ("Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals",
                  "Agents", "Admin", "Networking", "Business", "Tech")
         def _cat_of(it):
             return next((t for t in (it.get("tags") or []) if t in _CATS), "")
+        # Compare INSTANTS, not ISO strings — ts/done_ts are UTC (+00:00) while cutoff is Eastern
+        # (-04:00); a raw string >= across offsets is unsound (2026-08-19 audit). fromisoformat
+        # keeps the offset, so datetime >= datetime compares the real moment correctly.
+        def _after_cutoff(ts):
+            try:
+                return bool(ts) and datetime.fromisoformat(ts) >= cutoff
+            except Exception:
+                return False
         done_recent = [i for i in all_items
-                       if i.get("status") == "done" and (i.get("done_ts") or "") >= cut_iso]
+                       if i.get("status") == "done" and _after_cutoff(i.get("done_ts"))]
         new_recent = [i for i in all_items
-                      if i.get("status") == "open" and (i.get("ts") or "") >= cut_iso]
+                      if i.get("status") == "open" and _after_cutoff(i.get("ts"))]
         dl = []
         if done_recent:
             dl.append("KNOCKED OUT since the last brief:")

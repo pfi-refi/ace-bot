@@ -332,6 +332,10 @@ def canon_tags(tags: list) -> list:
 _DUE_MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 
+# A day-of-month bill whose day passed THIS many days ago (or fewer) stays "current" (overdue)
+# instead of rolling to next month — so a just-missed bill fires the reminder/overdue signals.
+_DUE_GRACE_DAYS = 5
+
 
 def _find_date(s: str, today):
     """Find the first date in a string — month+day ('aug 17') or ordinal day ('the 18th')."""
@@ -354,14 +358,22 @@ def _find_date(s: str, today):
         day = int(m.group(1))
         if 1 <= day <= 31:
             y, mo = today.year, today.month
-            if day < today.day:
+            # Day-of-month recurs monthly. If the day already passed THIS month it's normally NEXT
+            # month's — but keep a short grace window (2026-08-19 audit) so a JUST-missed bill reads
+            # as OVERDUE (negative due_days) instead of ~a month out, so reminders/overdue fire.
+            if day < today.day - _DUE_GRACE_DAYS:
                 mo += 1
                 if mo > 12:
                     mo, y = 1, y + 1
-            try:
-                return _date(y, mo, day)
-            except ValueError:
-                return None
+            # Roll forward to the next month that ACTUALLY HAS this day — short months have no
+            # 30th/31st, and the old code returned None (a silently DATELESS bill) in that case.
+            for _ in range(13):
+                try:
+                    return _date(y, mo, day)
+                except ValueError:
+                    mo += 1
+                    if mo > 12:
+                        mo, y = 1, y + 1
     return None
 
 
@@ -407,9 +419,19 @@ def read_items(active_only: bool = True) -> list:
         if active_only:
             # Active view = open items + anything CLOSED today (visible receipt, gone tomorrow).
             # 'dropped' (archived twins/mistakes) behaves exactly like done here.
+            # ⚠ done_ts is stored UTC; slicing its raw [:10] compared a UTC date to an Eastern one,
+            # so anything closed 8pm–midnight ET (UTC = tomorrow) VANISHED from the view — the
+            # "Ace doesn't mark some items off" bug (2026-08-19 audit). Convert to Eastern first.
             today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+            def _done_et(ts):
+                if not ts:
+                    return ""
+                try:
+                    return datetime.fromisoformat(ts).astimezone(EASTERN).strftime("%Y-%m-%d")
+                except Exception:
+                    return ts[:10]
             items = [it for it in items if it["status"] == "open"
-                     or (it["done_ts"] or "")[:10] == today]
+                     or _done_et(it["done_ts"]) == today]
         items.sort(key=lambda it: it["ts"], reverse=True)
         return items
     except Exception as e:
