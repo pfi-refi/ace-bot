@@ -38,7 +38,13 @@ _PRIMARY_CAL_IDS = ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimp
 #   ACE2_CAL_DENY_IDS  — calendar ID substrings to drop whole (default: the interview calendar)
 #   ACE2_EVENT_DENY    — event TITLE substrings to drop even off a kept calendar (BPM etc.)
 import os as _os
-_CAL_DENY = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY", "team calendar,lincoln troyer").split(",") if s.strip()]
+_CAL_DENY = [s.strip().lower() for s in _os.environ.get(
+    "ACE2_CAL_DENY",
+    # 'troyer capital' (2026-08-20): the shared calendar is literally named "Troyer Capital HI's" —
+    # the 'lincoln troyer' token never matched it, and removing bare 'interview' from EVENT_DENY
+    # (to protect Brady's OWN job interviews) un-hid its events. Block the whole calendar by name.
+    "team calendar,lincoln troyer,troyer capital",
+).split(",") if s.strip()]
 _CAL_DENY_IDS = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com").split(",") if s.strip()]
 _EVENT_DENY = [s.strip().lower() for s in _os.environ.get(
     "ACE2_EVENT_DENY",
