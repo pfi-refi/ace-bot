@@ -1293,9 +1293,12 @@ async def capture(request: Request, dry_run: bool = False):
 async def diag():
     """Operator check-up: the live VOICE context cache (what a call actually reads) + the
     ElevenLabs agent's dashboard prompt (where a stale hardcoded date could hide). Read-only."""
+    from .integrations import calendar_api as _cal
     return {
         "context_cache": chat.ctx_diag(),
         "elevenlabs_agent": await voice.convai_agent_audit(),
+        "calendar_filters": {"cal_deny": _cal._CAL_DENY, "cal_deny_ids": _cal._CAL_DENY_IDS,
+                             "event_deny": _cal._EVENT_DENY},
     }
 
 

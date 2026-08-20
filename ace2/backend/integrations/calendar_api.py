@@ -38,23 +38,28 @@ _PRIMARY_CAL_IDS = ("planforitpfi@gmail.com", "primary", "pfi@platinumfortuneimp
 #   ACE2_CAL_DENY_IDS  — calendar ID substrings to drop whole (default: the interview calendar)
 #   ACE2_EVENT_DENY    — event TITLE substrings to drop even off a kept calendar (BPM etc.)
 import os as _os
-_CAL_DENY = [s.strip().lower() for s in _os.environ.get(
-    "ACE2_CAL_DENY",
-    # 'troyer capital' (2026-08-20): the shared calendar is literally named "Troyer Capital HI's" —
-    # the 'lincoln troyer' token never matched it, and removing bare 'interview' from EVENT_DENY
-    # (to protect Brady's OWN job interviews) un-hid its events. Block the whole calendar by name.
-    "team calendar,lincoln troyer,troyer capital",
-).split(",") if s.strip()]
-_CAL_DENY_IDS = [s.strip().lower() for s in _os.environ.get("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com").split(",") if s.strip()]
-_EVENT_DENY = [s.strip().lower() for s in _os.environ.get(
-    "ACE2_EVENT_DENY",
-    # 2026-08-19 review: DROPPED bare 'hiring' + 'interview' — they word-matched Brady's OWN
-    # job-hunt interviews, which are a top-3 priority now (Job Hunt column, system_prompt 8b),
-    # and a filtered day looks identical to an empty one. The GFI recruiting interview calendar
-    # is already dropped wholesale by ACE2_CAL_DENY_IDS, so those two generic words were pure
-    # downside. Keep only GFI-specific phrases that can't collide with a real client/job event.
-    "bpm,hierarchy training,base shop,rblc,live calling,gfi lgnds,momentum monday",
-).split(",") if s.strip()]
+
+# MERGE, don't override (2026-08-20): these env vars were originally REPLACING the code defaults,
+# so a value set in Railway silently cancelled every default added later in code (the 'Troyer
+# Capital' block never applied because ACE2_CAL_DENY was pinned to 'team calendar'). Built-in
+# blocks now ALWAYS apply; the env var only ADDS more on top.
+def _merged(env_name: str, base: str) -> list:
+    vals = [s.strip().lower() for s in base.split(",") if s.strip()]
+    vals += [s.strip().lower() for s in _os.environ.get(env_name, "").split(",")
+             if s.strip() and s.strip().lower() not in vals]
+    return vals
+
+# 'troyer capital' (2026-08-20): the shared calendar is literally named "Troyer Capital HI's" —
+# the 'lincoln troyer' token never matched it, and removing bare 'interview' from EVENT_DENY
+# (to protect Brady's OWN job interviews) un-hid its events. Block the whole calendar by name.
+_CAL_DENY = _merged("ACE2_CAL_DENY", "team calendar,lincoln troyer,troyer capital")
+_CAL_DENY_IDS = _merged("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com")
+# 2026-08-19 review: DROPPED bare 'hiring' + 'interview' from the base — they word-matched Brady's
+# OWN job-hunt interviews (top-3 priority; a filtered day looks identical to an empty one). The
+# recruiting calendars are dropped wholesale above, so the generic words were pure downside.
+# ⚠ If Railway's ACE2_EVENT_DENY still contains 'interview'/'hiring', clear them THERE too — env
+# entries merge in and would re-hide his interviews.
+_EVENT_DENY = _merged("ACE2_EVENT_DENY", "bpm,hierarchy training,base shop,rblc,live calling,gfi lgnds,momentum monday")
 
 
 def _cal_dropped(cal_id: str, cal_name: str) -> bool:
