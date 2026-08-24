@@ -273,8 +273,17 @@ def append_turn(role: str, content: str, source: str = "ace2") -> bool:
     ensure_ready()
     try:
         with _conn() as c, c.cursor() as cur:
-            cur.execute("INSERT INTO turns (source, role, content) VALUES (%s, %s, %s)",
-                        (source, role, content))
+            # IDEMPOTENT (2026-08-24): the early user-persist runs at the top of EVERY stream_turn,
+            # and the voice path is explicitly re-entrant (ElevenLabs retries a turn whose deadline
+            # slipped; main.py cancels the previous task). A bare INSERT would then write the same
+            # sentence twice, and sanitize_for_api merges them into "X\n\nX" — Ace reading Brady
+            # twice. Skip an identical role+content written in the last 3 minutes.
+            cur.execute(
+                "INSERT INTO turns (source, role, content) "
+                "SELECT %s, %s, %s WHERE NOT EXISTS ("
+                "  SELECT 1 FROM turns WHERE role = %s AND content = %s "
+                "  AND ts > now() - interval '3 minutes')",
+                (source, role, content, role, content))
         return True
     except Exception as e:
         logger.warning("db append_turn failed: %s", e)

@@ -579,8 +579,9 @@ async def _load_messages(user_text: str, prior=None) -> list:
     # HTTP path it is ALREADY the last message here — and sanitize_for_api MERGES consecutive
     # same-role turns, so after a failed turn left an orphan user message it arrives as
     # "earlier text\n\nthis text" and strict equality no longer recognizes it. That produced a
-    # DOUBLE user message (his words twice in the prompt) and two consecutive user turns, which
-    # the API rejects. endswith() recognizes both the plain and the merged shape.
+    # DOUBLE user message — his words twice in the prompt (the API merges consecutive same-role
+    # turns rather than erroring, so it's silent context pollution, not a crash).
+    # endswith() recognizes both the plain and the merged shape.
     last = msgs[-1] if msgs else None
     if not (last and last.get("role") == "user"
             and (last.get("content") or "").endswith(user_text)):

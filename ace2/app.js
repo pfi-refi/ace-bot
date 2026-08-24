@@ -22,8 +22,10 @@
   /* STILL MODE (2026-08-23, Brady: "not overheat like it does") — one tap freezes the starfield
      to a single painted frame (zero ongoing GPU) and idles the orb at ~2fps; the orb still
      surges to full life the moment Ace speaks. Persisted; the ❄ dock button toggles it. */
+  // The ❄ button was removed (it read as a glitch). Clear any saved 'on' so a device that
+  // toggled it before the removal can't be left with a frozen background and no way back.
   var stillMode = false;
-  try { stillMode = localStorage.getItem('ace2_still') === 'on'; } catch (e) {}
+  try { localStorage.removeItem('ace2_still'); } catch (e) {}
   var _stillHooks = [];   // each visual registers how to react when the mode flips
   function setStill(on) {
     stillMode = !!on;
