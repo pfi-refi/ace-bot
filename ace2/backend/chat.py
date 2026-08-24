@@ -575,7 +575,15 @@ async def _load_messages(user_text: str, prior=None) -> list:
     if prior is None:
         prior = await asyncio.to_thread(_unified_thread)
     msgs = brain.sanitize_for_api(prior)
-    if not msgs or msgs[-1].get("content") != user_text:
+    # The user turn is now persisted BEFORE this runs (2026-08-24 early-persist), so on the
+    # HTTP path it is ALREADY the last message here — and sanitize_for_api MERGES consecutive
+    # same-role turns, so after a failed turn left an orphan user message it arrives as
+    # "earlier text\n\nthis text" and strict equality no longer recognizes it. That produced a
+    # DOUBLE user message (his words twice in the prompt) and two consecutive user turns, which
+    # the API rejects. endswith() recognizes both the plain and the merged shape.
+    last = msgs[-1] if msgs else None
+    if not (last and last.get("role") == "user"
+            and (last.get("content") or "").endswith(user_text)):
         msgs.append({"role": "user", "content": user_text})
     return msgs
 
