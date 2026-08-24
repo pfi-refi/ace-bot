@@ -60,7 +60,11 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-sonnet-5")
 # (time-to-first-word) matters far more than depth per spoken sentence, and Opus's
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
-VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
+# 2026-08-24: Haiku on voice told Brady to send the $468 BALANCE instead of the $77.94 payment
+# (and mixed up gas/sewer) during a money conversation — reliability on money questions is the
+# product. Voice brain → Sonnet-5 (intro pricing thru 8/31; voice volume is low). The SSE
+# lead-in covers the slightly slower first token. Revert lever: ACE2_VOICE_MODEL env.
+VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-sonnet-5")
 # The background LEARNING/TRIAGE sweep + briefs + graph + nudges are NOT latency-bound (they
 # run off the live path), so they don't need the premium typed brain (Opus, $5/$25). Sonnet 5
 # ($3/$15, cheaper still on intro pricing) is near-Opus quality and cut Brady's API bill ~40-60%
