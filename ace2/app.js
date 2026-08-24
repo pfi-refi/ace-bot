@@ -28,16 +28,8 @@
   function setStill(on) {
     stillMode = !!on;
     try { localStorage.setItem('ace2_still', stillMode ? 'on' : 'off'); } catch (e) {}
-    var b = document.getElementById('still-btn');
-    if (b) { b.classList.toggle('active', stillMode); b.setAttribute('aria-pressed', String(stillMode)); }
     for (var i = 0; i < _stillHooks.length; i++) { try { _stillHooks[i](stillMode); } catch (e) {} }
   }
-  window.addEventListener('DOMContentLoaded', function () {
-    var b = document.getElementById('still-btn');
-    if (!b) return;
-    b.classList.toggle('active', stillMode); b.setAttribute('aria-pressed', String(stillMode));
-    b.addEventListener('click', function () { setStill(!stillMode); });
-  });
 
   (function () {
     var canvas = $('matrix'), ctx = canvas.getContext('2d');
