@@ -350,6 +350,10 @@ def _find_date(s: str, today):
             d = _date(today.year, _DUE_MONTHS[m.group(1)], int(m.group(2)))
             if (today - d).days > 40:
                 d = _date(today.year + 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
+            elif (d - today).days > 320:
+                # 'dec 28' read on Jan 2 parses as ~a year OUT; it means LAST year's date
+                # (just missed / recent context), not 11+ months away (2026-08-23 scrub M4).
+                d = _date(today.year - 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
             return d
         except ValueError:
             return None
@@ -358,6 +362,17 @@ def _find_date(s: str, today):
         day = int(m.group(1))
         if 1 <= day <= 31:
             y, mo = today.year, today.month
+            # Month boundary (2026-08-23 scrub M4): a day near the END of the PREVIOUS month that
+            # passed within the grace window (e.g. 'the 30th' seen on Sep 3) is still OVERDUE,
+            # not next-month — the same-month grace below can't reach across months.
+            if day > today.day:
+                pm_y, pm_m = (y, mo - 1) if mo > 1 else (y - 1, 12)
+                try:
+                    prev = _date(pm_y, pm_m, day)
+                except ValueError:
+                    prev = None
+                if prev and 0 < (today - prev).days <= _DUE_GRACE_DAYS:
+                    return prev
             # Day-of-month recurs monthly. If the day already passed THIS month it's normally NEXT
             # month's — but keep a short grace window (2026-08-19 audit) so a JUST-missed bill reads
             # as OVERDUE (negative due_days) instead of ~a month out, so reminders/overdue fire.

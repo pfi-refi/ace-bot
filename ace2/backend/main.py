@@ -151,6 +151,7 @@ app = FastAPI(title="Ace 2.0", version=VERSION)
 # Brady's authenticated browser — we broadcast stage events (cards) to all of them. This is
 # the side-channel that lets a VOICE turn (which rides ElevenLabs' pipe) paint the screen.
 _stage_clients: set = set()
+_live_convos: list = []   # live WS chat transcripts — /capture injects its summary into each
 _bg_tasks: set = set()   # hold refs to fire-and-forget tasks so they aren't GC'd mid-run
 
 
@@ -820,8 +821,8 @@ async def graph(refresh: int = 0):
         "- [{}] {}".format(", ".join(it.get("tags") or []) or "Admin", it.get("text", ""))
         for it in board)
     prompt = (
-        "You are Ace's KNOWLEDGE GRAPH builder for Brady McGraw, who runs Platinum "
-        "Fortune Impact — a real-estate / life-insurance / refi base shop with ~18 agents. "
+        "You are Ace's KNOWLEDGE GRAPH builder for Brady McGraw — insurance clients + GFI "
+        "close-out, concrete/business-owner work (Damon), job hunt, and personal life. "
         "From his memory facts and his open board below, extract the ENTITY GRAPH of his "
         "book of business.\n\n"
         "NODES — one per real entity, no duplicates, and use the person's/deal's real name:\n"
@@ -964,6 +965,7 @@ async def ws_chat(websocket: WebSocket):
                 # today's voice conversation and the correct day.
                 seed = await asyncio.to_thread(chat._unified_thread)
                 convo = sanitize_for_api(seed)
+                _live_convos.append(convo)   # same list object this loop mutates — stays registered
             convo.append({"role": "user", "content": text})
             await emit("start", {})
             reply = await chat.stream_turn(text, emit, prior=convo)
@@ -982,6 +984,11 @@ async def ws_chat(websocket: WebSocket):
     finally:
         ka.cancel()
         _stage_clients.discard(websocket)
+        if convo is not None:
+            try:
+                _live_convos.remove(convo)
+            except ValueError:
+                pass
 
 
 @app.post("/chat", dependencies=[Depends(require_auth)])
@@ -1071,8 +1078,9 @@ CAPTURE_CATEGORIES = db.CATEGORIES
 CAPTURE_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 
 _CAPTURE_ASK = (
-    "You are Ace, Brady McGraw's chief of staff at Platinum Fortune Impact (life insurance / "
-    "agency building). Read EVERYTHING in this capture — handwriting included: names, phone "
+    "You are Ace, Brady McGraw's chief of staff across ALL his ventures — insurance clients, "
+    "concrete/business-owner work with Damon, the job hunt, and his personal life. "
+    "Read EVERYTHING in this capture — handwriting included: names, phone "
     "numbers, emails, dollar figures, carriers, dates, times, scribbles in the margin.\n\n"
     "Return ONLY strict JSON. No prose, no markdown fence, nothing outside the object:\n"
     '{"summary": "2-4 plain sentences: what this is and what you took from it",\n'
@@ -1296,6 +1304,12 @@ async def capture(request: Request, dry_run: bool = False):
         line += ("\n\nFiled: " + str(len(facts)) + " fact(s) to memory, "
                  + str(len(filed_todos)) + " to-do(s) to the board.")
     await asyncio.to_thread(history.append, "assistant", line)
+    # A capture mid-conversation must land in the LIVE WS transcript too — the per-connection
+    # convo was seeded once, so without this the very next typed turn can't see the upload and
+    # Ace denies it (happened twice; 2026-08-23 scrub M1). sanitize_for_api collapses the
+    # double-assistant on the next turn.
+    for c in list(_live_convos):
+        c.append({"role": "assistant", "content": line})
 
     return {
         "ok": True,

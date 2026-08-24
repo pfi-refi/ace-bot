@@ -237,6 +237,14 @@ body {
 .tool-pill .spin { display: inline-block; animation: spin 1.4s linear infinite; }
 .tool-pill.done { border-style: solid; border-color: var(--aurora-25); color: var(--aurora-60); }
 .tool-pill.done .spin { animation: none; }
+/* Long tool receipts collapse to a one-line chip; tap to expand (2026-08-23). */
+.tool-pill.receipt { flex-direction: column; align-items: stretch; cursor: pointer; max-width: 86%; }
+.tool-pill.receipt .receipt-head { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-pill.receipt .receipt-body { display: none; margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--aurora-25); white-space: pre-wrap; text-transform: none;
+  letter-spacing: .2px; font-weight: 400; font-size: 12px; line-height: 1.55;
+  color: rgba(234,255,245,.78); max-height: 42vh; overflow-y: auto; }
+.tool-pill.receipt.open .receipt-body { display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .typing span { display: inline-block; width: 6px; height: 6px; border-radius: 50%;

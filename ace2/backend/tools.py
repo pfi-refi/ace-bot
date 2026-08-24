@@ -423,6 +423,11 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The complete new profile text (not a diff)"},
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Leave unset the first time. After Brady approves the rewrite "
+                                   "on a later turn, re-call with confirmed: true.",
+                },
             },
             "required": ["text"],
         },

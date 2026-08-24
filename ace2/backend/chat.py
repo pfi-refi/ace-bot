@@ -148,13 +148,28 @@ def _needs_confirm(name: str, args: dict) -> bool:
     return False
 
 
-def _args_sig(clean: dict) -> str:
+# Per-tool sig keys (2026-08-23 scrub C1): the ticket binds the fields that IDENTIFY the action
+# Brady approved — never long free-text the model must REGENERATE on the yes-turn (tool_use args
+# aren't in the next turn's transcript, so a byte-identical replay of a 300-word body is
+# impossible and the gate would re-arm forever — update_profile could NEVER complete). to/subject
+# are stated verbatim in Ace's ask, so they ARE reproducible; the body may be re-sent fresh.
+# Tools absent from this map bind on ALL fields (default, right for short structured args).
+_SIG_KEYS = {
+    "send_email": ("to", "cc", "bcc", "subject"),
+    "mcp_send_gmail_message": ("to", "cc", "bcc", "subject"),
+    "update_profile": (),   # single fixed target — the earlier-turn ticket itself is the guard
+}
+
+
+def _args_sig(name: str, clean: dict) -> str:
     """Stable signature of the payload the confirm was ARMED on, so a 'yes' can only execute the
-    exact action Brady saw. Excludes the confirm flags (already stripped in `clean`)."""
+    action Brady saw. Long-free-text tools bind identity fields only (see _SIG_KEYS)."""
+    keys = _SIG_KEYS.get(name)
+    payload = clean if keys is None else {k: clean.get(k) for k in keys if k in clean}
     try:
-        return json.dumps(clean, sort_keys=True, default=str)
+        return json.dumps(payload, sort_keys=True, default=str)
     except Exception:
-        return repr(clean)
+        return repr(payload)
 
 
 def _confirm_gate(name: str, args: dict, turn_id: int):
@@ -166,7 +181,7 @@ def _confirm_gate(name: str, args: dict, turn_id: int):
     now = time.time()
     for k in [k for k, v in _pending_confirm.items() if now - v["ts"] > _CONFIRM_TTL_SEC]:
         _pending_confirm.pop(k, None)
-    sig = _args_sig(clean)
+    sig = _args_sig(name, clean)
     ticket = _pending_confirm.get(name)
     # A 'yes' only passes if it matches the SAME payload that was armed (2026-08-19 audit): the
     # ticket used to key on tool NAME only, so a confirmed delete/send could execute DIFFERENT
@@ -259,7 +274,7 @@ def load_profile() -> str:
 
 def set_profile(text: str) -> bool:
     text = (text or "").strip()
-    if len(text) < 40:   # refuse a wipe — a profile this short is a mistake, not a rewrite
+    if len(text) < 200:   # refuse a wipe — a real profile is 150+ words; this short is a mistake
         return False
     try:
         from . import db
@@ -747,7 +762,9 @@ async def _refresh_ctx_inner() -> None:
         )
 
         def keep(v, prev):
-            return prev if isinstance(v, Exception) or v is None else v
+            # Also keep the LAST GOOD weather when the API hiccups with {"ok": False} (scrub m6).
+            return prev if (isinstance(v, Exception) or v is None
+                            or (isinstance(v, dict) and v.get("ok") is False)) else v
 
         _CTX.update(
             memory=keep(memory, _CTX["memory"]),
@@ -2078,6 +2095,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 if not "".join(full_reply).strip():
                     full_reply.append("I got a bit tangled working that through — ask me again, and I'll keep it tighter.")
                 break
+
+            if final.stop_reason == "pause_turn":
+                # Server-side tool (web_search) paused mid-turn — resume it, don't truncate
+                # the reply at the pause point (2026-08-23 scrub m1).
+                messages.append({"role": "assistant", "content": final.content})
+                continue
 
             if final.stop_reason != "tool_use":
                 break

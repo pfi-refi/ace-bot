@@ -282,7 +282,7 @@
      the chat. Closing parks #messages back in its hidden home (#chat-panel) and returns #input-bar
      to the bottom of #app, then removes the overlay — back to the orb dashboard. Same on both. */
   function chatCardMount() {
-    if (document.getElementById('chat-view')) { scrollBottom(); return; }
+    if (document.getElementById('chat-view')) { scrollBottom(true); return; }
     var view = document.createElement('div'); view.id = 'chat-view';
     var head = document.createElement('div'); head.className = 'chat-view-head';
     var t = document.createElement('span'); t.className = 'chat-view-title'; t.textContent = 'CONVERSATION';
@@ -309,7 +309,7 @@
     document.body.classList.toggle('chatting', chatOpen);
     if (chatOpen) {
       chatCardMount(); btn.classList.add('active'); btn.classList.remove('has-new');
-      btn.setAttribute('aria-pressed', 'true'); scrollBottom();
+      btn.setAttribute('aria-pressed', 'true'); scrollBottom(true);
     } else {
       chatCardUnmount(); btn.classList.remove('active'); btn.setAttribute('aria-pressed', 'false');
     }
@@ -531,7 +531,7 @@
         messagesEl.insertBefore(frag, messagesEl.firstChild);
       })
       .catch(function () {})
-      .then(function () { maybeGreet(); scrollBottom(); });
+      .then(function () { maybeGreet(); scrollBottom(true); });
   }
   function greeting() {
     var d = new Date(), days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -636,7 +636,18 @@
 
   /* ============================================================ TRANSCRIPT */
   var messagesEl = $('messages');
-  function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+  // Sticky scroll (2026-08-23, Brady: "it keeps scrolling to the bottom" while reading):
+  // only follow the stream if he is already at (or near) the bottom. His own scroll-up stops
+  // the yanking; scrolling back down (or force=true — his own send, opening the panel)
+  // re-engages the follow.
+  var stickBottom = true;
+  messagesEl.addEventListener('scroll', function () {
+    stickBottom = (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight) < 60;
+  });
+  function scrollBottom(force) {
+    if (force) stickBottom = true;
+    if (stickBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
   function nowLabel() { var d = new Date(), h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = h % 12 || 12; return h12 + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes() + ' ' + ap; }
   // Apple-Messages-style stamp for a given ISO time: time only if today, else a short day/date prefix.
   function tsLabel(iso) {
@@ -650,7 +661,7 @@
     return ((now - d) < 7 * 864e5 ? days[d.getDay()] : (d.getMonth() + 1) + '/' + d.getDate()) + ' ' + t;
   }
   function stampEl(label) { var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = label; return ts; }
-  function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); m.appendChild(stampEl(nowLabel())); messagesEl.appendChild(m); scrollBottom(); }
+  function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); m.appendChild(stampEl(nowLabel())); messagesEl.appendChild(m); scrollBottom(true); }
   function addAceMessage(t) { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; m.appendChild(document.createTextNode(t)); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); m.appendChild(ts); messagesEl.appendChild(m); scrollBottom(); markUnread(); return m; }
   function beginAceStream() { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; var b = document.createElement('span'); m.appendChild(b); var c = document.createElement('span'); c.className = 'cursor'; c.textContent = ' '; m.appendChild(c); messagesEl.appendChild(m); scrollBottom(); return { el: m, body: b, cursor: c, text: '' }; }
   function appendToStream(s, t) { s.text += t; s.body.textContent = s.text; scrollBottom(); }
@@ -660,7 +671,27 @@
     if (msg.status === 'running') { activeTool = document.createElement('div'); activeTool.className = 'tool-pill'; activeTool.innerHTML = '<span class="spin">◈</span> '; activeTool.appendChild(document.createTextNode(msg.label + '…')); messagesEl.appendChild(activeTool); scrollBottom(); }
     else if (activeTool) { activeTool.className = 'tool-pill done'; activeTool.innerHTML = '◈ '; activeTool.appendChild(document.createTextNode(msg.label)); activeTool = null; scrollBottom(); }
   }
-  function renderConfirm(text) { var p = document.createElement('div'); p.className = 'tool-pill done'; p.appendChild(document.createTextNode(text)); messagesEl.appendChild(p); scrollBottom(); }
+  function renderConfirm(text) {
+    text = String(text == null ? '' : text);
+    var p = document.createElement('div'); p.className = 'tool-pill done';
+    var nl = text.indexOf('\n'), first = (nl >= 0 ? text.slice(0, nl) : text).trim();
+    if (nl < 0 && first.length <= 110) {   // short receipt → the familiar pill, unchanged
+      p.appendChild(document.createTextNode(text)); messagesEl.appendChild(p); scrollBottom(); return;
+    }
+    // Long receipt (2026-08-23, Brady: "takes up most of the screen") → one-line chip;
+    // tap to expand the full text, which scrolls inside itself.
+    p.classList.add('receipt');
+    var head = document.createElement('div'); head.className = 'receipt-head';
+    head.textContent = (first.length > 96 ? first.slice(0, 93) + '…' : first) + '  ▸';
+    var body = document.createElement('div'); body.className = 'receipt-body';
+    body.textContent = text;
+    p.appendChild(head); p.appendChild(body);
+    p.addEventListener('click', function () {
+      var open = p.classList.toggle('open');
+      head.textContent = head.textContent.slice(0, -1) + (open ? '▾' : '▸');
+    });
+    messagesEl.appendChild(p); scrollBottom();
+  }
   var typingEl = null;
   function showTyping() { removeTyping(); typingEl = document.createElement('div'); typingEl.className = 'msg ace'; typingEl.innerHTML = '<div class="sender">ACE</div><span class="typing"><span></span><span></span><span></span></span>'; messagesEl.appendChild(typingEl); scrollBottom(); }
   function removeTyping() { if (typingEl && typingEl.parentNode) typingEl.parentNode.removeChild(typingEl); typingEl = null; }
