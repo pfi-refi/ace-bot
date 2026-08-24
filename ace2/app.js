@@ -1140,10 +1140,54 @@
     else orb.setAmplitude(0);
     liveRAF = requestAnimationFrame(livePulse);
   }
+  /* iPad/phone call durability (2026-08-24, Brady: "he keeps timing out mid-conversation on my
+     iPad; after a second I can turn him back on"). Two causes, both client-side — the ElevenLabs
+     agent has silence_end_call disabled, so it wasn't hanging up on him:
+       1. The tablet dims/sleeps or Safari backgrounds the tab → WebRTC dies → onDisconnect.
+          A SCREEN WAKE LOCK while a call is live keeps the device awake (iOS 16.4+).
+       2. ANY drop — a WiFi-band hop, a momentary blip — called endLiveVoice() and stayed dead.
+          Now an UNINTENDED drop auto-resumes (3 tries, short backoff) instead of ending the call. */
+  var liveWantOn = false, liveRetries = 0, liveWake = null;
+  function wakeAcquire() {
+    try {
+      if (!navigator.wakeLock || liveWake) return;
+      navigator.wakeLock.request('screen').then(function (wl) {
+        liveWake = wl;
+        wl.addEventListener('release', function () { liveWake = null; });
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  function wakeRelease() {
+    try { if (liveWake) { liveWake.release(); liveWake = null; } } catch (e) {}
+  }
+  // The lock is dropped whenever the page hides — re-take it (and re-check the call) on return.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible' || !liveWantOn) return;
+    wakeAcquire();
+    if (!liveConv && !liveStarting) startLiveVoice();   // came back to a dead call → resume it
+  });
+  function liveDropped() {
+    // Session ended without Brady asking. Resume if he's still "on a call".
+    if (liveRAF) { cancelAnimationFrame(liveRAF); liveRAF = null; }
+    liveConv = null; liveStarting = false; liveMode = 'idle'; orb.setAmplitude(0);
+    if (!liveWantOn) { wakeRelease(); $('mic-btn').classList.remove('active');
+                       if (!state.busy) setOrbState('idle'); return; }
+    if (liveRetries >= 3) {
+      liveWantOn = false; wakeRelease(); $('mic-btn').classList.remove('active');
+      if (!state.busy) setOrbState('idle');
+      addAceMessage('Call dropped and I couldn’t get back on — tap the mic when you’re ready.');
+      return;
+    }
+    liveRetries++;
+    setOrbState('listening');
+    setTimeout(function () { if (liveWantOn && !liveConv && !liveStarting) startLiveVoice(); }, 700 * liveRetries);
+  }
+
   function startLiveVoice() {
     if (liveConv || liveStarting) return;   // already on a call or spinning one up — ignore extra taps
     var Conv = window.__ConvAI;
     if (!Conv) { addAceMessage('Live voice is still loading — give it a second and tap again.'); return; }
+    liveWantOn = true; wakeAcquire();
     liveStarting = true;
     $('mic-btn').classList.add('active'); setOrbState('listening'); liveMode = 'listening';
     navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
@@ -1154,9 +1198,14 @@
         if (!d || !d.signed_url) throw ((d && d.error) || 'no signed url');
         return Conv.startSession({
           signedUrl: d.signed_url,
-          onConnect: function () { liveRAF = requestAnimationFrame(livePulse); },
-          onDisconnect: function () { endLiveVoice(); },
-          onError: function (err) { addAceMessage('Live voice error: ' + (err && err.message || err)); endLiveVoice(); },
+          onConnect: function () { liveRetries = 0; liveRAF = requestAnimationFrame(livePulse); },
+          onDisconnect: function () { liveDropped(); },   // auto-resume unless Brady hung up
+          onError: function (err) {
+            // Don't spam the thread on a transient blip — liveDropped() retries silently and
+            // only speaks up if it genuinely can't get back on.
+            if (!liveWantOn) addAceMessage('Live voice error: ' + (err && err.message || err));
+            liveDropped();
+          },
           onModeChange: function (m) { var mm = (m && m.mode) || m; liveMode = (mm === 'speaking') ? 'speaking' : 'listening'; setOrbState(liveMode); },
           onMessage: function (msg) {
             var t = (msg && (msg.message || msg.text)) || '';
@@ -1177,6 +1226,9 @@
       });
   }
   function endLiveVoice() {
+    // Deliberate hang-up (mic tap, switching to chat mode): stop wanting the call, so a
+    // disconnect event can't bounce it back on.
+    liveWantOn = false; liveRetries = 0; wakeRelease();
     liveStarting = false;
     if (liveRAF) cancelAnimationFrame(liveRAF); liveRAF = null; liveMode = 'idle';
     if (liveConv) { try { liveConv.endSession(); } catch (e) {} liveConv = null; }
