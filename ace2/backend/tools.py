@@ -407,6 +407,26 @@ TOOLS = [
             "required": ["on"],
         },
     },
+    {
+        "name": "update_profile",
+        "description": (
+            "Rewrite the ★ YOUR PROFILE block — the editable, authoritative statement of who "
+            "Brady is, what's live in his world, and what your mission is. Call this when he "
+            "REDEFINES things: a venture starts or ends, priorities shift, a relationship "
+            "changes, or he tells you who you are to him ('you're my second brain full stop'). "
+            "Pass the COMPLETE new profile text: take the current profile from your context, "
+            "apply his change, keep everything still true, drop what's obsolete. 150-300 words, "
+            "same section shape (WHO BRADY IS / MONEY CONTEXT / HIS PEOPLE / WHO YOU ARE TO "
+            "HIM). This is a standing change — it steers every future turn, so get it right."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The complete new profile text (not a diff)"},
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 # Voice-only handoff tool. NOT part of TOOLS (so the typed path, which already has the full
@@ -465,6 +485,7 @@ TOOL_LABELS = {
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
     "set_privacy": "PRIVACY",
+    "update_profile": "UPDATING PROFILE",
     "capture_item": "CAPTURING",
     "update_item": "UPDATING BANK",
     "display_card": "PROJECTING",
@@ -604,6 +625,14 @@ def _do_set_privacy(on=True, **_):
             if state else "🔓 Private mode OFF — I can say your numbers out loud again.")
 
 
+def _do_update_profile(text="", **_):
+    from . import chat
+    if chat.set_profile(text):
+        return "◆ Profile updated — this is who we are now; it steers every turn from here."
+    return ("⚠️ Profile NOT saved — the text was too short (a real profile is 150+ words) or "
+            "the store is unavailable. Rewrite the FULL profile and try again.")
+
+
 def _do_save_memory(fact, **_):
     try:
         # add_memory routes to the Postgres brain (uncapped append, dedup) when live, else the
@@ -695,6 +724,7 @@ _DISPATCH = {
     "capture_item": _do_capture_item,
     "update_item": _do_update_item,
     "set_privacy": _do_set_privacy,
+    "update_profile": _do_update_profile,
 }
 
 

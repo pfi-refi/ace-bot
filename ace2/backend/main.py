@@ -321,6 +321,25 @@ async def set_discreet(req: DiscreetReq):
     return {"discreet": await asyncio.to_thread(chat.set_discreet, req.on)}
 
 
+class ProfileReq(BaseModel):
+    text: str = ""
+
+
+@app.get("/profile", dependencies=[Depends(require_auth)])
+async def get_profile():
+    """The EDITABLE profile — who Brady is + Ace's mission (was hardcoded in the prompt until
+    2026-08-23). `default` tells the caller whether a stored override exists yet."""
+    text = await asyncio.to_thread(chat.load_profile)
+    return {"text": text, "default": text == chat.DEFAULT_PROFILE}
+
+
+@app.post("/profile", dependencies=[Depends(require_auth)])
+async def post_profile(req: ProfileReq):
+    """Manual profile rewrite (Ace's update_profile tool is the conversational path)."""
+    ok = await asyncio.to_thread(chat.set_profile, req.text)
+    return {"ok": ok} if ok else {"ok": False, "error": "too short (150+ words) or store unavailable"}
+
+
 # ── Data ────────────────────────────────────────────────────────────────────────
 @app.get("/calendar", dependencies=[Depends(require_auth)])
 async def calendar(days: int = 7):

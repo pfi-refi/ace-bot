@@ -89,6 +89,7 @@ _CONFIRM_ALWAYS = {
     "send_email", "mcp_send_gmail_message",   # outbound to third parties
     "delete_calendar_event",                  # destroys a meeting
     "mcp_get_drive_shareable_link",           # outward data exposure
+    "update_profile",                         # standing identity/mission change — Brady sees it first
 }
 _DESTRUCTIVE_ACTIONS = {"delete", "remove", "clear", "cancel", "trash"}
 _DESTRUCTIVE_HINTS = ("delete", "remove", "clear", "trash", "cancel")
@@ -206,6 +207,73 @@ def set_discreet(on: bool) -> bool:
     except Exception:
         pass
     return _discreet[0]
+
+
+# ── EDITABLE PROFILE — who Brady is + Ace's mission, OUT of the hardcoded prompt ─────────
+# (2026-08-23, Brady: "pull out the hard coded information and make it editable... better
+# oversight on who he is to me and who I am.") The system prompt now carries only OPERATING
+# RULES; this profile is the authoritative who/what, stored as a summary row ('ace_profile')
+# so Brady or Ace (update_profile tool, confirm-gated) can rewrite it without a deploy.
+# DEFAULT below = current reality; used until a db row exists (no db write at boot).
+DEFAULT_PROFILE = (
+    "WHO BRADY IS: Brady McGraw — builder/operator with several ventures in motion at once: "
+    "(1) financial services — personal insurance clients (annuity/IUL) + closing out his "
+    "remaining GFI business (~$2,100 commissions still to collect); PFI is his entity (renewal "
+    "decision Sept 13). (2) Concrete + business owners — pours with Damon Gantz and helps him "
+    "grow the business; more owner-clients to come. (3) Income floor — landing stable $3-4K/mo "
+    "(job applications, contract/CRM work). (4) Evaluating opportunities on their merits — "
+    "currently Chris's recruiting offer (structured $10-12K debt, book doesn't transfer; "
+    "decision pending after the Wednesday Zoom).\n"
+    "MONEY CONTEXT: digging out of a real hole — bills and due-dates, the debt snowball, IRS/"
+    "tax work with Ken Weinberg (EA). Vital CONTEXT and the lens for money decisions — but NOT "
+    "his whole identity and not your only mission.\n"
+    "HIS PEOPLE: Gabby — fiancée and full partner; money is shared and discussed openly; the "
+    "trust rebuild is real, keep the tone warm and straight. Damon — close friend + business "
+    "partner (concrete; wedding Sept 6).\n"
+    "WHO YOU ARE TO HIM: his SECOND BRAIN, FULL STOP — not boxed into any one business or "
+    "'mode'. Whatever is live — personal, GFI, Damon, job hunt, Gabby, a brand-new venture — "
+    "you track it, prioritize HIM, and help him move on it. Big-picture partner AND "
+    "detail-keeper, with real banter."
+)
+_profile_cache = {"text": None, "ts": 0.0}
+
+
+def load_profile() -> str:
+    """Current profile text: db override when set, DEFAULT_PROFILE otherwise. 60s TTL cache so
+    voice's latency-sensitive context build never waits on a fresh db read."""
+    now = time.time()
+    if _profile_cache["text"] is not None and (now - _profile_cache["ts"]) < 60:
+        return _profile_cache["text"]
+    text = DEFAULT_PROFILE
+    try:
+        from . import db
+        if db.enabled():
+            stored = (db.latest_summary("ace_profile").get("text") or "").strip()
+            if stored:
+                text = stored
+    except Exception:
+        pass
+    _profile_cache.update(text=text, ts=now)
+    return text
+
+
+def set_profile(text: str) -> bool:
+    text = (text or "").strip()
+    if len(text) < 40:   # refuse a wipe — a profile this short is a mistake, not a rewrite
+        return False
+    try:
+        from . import db
+        if db.enabled() and db.add_summary(text, "ace_profile"):
+            _profile_cache.update(text=text, ts=time.time())
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _profile_block() -> str:
+    return ("★ YOUR PROFILE — WHO BRADY IS & YOUR MISSION (editable + authoritative; when his "
+            "life shifts, update it with update_profile):\n" + load_profile())
 
 
 def _discreet_note() -> str:
@@ -361,6 +429,8 @@ async def _live_context() -> str:
     personal_block = "\n".join(f"- {m['from']}: {m['subject']}" for m in p_list)
     parts = [
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
+        "",
+        _profile_block(),
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
@@ -1239,7 +1309,10 @@ async def generate_business_report() -> str:
                     return t
             return "Admin"
         lines = []
-        for c in ["Deals", "Agents"]:
+        # PULSE RETUNE (2026-08-23, Brady): "any money-making moves — GFI deals, business owners
+        # I'm helping, etc." Not just the old GFI Deals/Agents lens: Money actions, Job Hunt
+        # (income), and Business (Damon/website/contract work) are all revenue surface now.
+        for c in ["Money", "Deals", "Business", "Job Hunt", "Agents"]:
             rows = []
             for i in items:
                 if i.get("status") == "open" and cat(i) == c:
@@ -1268,15 +1341,17 @@ async def generate_business_report() -> str:
         resp = await client.messages.create(
             model=LEARN_MODEL, max_tokens=900,
             messages=[{"role": "user", "content": (
-                "You are Ace giving Brady the straight 'how's my business looking' read — his "
-                "JARVIS chief of staff who knows the whole book. From the REAL data below, write: "
-                "(1) THE HEADLINE — one sentence, honest temperature of the business; "
-                "(2) PIPELINE — what's moving, what's aging out (call out anything 10+ days old "
-                "by name), where the money is this month; (3) TEAM — agent momentum, who needs a "
-                "push; (4) GOALS — pace vs his targets (EMD especially), the gap in plain numbers "
-                "where possible; (5) THE ONE MOVE — the single highest-leverage action right now. "
-                "Punchy, ~220 words max, plain text with short section labels. Never invent "
-                "numbers not in the data.\n\n"
+                "You are Ace giving Brady the straight 'where's the money' read — his chief of "
+                "staff across EVERYTHING he runs, not one company. His income surface right now: "
+                "GFI/insurance deals he's closing out, concrete work + business owners he's helping "
+                "(Damon etc.), contract/CRM clients, the job hunt (income floor), and any new "
+                "opportunity in play (e.g. a recruiting offer being evaluated). From the REAL data "
+                "below, write: (1) THE HEADLINE — one honest sentence on his money picture this "
+                "week; (2) MONEY MOVES — every move that can put dollars in this month, ranked by "
+                "$ x closeness, calling out anything stalled 10+ days by name; (3) OPPORTUNITIES — "
+                "new/open income plays and what each needs next; (4) THE ONE MOVE — the single "
+                "highest-leverage money action right now. Punchy, ~220 words max, plain text with "
+                "short section labels. Never invent numbers not in the data. No EMD pacing.\n\n"
                 f"TODAY: {now.strftime('%A, %B %d, %Y')}\n\n" + "\n\n".join(lines)
                 + "\n\nRECENT CONTEXT:\n" + _format_thread(ok(convo, [])))}])
         text = "".join(getattr(b, "text", "") for b in resp.content).strip()
@@ -1629,8 +1704,12 @@ async def _reminder_once(force: bool = False, dry_run: bool = False) -> dict:
         return {"skipped": "nothing due", "count": 0}   # don't claim — let it fire if one crosses later
     def _lbl(d):
         return "overdue" if d < 0 else "today" if d == 0 else "tomorrow"
-    def _short(t):
-        return (t.split("—")[0].split(" - ")[0]).strip()[:30]
+    def _short(t, cap=48):
+        t = (t.split("—")[0].split(" - ")[0]).strip()
+        if len(t) <= cap:
+            return t
+        cut = t[:cap].rsplit(" ", 1)[0]   # trim on a word boundary — no more "double-che"
+        return (cut if len(cut) >= 20 else t[:cap]) + "…"
     parts = [f"{_short(i['text'])} ({_lbl(i['due_days'])})" for i in hot[:4]]
     body = "Due now — " + "; ".join(parts) + (f" +{len(hot) - 4} more" if len(hot) > 4 else "")
     if dry_run:
@@ -1768,6 +1847,8 @@ async def _fast_context() -> str:
         f"it is TODAY. If Brady asks what day, date, or time it is, answer with THIS exactly. "
         f"Never guess the date, never say you're unsure, never ask him what day it is — you "
         f"always know, it is stated right here and refreshed every turn.",
+        "",
+        _profile_block(),
         "",
         "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
