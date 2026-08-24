@@ -19,6 +19,26 @@
 
   /* ============================================================ DEEP SPACE
      Starfield background — slow parallax drift, twinkle, rare shooting star. */
+  /* STILL MODE (2026-08-23, Brady: "not overheat like it does") — one tap freezes the starfield
+     to a single painted frame (zero ongoing GPU) and idles the orb at ~2fps; the orb still
+     surges to full life the moment Ace speaks. Persisted; the ❄ dock button toggles it. */
+  var stillMode = false;
+  try { stillMode = localStorage.getItem('ace2_still') === 'on'; } catch (e) {}
+  var _stillHooks = [];   // each visual registers how to react when the mode flips
+  function setStill(on) {
+    stillMode = !!on;
+    try { localStorage.setItem('ace2_still', stillMode ? 'on' : 'off'); } catch (e) {}
+    var b = document.getElementById('still-btn');
+    if (b) { b.classList.toggle('active', stillMode); b.setAttribute('aria-pressed', String(stillMode)); }
+    for (var i = 0; i < _stillHooks.length; i++) { try { _stillHooks[i](stillMode); } catch (e) {} }
+  }
+  window.addEventListener('DOMContentLoaded', function () {
+    var b = document.getElementById('still-btn');
+    if (!b) return;
+    b.classList.toggle('active', stillMode); b.setAttribute('aria-pressed', String(stillMode));
+    b.addEventListener('click', function () { setStill(!stillMode); });
+  });
+
   (function () {
     var canvas = $('matrix'), ctx = canvas.getContext('2d');
     var stars = [], meteors = [], running = true;
@@ -41,8 +61,18 @@
         hue: Math.random() < .78 ? '180,255,220' : (Math.random() < .6 ? '150,230,255' : '200,190,255'),
       });
     }
+    // STILL MODE: paint the sky ONCE (mid-twinkle, no meteors) and stop the loop entirely.
+    function paintStill() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        ctx.fillStyle = 'rgba(' + s.hue + ',' + (.42 * s.z).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.s * s.z, 0, 6.283); ctx.fill();
+      }
+    }
     function frame(now) {
       if (!running) return;
+      if (stillMode) { running = false; paintStill(); return; }    // freeze: one frame, loop OFF
       requestAnimationFrame(frame);
       var idle = (now - _lastTouch) > 20000;                       // untouched 20s → chill
       var gap = _rm ? (idle ? 400 : 66) : (idle ? 120 : 33);       // ms between paints
@@ -69,10 +99,15 @@
         ctx.beginPath(); ctx.moveTo(mt.x - mt.vx * 6, mt.y - mt.vy * 6); ctx.lineTo(mt.x, mt.y); ctx.stroke();
       }
     }
-    resize(); window.addEventListener('resize', resize);
+    resize(); window.addEventListener('resize', function () { resize(); if (stillMode) paintStill(); });
     document.addEventListener('visibilitychange', function () {
+      if (stillMode) return;   // frozen sky has nothing to pause or resume
       var was = running; running = document.visibilityState === 'visible';
       if (running && !was) requestAnimationFrame(frame);
+    });
+    _stillHooks.push(function (on) {
+      if (on) { running = false; paintStill(); }
+      else if (!running) { running = true; requestAnimationFrame(frame); }
     });
     requestAnimationFrame(frame);
   })();
@@ -148,7 +183,8 @@
     function frame(now) {
       requestAnimationFrame(frame);
       if (document.hidden) return;                       // COOL MODE: pause the orb in background
-      var gap = amp > 0.001 ? 0 : (_orm ? 80 : 40);      // voice = smooth 60fps; idle = ~25fps
+      // voice = smooth 60fps; idle = ~25fps; STILL MODE idle = ~2fps whisper (near-zero heat)
+      var gap = amp > 0.001 ? 0 : (stillMode ? 500 : (_orm ? 80 : 40));
       if (now - _orbPaint < gap) return;
       _orbPaint = now;
       var t = now / 1000; last = now;
