@@ -807,7 +807,11 @@ async def prime_ctx() -> None:
         asyncio.create_task(_learn_loop())
         asyncio.create_task(_brief_loop())   # proactive: morning game plan + EOD recap
         asyncio.create_task(_watch_loop())   # ambient: he notices things and speaks up unasked
-        asyncio.create_task(_reminder_loop())   # reliable: deterministic due-today/overdue phone push
+        # 1pm due-now push RETIRED 2026-08-24 (Brady: "useless honestly because of how much I use
+        # him") — he's in Ace all day, so a scheduled list is noise on top of the briefs + the
+        # ambient watch. The engine stays (POST /reminder/run still works on demand, and the
+        # Steward desk will own due-date nudges with real triggers instead of a clock).
+        # asyncio.create_task(_reminder_loop())
         asyncio.create_task(_graph_warm_loop())   # keep the knowledge map instant to open
 
 
