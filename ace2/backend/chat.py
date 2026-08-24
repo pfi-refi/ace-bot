@@ -60,11 +60,12 @@ MODEL = os.environ.get("ACE2_MODEL", "claude-sonnet-5")
 # (time-to-first-word) matters far more than depth per spoken sentence, and Opus's
 # thinking latency is the main thing that makes voice feel laggy. Typed stays on MODEL.
 # Bump to claude-sonnet-5 via env if voice needs more reasoning per turn.
-# 2026-08-24: Haiku on voice told Brady to send the $468 BALANCE instead of the $77.94 payment
-# (and mixed up gas/sewer) during a money conversation — reliability on money questions is the
-# product. Voice brain → Sonnet-5 (intro pricing thru 8/31; voice volume is low). The SSE
-# lead-in covers the slightly slower first token. Revert lever: ACE2_VOICE_MODEL env.
-VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-sonnet-5")
+# 2026-08-24 REVERTED same day: Sonnet-5 on voice made first-token latency exceed ElevenLabs'
+# cutoff on longer turns — calls died SILENT (Brady 16:48-16:50: update never arrived, zero
+# replies to follow-ups). Haiku restored: TALKING is the product. Money-precision lives in
+# prompt rules 7c/7d (model-agnostic); complex money math belongs in typed chat / the sheet.
+# If we ever retry a bigger voice model: shrink the voice context first + verify EL timeout.
+VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
 # The background LEARNING/TRIAGE sweep + briefs + graph + nudges are NOT latency-bound (they
 # run off the live path), so they don't need the premium typed brain (Opus, $5/$25). Sonnet 5
 # ($3/$15, cheaper still on intro pricing) is near-Opus quality and cut Brady's API bill ~40-60%
@@ -1995,6 +1996,16 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         return ""
     maybe_toggle_privacy(user_text)   # flip Discreet Mode deterministically before context is built
 
+    # ★ SAVE WHAT BRADY SAID *FIRST* (2026-08-24). His words used to be persisted only AFTER the
+    # model replied, so any turn that died mid-call — a voice timeout, an API error, ElevenLabs
+    # cutting the call — swallowed the update entirely: it reached NOTHING, not even history.
+    # That's how a whole brain-dump vanished twice. Now the user half lands immediately, so even
+    # a failed turn leaves his words captured and recoverable in the thread.
+    try:
+        await asyncio.to_thread(history.append, "user", user_text)
+    except Exception as e:
+        logger.warning("early user-persist failed: %s", e)
+
     try:
         ctx = await (_fast_context() if fast else _live_context())
         system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()
@@ -2204,8 +2215,9 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         # exchange — raw tool-result strings used to be stored as things "Ace said," and
         # those calendar dumps / ⚠️ warnings resurfaced in the RECENT THREAD, nudging the
         # voice model into status-report babble. The reply already summarizes what was done.
+        # NOTE: the USER half is already saved up front (see _persist_user above) so a turn
+        # that dies mid-model-call can never swallow what Brady said.
         try:
-            await asyncio.to_thread(history.append, "user", user_text)
             if reply:
                 await asyncio.to_thread(history.append, "assistant", reply)
         except Exception as e:
