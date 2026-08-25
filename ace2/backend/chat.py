@@ -161,46 +161,9 @@ def _needs_confirm(name: str, args: dict) -> bool:
 # impossible and the gate would re-arm forever — update_profile could NEVER complete). to/subject
 # are stated verbatim in Ace's ask, so they ARE reproducible; the body may be re-sent fresh.
 # Tools absent from this map bind on ALL fields (default, right for short structured args).
-_SIG_KEYS = {
-    "send_email": ("to", "cc", "bcc", "subject"),
-    "mcp_send_gmail_message": ("to", "cc", "bcc", "subject"),
-    "update_profile": (),   # single fixed target — the earlier-turn ticket itself is the guard
-    # 2026-08-25: Brady confirmed a calendar delete SIX times and it never executed. On voice the
-    # model re-states the call each turn and any drift — a trailing space, "10:00 AM" vs "10am",
-    # an optional field appearing — changed the signature, so the gate re-armed forever. Bind the
-    # IDENTITY of the event (what he actually approved), not every incidental argument.
-    "delete_calendar_event": ("event_title", "event_date"),
-}
-
-# Plain-language approval. The model is SUPPOSED to re-call with confirmed:true, but that
-# instruction lives in a TOOL RESULT — which is never persisted — so on the next turn it has no
-# memory of being asked, and often just re-calls without the flag. That is why Brady confirmed a
-# delete SIX times on 2026-08-25 and nothing ever executed. Approval is now detected
-# deterministically from HIS words, exactly like Discreet Mode's phrase detection.
-_APPROVE_RE = re.compile(
-    r"\b(y(es|ep|eah|up)|confirm(ed|ing)?|approved?|permission|go ahead|do it|"
-    r"send it|delete it|proceed|that'?s right|sounds right|please do|correct)\b", re.I)
-_turn_user_text = [""]   # this turn's user message; single-user system, set in stream_turn
-
-
-def _sig_norm(v):
-    """Normalize a value for signature comparison: whitespace/case drift between the ask-turn and
-    the yes-turn must NOT invalidate an approval Brady already gave."""
-    if isinstance(v, str):
-        return " ".join(v.split()).lower()
-    return v
-
-
-def _args_sig(name: str, clean: dict) -> str:
-    """Stable signature of the payload the confirm was ARMED on, so a 'yes' can only execute the
-    action Brady saw. Long-free-text tools bind identity fields only (see _SIG_KEYS)."""
-    keys = _SIG_KEYS.get(name)
-    payload = ({k: _sig_norm(v) for k, v in clean.items()} if keys is None
-               else {k: _sig_norm(clean.get(k)) for k in keys if k in clean})
-    try:
-        return json.dumps(payload, sort_keys=True, default=str)
-    except Exception:
-        return repr(payload)
+# (2026-08-25) The args-signature machinery that used to live here was REMOVED — see the
+# history note inside _confirm_gate. It deadlocked the gate in practice. Deliberately not
+# reinstated; if you want approve-X-execute-X enforcement, test it live over many rounds.
 
 
 def _confirm_gate(name: str, args: dict, turn_id: int):
@@ -212,21 +175,27 @@ def _confirm_gate(name: str, args: dict, turn_id: int):
     now = time.time()
     for k in [k for k, v in _pending_confirm.items() if now - v["ts"] > _CONFIRM_TTL_SEC]:
         _pending_confirm.pop(k, None)
-    sig = _args_sig(name, clean)
     ticket = _pending_confirm.get(name)
     armed_earlier = bool(ticket) and ticket["turn"] < turn_id
     # TWO ways to approve (2026-08-25). The model is supposed to re-call with confirmed:true, but
     # that instruction lives in a never-persisted tool result, so it frequently doesn't — Brady
     # said yes SIX times and nothing ran. So a plain-language approval in HIS message counts too.
+    #
+    # ⚠ HISTORY — do NOT "improve" this again without live multi-round testing:
+    #  • 2026-08-19 added an args-SIGNATURE check (approve X, execute X). In practice the model
+    #    re-states the call each turn and any drift changed the signature → the gate re-armed
+    #    forever → Brady confirmed a delete SIX times and nothing ran.
+    #  • 2026-08-25 then executed the TICKET's stored args instead — which replayed a STALE
+    #    request across exchanges: asked to delete event 2, it deleted event 1. Worse.
+    # Back to the behavior that ran correctly for months: the ticket proves an ask happened on an
+    # EARLIER turn; the CURRENT call's args are what execute. The model re-states the target in
+    # the same breath it executes, and the confirm text Brady sees comes from that same call.
     approved = armed_earlier and (bool(args.get("confirmed"))
                                   or bool(_APPROVE_RE.search(_turn_user_text[0] or "")))
     if approved:
         _pending_confirm.pop(name, None)   # single-use — a fresh call must re-arm
-        # Execute EXACTLY what he was told he was approving. The ticket carries the original
-        # args, so cosmetic drift in the model's re-call can't change the target (the 2026-08-19
-        # protection) AND can't deadlock the gate either — we simply run the approved payload.
-        return False, dict(ticket.get("args") or clean)
-    _pending_confirm[name] = {"turn": turn_id, "ts": now, "sig": sig, "args": dict(clean)}
+        return False, clean
+    _pending_confirm[name] = {"turn": turn_id, "ts": now}
     return True, clean
 EFFORT = os.environ.get("ACE2_EFFORT", "low")   # low|medium|high|xhigh|max — LEAN MODE: was medium
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
