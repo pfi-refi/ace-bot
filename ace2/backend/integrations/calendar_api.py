@@ -407,6 +407,36 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
                 "start": {"date": date_str},
                 "end": {"date": date_str},
             }
+        # IDEMPOTENT CREATE (2026-08-25) — the root cause of Brady's double-booked Grandpa coffee
+        # and QUADRUPLE-booked Ken call. A voice turn can execute its tools and then die before
+        # replying (ElevenLabs retries a slipped deadline; main.py cancel-and-replace only stops
+        # the OLD task, it can't un-create what already hit Google). Each retry inserted the event
+        # again. Now an identical event (same title + same start, already on the calendar) is a
+        # no-op that reports success — retries converge instead of stacking.
+        try:
+            probe_start = (start_dt if event_body.get("start", {}).get("dateTime")
+                           else EASTERN.localize(datetime.strptime(date_str, "%Y-%m-%d")))
+            existing = service.events().list(
+                calendarId=calendar_id,
+                timeMin=(probe_start - timedelta(minutes=1)).isoformat(),
+                timeMax=(probe_start + timedelta(days=1) if not event_body.get("start", {}).get("dateTime")
+                         else probe_start + timedelta(minutes=1)).isoformat(),
+                singleEvents=True,
+            ).execute().get("items", [])
+            want = (title or "").strip().lower()
+            for e in existing:
+                if (e.get("summary") or "").strip().lower() != want:
+                    continue
+                s = e.get("start", {})
+                same = (s.get("dateTime", "")[:16] == event_body["start"].get("dateTime", "")[:16]
+                        if event_body["start"].get("dateTime")
+                        else s.get("date") == event_body["start"].get("date"))
+                if same:
+                    logger.info("calendar: '%s' already exists at that time — skipping duplicate insert", title)
+                    return True, e.get("id", "already-exists")
+        except Exception as e:
+            logger.warning("calendar dup-probe failed (%s) — creating anyway", e)
+
         result = service.events().insert(calendarId=calendar_id, body=event_body).execute()
         return True, result.get("id", "created")
     except Exception as e:
@@ -462,16 +492,40 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALE
             all_matches += [(cid, e) for e in events if title_lower in e.get("summary", "").lower()]
         if not all_matches:
             return False, f"No event matching '{title}' on {date_str} on any calendar"
-        if len(all_matches) > 1:
-            def _when(e):
-                s = e.get("start", {})
-                return (s.get("dateTime", "")[11:16] or "all-day")
-            opts = " | ".join(f"'{e.get('summary', '')}' ({_when(e)})" for _, e in all_matches[:6])
-            return False, ("AMBIGUOUS — more than one event matches '" + title + "' on "
+
+        def _when(e):
+            s = e.get("start", {})
+            return (s.get("dateTime", "") or s.get("date", ""))
+
+        # TRUE DUPLICATES vs GENUINE AMBIGUITY (2026-08-25). The ambiguity guard added on 8/19
+        # refused ANY multi-match — which made deleting duplicates IMPOSSIBLE, exactly when Brady
+        # needed it (4 identical Ken calls). Events sharing the same title AND start time are
+        # duplicates, not a choice: remove the extras and keep ONE. Only genuinely DIFFERENT
+        # events still refuse and hand back candidates.
+        groups = {}
+        for cid, e in all_matches:
+            groups.setdefault(((e.get("summary") or "").strip().lower(), _when(e)), []).append((cid, e))
+        if len(groups) > 1:
+            opts = " | ".join(f"'{e.get('summary', '')}' ({_when(e)[11:16] or 'all-day'})"
+                              for _, e in all_matches[:6])
+            return False, ("AMBIGUOUS — more than one DIFFERENT event matches '" + title + "' on "
                            + date_str + ": " + opts + ". Ask Brady which one before deleting.")
-        cid, ev = all_matches[0]
-        service.events().delete(calendarId=cid, eventId=ev["id"]).execute()
-        return True, ev.get("summary", title)
+
+        dupes = list(groups.values())[0]
+        if len(dupes) == 1:
+            cid, ev = dupes[0]
+            service.events().delete(calendarId=cid, eventId=ev["id"]).execute()
+            return True, ev.get("summary", title)
+        # Several copies of the SAME event → delete all but one, report what happened.
+        removed = 0
+        for cid, ev in dupes[1:]:
+            try:
+                service.events().delete(calendarId=cid, eventId=ev["id"]).execute()
+                removed += 1
+            except Exception as e:
+                logger.warning("delete dup failed on %s: %s", cid, e)
+        name = dupes[0][1].get("summary", title)
+        return True, (f"{name} — removed {removed} duplicate(s), one left on the calendar")
     except Exception as e:
         logger.error("Calendar delete error: %s", e)
         return False, str(e)

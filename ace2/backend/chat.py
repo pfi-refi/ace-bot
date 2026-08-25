@@ -163,14 +163,28 @@ _SIG_KEYS = {
     "send_email": ("to", "cc", "bcc", "subject"),
     "mcp_send_gmail_message": ("to", "cc", "bcc", "subject"),
     "update_profile": (),   # single fixed target — the earlier-turn ticket itself is the guard
+    # 2026-08-25: Brady confirmed a calendar delete SIX times and it never executed. On voice the
+    # model re-states the call each turn and any drift — a trailing space, "10:00 AM" vs "10am",
+    # an optional field appearing — changed the signature, so the gate re-armed forever. Bind the
+    # IDENTITY of the event (what he actually approved), not every incidental argument.
+    "delete_calendar_event": ("title", "date"),
 }
+
+
+def _sig_norm(v):
+    """Normalize a value for signature comparison: whitespace/case drift between the ask-turn and
+    the yes-turn must NOT invalidate an approval Brady already gave."""
+    if isinstance(v, str):
+        return " ".join(v.split()).lower()
+    return v
 
 
 def _args_sig(name: str, clean: dict) -> str:
     """Stable signature of the payload the confirm was ARMED on, so a 'yes' can only execute the
     action Brady saw. Long-free-text tools bind identity fields only (see _SIG_KEYS)."""
     keys = _SIG_KEYS.get(name)
-    payload = clean if keys is None else {k: clean.get(k) for k in keys if k in clean}
+    payload = ({k: _sig_norm(v) for k, v in clean.items()} if keys is None
+               else {k: _sig_norm(clean.get(k)) for k in keys if k in clean})
     try:
         return json.dumps(payload, sort_keys=True, default=str)
     except Exception:
