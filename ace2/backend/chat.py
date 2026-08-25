@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -167,8 +168,18 @@ _SIG_KEYS = {
     # model re-states the call each turn and any drift — a trailing space, "10:00 AM" vs "10am",
     # an optional field appearing — changed the signature, so the gate re-armed forever. Bind the
     # IDENTITY of the event (what he actually approved), not every incidental argument.
-    "delete_calendar_event": ("title", "date"),
+    "delete_calendar_event": ("event_title", "event_date"),
 }
+
+# Plain-language approval. The model is SUPPOSED to re-call with confirmed:true, but that
+# instruction lives in a TOOL RESULT — which is never persisted — so on the next turn it has no
+# memory of being asked, and often just re-calls without the flag. That is why Brady confirmed a
+# delete SIX times on 2026-08-25 and nothing ever executed. Approval is now detected
+# deterministically from HIS words, exactly like Discreet Mode's phrase detection.
+_APPROVE_RE = re.compile(
+    r"\b(y(es|ep|eah|up)|confirm(ed|ing)?|approved?|permission|go ahead|do it|"
+    r"send it|delete it|proceed|that'?s right|sounds right|please do|correct)\b", re.I)
+_turn_user_text = [""]   # this turn's user message; single-user system, set in stream_turn
 
 
 def _sig_norm(v):
@@ -202,14 +213,19 @@ def _confirm_gate(name: str, args: dict, turn_id: int):
         _pending_confirm.pop(k, None)
     sig = _args_sig(name, clean)
     ticket = _pending_confirm.get(name)
-    # A 'yes' only passes if it matches the SAME payload that was armed (2026-08-19 audit): the
-    # ticket used to key on tool NAME only, so a confirmed delete/send could execute DIFFERENT
-    # args than the ones Brady approved. Binding the signature closes that gap — a changed target
-    # falls through and RE-ARMS (asks again) instead of silently acting on the wrong thing.
-    if args.get("confirmed") and ticket and ticket["turn"] < turn_id and ticket.get("sig") == sig:
+    armed_earlier = bool(ticket) and ticket["turn"] < turn_id
+    # TWO ways to approve (2026-08-25). The model is supposed to re-call with confirmed:true, but
+    # that instruction lives in a never-persisted tool result, so it frequently doesn't — Brady
+    # said yes SIX times and nothing ran. So a plain-language approval in HIS message counts too.
+    approved = armed_earlier and (bool(args.get("confirmed"))
+                                  or bool(_APPROVE_RE.search(_turn_user_text[0] or "")))
+    if approved:
         _pending_confirm.pop(name, None)   # single-use — a fresh call must re-arm
-        return False, clean
-    _pending_confirm[name] = {"turn": turn_id, "ts": now, "sig": sig}
+        # Execute EXACTLY what he was told he was approving. The ticket carries the original
+        # args, so cosmetic drift in the model's re-call can't change the target (the 2026-08-19
+        # protection) AND can't deadlock the gate either — we simply run the approved payload.
+        return False, dict(ticket.get("args") or clean)
+    _pending_confirm[name] = {"turn": turn_id, "ts": now, "sig": sig, "args": dict(clean)}
     return True, clean
 EFFORT = os.environ.get("ACE2_EFFORT", "low")   # low|medium|high|xhigh|max — LEAN MODE: was medium
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
@@ -2022,6 +2038,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         await emit("error", {"text": "Empty message"})
         return ""
     maybe_toggle_privacy(user_text)   # flip Discreet Mode deterministically before context is built
+    _turn_user_text[0] = user_text    # the confirm gate reads this to detect a spoken approval
 
     # ★ SAVE WHAT BRADY SAID *FIRST* (2026-08-24). His words used to be persisted only AFTER the
     # model replied, so any turn that died mid-call — a voice timeout, an API error, ElevenLabs
