@@ -157,13 +157,19 @@ def _needs_confirm(name: str, args: dict) -> bool:
 
 # Per-tool sig keys (2026-08-23 scrub C1): the ticket binds the fields that IDENTIFY the action
 # Brady approved — never long free-text the model must REGENERATE on the yes-turn (tool_use args
-# aren't in the next turn's transcript, so a byte-identical replay of a 300-word body is
-# impossible and the gate would re-arm forever — update_profile could NEVER complete). to/subject
-# are stated verbatim in Ace's ask, so they ARE reproducible; the body may be re-sent fresh.
-# Tools absent from this map bind on ALL fields (default, right for short structured args).
 # (2026-08-25) The args-signature machinery that used to live here was REMOVED — see the
 # history note inside _confirm_gate. It deadlocked the gate in practice. Deliberately not
 # reinstated; if you want approve-X-execute-X enforcement, test it live over many rounds.
+
+# Plain-language approval. The model is SUPPOSED to re-call with confirmed:true, but that
+# instruction lives in a TOOL RESULT — which is never persisted — so on the next turn it has no
+# memory of being asked and often just re-calls without the flag. That is why Brady confirmed a
+# delete SIX times on 2026-08-25 and nothing executed. Approval is therefore ALSO detected
+# deterministically from HIS words, exactly like Discreet Mode's phrase detection.
+_APPROVE_RE = re.compile(
+    r"\b(y(es|ep|eah|up)|confirm(ed|ing)?|approved?|permission|go ahead|do it|"
+    r"send it|delete it|proceed|that'?s right|sounds right|please do|correct)\b", re.I)
+_turn_user_text = [""]   # this turn's user message; single-user system, set in stream_turn
 
 
 def _confirm_gate(name: str, args: dict, turn_id: int):
