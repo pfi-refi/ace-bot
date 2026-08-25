@@ -108,9 +108,10 @@ _CONFIRM_MSG = (
     "CONFIRMATION REQUIRED — nothing was executed. Tell Brady in ONE plain sentence exactly "
     "what this will do (for an email: who it goes to and the subject; for a delete or change: "
     "which item and what happens to it) and ask him to confirm. Do NOT say it's done — it has "
-    "not happened. Only after he clearly says yes on a LATER turn, call this same tool again "
-    "with the same details plus \"confirmed\": true. If he wants any change, call it again with "
-    "the updated details (no confirmed) so he can okay the new version. If he says no, drop it."
+    "not happened. Only after he clearly says yes on a LATER turn, call this same tool ONCE more "
+    "with the same details plus \"confirmed\": true — then REPORT THE RESULT YOU GET BACK and "
+    "stop; do not call it a third time. If he wants any change, call it again with the updated "
+    "details (no confirmed) so he can okay the new version. If he says no, drop it."
 )
 # Second+ block of the SAME tool inside one turn: the model is churning (re-calling with
 # confirmed:true in the same breath — approval can only arrive on Brady's NEXT turn). Cut the
@@ -2063,6 +2064,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     confirmations = []
     handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
     blocked_counts: dict = {}   # per-tool confirm-gate blocks THIS turn (2nd+ gets the STOP message)
+    executed_gated: set = set()  # gated tools that ALREADY RAN this turn — a reflex re-call
+                                 # must be told 'done', never re-gated into a false denial
     passthrough = {t["name"] for t in (extra_tools or [])}
     passthrough_called = False   # an el_tool fired (end_call/skip_turn) — the platform takes over
     # One monotonic id per real user turn — the confirm gate uses it to tell "Brady
@@ -2208,9 +2211,23 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 is_ui = block.name in tools.UI_TOOLS
+                # ALREADY DONE THIS TURN (2026-08-25): _CONFIRM_MSG tells the model to "call this
+                # same tool again with confirmed:true" — so after an APPROVED execution it often
+                # obeys and calls once more. The ticket is single-use and already consumed, so the
+                # second call re-armed the gate and returned "nothing was executed", which the
+                # model then faithfully narrated — Ace telling Brady a delete didn't happen right
+                # after it did. Short-circuit the repeat with the truth instead.
+                if block.name in executed_gated:
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id,
+                                         "content": ("ALREADY EXECUTED this turn — it completed "
+                                                     "successfully. Report it as DONE and do not "
+                                                     "call this tool again.")})
+                    continue
                 # Gate BEFORE any "running" narration — a blocked action must never be
                 # spoken/painted as if it happened (it's about to be asked, not done).
                 blocked, use_args = _confirm_gate(block.name, dict(block.input), turn_id)
+                if not blocked and block.name in _CONFIRM_ALWAYS:
+                    executed_gated.add(block.name)
                 if blocked:
                     # No action pill/narration; just a keep-alive token so a voice
                     # turn's confirmation question doesn't stall behind a silent round-trip.
