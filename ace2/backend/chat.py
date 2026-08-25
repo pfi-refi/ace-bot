@@ -2192,17 +2192,25 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 # second call re-armed the gate and returned "nothing was executed", which the
                 # model then faithfully narrated — Ace telling Brady a delete didn't happen right
                 # after it did. Short-circuit the repeat with the truth instead.
-                if block.name in executed_gated:
+                # Keyed by tool + ARGS, never tool alone: deleting event A then event B in the
+                # same turn are different actions, and a name-only key made B falsely report as
+                # done without running (caught live 2026-08-25, round 2 of 3).
+                try:
+                    _act_key = block.name + "|" + json.dumps(
+                        _strip_confirm(dict(block.input)), sort_keys=True, default=str)
+                except Exception:
+                    _act_key = block.name + "|" + repr(block.input)
+                if _act_key in executed_gated:
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id,
                                          "content": ("ALREADY EXECUTED this turn — it completed "
                                                      "successfully. Report it as DONE and do not "
-                                                     "call this tool again.")})
+                                                     "call it again for the same target.")})
                     continue
                 # Gate BEFORE any "running" narration — a blocked action must never be
                 # spoken/painted as if it happened (it's about to be asked, not done).
                 blocked, use_args = _confirm_gate(block.name, dict(block.input), turn_id)
                 if not blocked and block.name in _CONFIRM_ALWAYS:
-                    executed_gated.add(block.name)
+                    executed_gated.add(_act_key)
                 if blocked:
                     # No action pill/narration; just a keep-alive token so a voice
                     # turn's confirmation question doesn't stall behind a silent round-trip.
