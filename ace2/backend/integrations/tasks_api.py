@@ -565,6 +565,57 @@ def read_gmail(message_id: str) -> str:
         return f"⚠️ Could not read email: {e}"
 
 
+def search_personal_gmail(query: str, max_results: int = 8) -> str:
+    """Search Brady's PERSONAL mailbox (br80mcgraw) — READ ONLY, same query syntax as
+    search_gmail. Separate from PFI on purpose (2026-08-25): Ace could SEE personal headlines in
+    context but had no way to search or open them, so 'find that Indeed email' failed."""
+    creds = get_google_creds_personal()
+    if not creds:
+        return "⚠️ Personal mailbox isn't connected."
+    try:
+        service = build("gmail", "v1", credentials=creds)
+        n = max(1, min(int(max_results), 20))
+        msgs = service.users().messages().list(
+            userId="me", q=query, maxResults=n).execute().get("messages", [])
+        if not msgs:
+            return f"No personal emails found for: {query}"
+        lines = []
+        for m in msgs:
+            md = service.users().messages().get(
+                userId="me", id=m["id"], format="metadata",
+                metadataHeaders=["From", "Subject", "Date"]).execute()
+            h = {x["name"]: x["value"] for x in md.get("payload", {}).get("headers", [])}
+            sender = h.get("From", "Unknown")
+            if "<" in sender:
+                sender = sender.split("<")[0].strip().strip('"')
+            lines.append(f"[{m['id']}] {sender} — {h.get('Subject','No subject')} "
+                         f"({h.get('Date','')[:16]})\n   {md.get('snippet','')[:140]}")
+        return "PERSONAL MAILBOX (br80mcgraw):\n" + "\n".join(lines)
+    except Exception as e:
+        logger.error("personal gmail search error: %s", e)
+        return f"⚠️ Could not search the personal mailbox: {e}"
+
+
+def read_personal_gmail(message_id: str) -> str:
+    """Read one full email from the PERSONAL mailbox by id (from search_personal_gmail)."""
+    creds = get_google_creds_personal()
+    if not creds:
+        return "⚠️ Personal mailbox isn't connected."
+    try:
+        service = build("gmail", "v1", credentials=creds)
+        md = service.users().messages().get(
+            userId="me", id=message_id.strip(), format="full").execute()
+        h = {x["name"]: x["value"] for x in md.get("payload", {}).get("headers", [])}
+        body = (_extract_email_body(md.get("payload", {})) or "").strip()[:4000] or "(no readable text body)"
+        return (f"[PERSONAL] From: {h.get('From','Unknown')}\n"
+                f"Subject: {h.get('Subject','No subject')}\n"
+                f"Date: {h.get('Date','')}\n"
+                f"Open: https://mail.google.com/mail/?authuser=br80mcgraw@gmail.com#all/{message_id.strip()}\n\n{body}")
+    except Exception as e:
+        logger.error("personal gmail read error: %s", e)
+        return f"⚠️ Could not read that personal email: {e}"
+
+
 def send_email(to_addr: str, subject: str, body: str) -> bool:
     """Send an email immediately via Gmail."""
     try:

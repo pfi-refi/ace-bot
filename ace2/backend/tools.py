@@ -37,6 +37,8 @@ from .integrations.tasks_api import (
     read_gmail,
     search_drive,
     search_gmail,
+    search_personal_gmail,
+    read_personal_gmail,
     send_email,
 )
 
@@ -191,6 +193,39 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "message_id": {"type": "string", "description": "The email id from search_gmail"},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "search_personal_gmail",
+        "description": (
+            "Search Brady's PERSONAL mailbox (br80mcgraw) — his own life, separate from PFI: "
+            "recruiters and job leads, personal clients, family, bills and personal accounts. "
+            "READ ONLY — you can never send from this address. Use it whenever what he's asking "
+            "about is personal, or when search_gmail (PFI) comes up empty. Same Gmail operators. "
+            "Pass an id to read_personal_gmail for the full body."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Gmail search query (operators supported)"},
+                "max_results": {"type": "integer", "description": "How many to return (1-20, default 8)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "read_personal_gmail",
+        "description": (
+            "Read the FULL body of one PERSONAL email by its id (from search_personal_gmail). "
+            "The result includes a direct link — pair it with open_url to put the actual email "
+            "on Brady's screen when he asks to see it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The email id from search_personal_gmail"},
             },
             "required": ["message_id"],
         },
@@ -485,6 +520,8 @@ TOOL_LABELS = {
     "send_email": "SENDING EMAIL",
     "draft_email": "DRAFTING EMAIL",
     "search_gmail": "SEARCHING EMAIL",
+    "search_personal_gmail": "SEARCHING PERSONAL EMAIL",
+    "read_personal_gmail": "READING PERSONAL EMAIL",
     "read_gmail": "READING EMAIL",
     "recall": "SEARCHING MEMORY",
     "search_drive": "SEARCHING DRIVE",
@@ -705,6 +742,14 @@ def _do_search_gmail(query, max_results=8, **_):
     return search_gmail(query, max_results)
 
 
+def _do_search_personal_gmail(query, max_results=8, **_):
+    return search_personal_gmail(query, max_results)
+
+
+def _do_read_personal_gmail(message_id, **_):
+    return read_personal_gmail(message_id)
+
+
 def _do_read_gmail(message_id, **_):
     return read_gmail(message_id)
 
@@ -722,6 +767,8 @@ _DISPATCH = {
     "send_email": _do_send_email,
     "draft_email": _do_draft_email,
     "search_gmail": _do_search_gmail,
+    "search_personal_gmail": _do_search_personal_gmail,
+    "read_personal_gmail": _do_read_personal_gmail,
     "read_gmail": _do_read_gmail,
     "recall": _do_recall,
     "search_drive": _do_search_drive,
