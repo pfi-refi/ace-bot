@@ -309,7 +309,7 @@ def recent_turns(limit: int = 12) -> list:
 # (panel, context, graph) matches these case-sensitively.
 # 2026-08-10 LIFE PIVOT: Brady stepped back from GFI/PFI to personal clients + a stable job
 # while he digs out financially. New priority columns lead; the old business ones back-burner.
-CATEGORIES = ("Money", "Bills", "Job Hunt", "Goals", "Personal",
+CATEGORIES = ("Money", "Bills", "Opportunities", "Goals", "Personal",
               "Deals", "Agents", "Admin", "Networking", "Business", "Tech")
 _CANON_CAT = {c.lower(): c for c in CATEGORIES}
 

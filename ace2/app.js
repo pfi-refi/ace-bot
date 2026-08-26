@@ -1371,8 +1371,8 @@
   // money green, steel cyan, gunmetal, burnt orange, deep blue, indigo, signal red, amber.
   // LIFE PIVOT (2026-08-10): recovery columns lead in VIVID tactical colors; the old business
   // columns recede to MUTED slate — the board is visual-first on what matters now.
-  var CMD_CATS = { 'Money':'#2fd36b', 'Bills':'#ff8c1a', 'Job Hunt':'#38bdf8', 'Goals':'#ffb020', 'Personal':'#ff4757', 'Deals':'#8091a8', 'Agents':'#748097', 'Admin':'#8b95a3', 'Networking':'#6f7d95', 'Business':'#79869c', 'Tech':'#828da0' };
-  var CMD_ORDER = ['Money','Bills','Job Hunt','Goals','Personal','Deals','Agents','Admin','Networking','Business','Tech'];
+  var CMD_CATS = { 'Money':'#2fd36b', 'Bills':'#ff8c1a', 'Opportunities':'#38bdf8', 'Goals':'#ffb020', 'Personal':'#ff4757', 'Deals':'#8091a8', 'Agents':'#748097', 'Admin':'#8b95a3', 'Networking':'#6f7d95', 'Business':'#79869c', 'Tech':'#828da0' };
+  var CMD_ORDER = ['Money','Bills','Opportunities','Goals','Personal','Deals','Agents','Admin','Networking','Business','Tech'];
   var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[], editing:null };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }

@@ -511,7 +511,7 @@ def _format_weather(w) -> str:
     return (" ".join(lead) + tail + loc) or "(unavailable)"
 
 
-_PRIORITY_CATS = ("Money", "Bills", "Job Hunt", "Goals", "Personal")
+_PRIORITY_CATS = ("Money", "Bills", "Opportunities", "Goals", "Personal")
 _BACKBURNER_CATS = ("Deals", "Agents", "Admin", "Networking", "Business", "Tech")
 _ALL_CATS = _PRIORITY_CATS + _BACKBURNER_CATS
 
@@ -529,7 +529,7 @@ def _due_tag(it) -> str:
 
 def _format_daybank(items: list) -> str:
     """Render the board for Ace's per-turn context. Stage ④ (2026-08-13): PRIORITY columns
-    (Money/Bills/Job Hunt/Goals/Personal) are shown in full, due-sorted, with EXACT due labels
+    (Money/Bills/Opportunities/Goals/Personal) are shown in full, due-sorted, with EXACT due labels
     so Ace reasons about what's imminent instead of reciting a flat 88-line wall. Back-burner
     columns are capped and summarized — the FULL board is still reachable: update_item/complete
     resolve by `match` text server-side, so an item Ace can't see here is still completable by a
@@ -901,10 +901,10 @@ async def compose_sweep(force: bool = False) -> dict:
                     "finished it). Never re-add a CLOSED item unless Brady explicitly reopened it. "
                     "New info about a tracked task is NOT a new task. For real new ones emit:\n"
                     "ADD :: CATEGORY :: task title\n"
-                    "(CATEGORY from — priority: Money, Bills, Job Hunt, Goals, Personal; "
+                    "(CATEGORY from — priority: Money, Bills, Opportunities, Goals, Personal; "
                     "back-burner: Deals, Agents, Admin, Networking, Business, Tech. A money/tax/"
                     "debt move → Money; a recurring bill → Bills; a job or contract-income lead → "
-                    "Job Hunt.) One per line, ONLY those two formats, no other text. If nothing, "
+                    "Opportunities.) One per line, ONLY those two formats, no other text. If nothing, "
                     "reply NONE.\n\n"
                     "OPEN ITEMS:\n" + (tracked or "(none)") + "\n\n"
                     "RECENTLY CLOSED (do not re-add):\n" + (tracked_closed or "(none)") + "\n\n"
@@ -1102,7 +1102,7 @@ _BRIEF_TIMES = {"morning": (9, 0), "eod": (20, 15)}   # Eastern — Brady wants 
 def _board_stats() -> str:
     """Deterministic business snapshot from Ace's own store — no LLM guessing."""
     from . import db
-    _CATS = ["Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
+    _CATS = ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
     try:
         items = db.read_items(active_only=False)
     except Exception:
@@ -1136,7 +1136,7 @@ def _board_stats() -> str:
     if bills:
         lines.append("BILLS (the [DUE ...] label is EXACT — use it, never compute a date yourself):\n"
                      + "\n".join(_line(i) for i in sorted(bills, key=lambda x: (x.get("due_days") is None, x.get("due_days", 999)))[:18]))
-    jobs = [i.get("text", "") for i in open_items if cat(i) == "Job Hunt"]
+    jobs = [i.get("text", "") for i in open_items if cat(i) == "Opportunities"]
     if jobs:
         lines.append("JOB HUNT / INCOME MOVES:\n" + "\n".join(f"  - {t[:90]}" for t in jobs[:6]))
     # Wins from memory (the win-logger writes "Deal won:" / "Goal reached:" facts)
@@ -1198,7 +1198,7 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             all_items = []
         cutoff = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
                   else now - timedelta(hours=20))
-        _CATS = ("Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals",
+        _CATS = ("Money", "Bills", "Opportunities", "Goals", "Personal", "Deals",
                  "Agents", "Admin", "Networking", "Business", "Tech")
         def _cat_of(it):
             return next((t for t in (it.get("tags") or []) if t in _CATS), "")
@@ -1343,7 +1343,7 @@ async def generate_business_report() -> str:
         def ok(v, d):
             return d if isinstance(v, Exception) else v
         items, facts, events = ok(items, []), ok(facts, []), ok(events, [])
-        _CATS = ["Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
+        _CATS = ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
         def cat(it):
             for t in (it.get("tags") or []):
                 if t in _CATS:
@@ -1351,9 +1351,9 @@ async def generate_business_report() -> str:
             return "Admin"
         lines = []
         # PULSE RETUNE (2026-08-23, Brady): "any money-making moves — GFI deals, business owners
-        # I'm helping, etc." Not just the old GFI Deals/Agents lens: Money actions, Job Hunt
+        # I'm helping, etc." Not just the old GFI Deals/Agents lens: Money actions, Opportunities
         # (income), and Business (Damon/website/contract work) are all revenue surface now.
-        for c in ["Money", "Deals", "Business", "Job Hunt", "Agents"]:
+        for c in ["Money", "Deals", "Business", "Opportunities", "Agents"]:
             rows = []
             for i in items:
                 if i.get("status") == "open" and cat(i) == c:
@@ -1712,7 +1712,7 @@ _reminder_sent = {"date": None}   # process-local claim, mirrors the db marker
 
 
 def _reminder_scan(items: list) -> list:
-    prio = ("Money", "Bills", "Job Hunt", "Goals", "Personal")
+    prio = ("Money", "Bills", "Opportunities", "Goals", "Personal")
     hot = [i for i in items if i.get("status") == "open"
            and any(t in prio for t in (i.get("tags") or []))
            and i.get("due_days") is not None and i["due_days"] <= 1]

@@ -680,7 +680,7 @@ async def daybank_categorize():
     _CANON = {c.lower(): c for c in db.CATEGORIES}
     done = 0
     for ln in out.split("\n"):
-        m = re.match(r"\s*(\d+)\.\s*(.+?)\s*$", ln)   # capture the rest, so 'Job Hunt' survives
+        m = re.match(r"\s*(\d+)\.\s*(.+?)\s*$", ln)   # capture the rest, so 'Opportunities' survives
         if not m:
             continue
         idx = int(m.group(1))

@@ -388,7 +388,7 @@ TOOLS = [
                 "due": {"type": "string", "description": "Optional due date/time in plain words (e.g. 'today 5pm', 'Fri')"},
                 "category": {
                     "type": "string",
-                    "enum": ["Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
+                    "enum": ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
                     "description": "Which board column this belongs on (pick the best fit)",
                 },
             },
@@ -416,7 +416,7 @@ TOOLS = [
                 "text": {"type": "string", "description": "Optional new text (fold new details into the SAME item)"},
                 "category": {
                     "type": "string",
-                    "enum": ["Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
+                    "enum": ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
                     "description": "Optional: move the item to this board column",
                 },
                 "due": {"type": "string", "description": "Optional new due in plain words ('' clears it)"},
@@ -713,7 +713,7 @@ def _do_capture_item(kind="note", text="", due=None, category=None, **_):
 def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None, **_):
     tags = None
     if category:
-        _CATS = {"Money", "Bills", "Job Hunt", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
+        _CATS = {"Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
         it = None
         if id:
             it = next((x for x in daybank.read_items(False) if x.get("id") == id), None)
