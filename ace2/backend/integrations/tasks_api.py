@@ -445,6 +445,34 @@ def get_inbox_structured(max_results: int = 6) -> list:
         return []
 
 
+def _inbox_rows(creds, query: str, n: int) -> list:
+    """Shared inbox reader → [{id, from, subject, snippet, date, unread}]. Used by BOTH mailboxes
+    so work and personal behave identically. `unread` lets the card show read mail too (Brady,
+    2026-08-25: "shouldn't just be things I haven't read in case I need to dig through them")."""
+    service = build("gmail", "v1", credentials=creds)
+    n = max(1, min(int(n), 25))
+    msgs = service.users().messages().list(
+        userId="me", q=query, maxResults=n).execute().get("messages", [])
+    out = []
+    for m in msgs:
+        md = service.users().messages().get(
+            userId="me", id=m["id"], format="metadata",
+            metadataHeaders=["From", "Subject", "Date"]).execute()
+        h = {x["name"]: x["value"] for x in md.get("payload", {}).get("headers", [])}
+        sender = h.get("From", "Unknown")
+        if "<" in sender:
+            sender = sender.split("<")[0].strip().strip('"')
+        out.append({
+            "id": m["id"],
+            "from": sender[:40],
+            "subject": h.get("Subject", "No subject")[:110],
+            "snippet": md.get("snippet", "")[:150],
+            "date": h.get("Date", "")[:22],
+            "unread": "UNREAD" in (md.get("labelIds") or []),
+        })
+    return out
+
+
 def get_personal_inbox_structured(max_results: int = 5) -> list:
     """Brady's PERSONAL inbox (br80mcgraw), kept separate from PFI. Returns [] — SILENTLY — until
     GOOGLE_TOKEN_JSON_PERSONAL is set, so nothing shows or errors before he links it. Read-only."""

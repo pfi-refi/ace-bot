@@ -975,36 +975,67 @@
       // TWO LANES (2026-08-25): business + personal, clearly separated, each row tappable
       // straight into the right Gmail account. Falls back to the legacy single list if the
       // server hasn't been updated yet.
+      // TABBED INBOX (2026-08-25, Brady: "needs to be bigger, toggle between the 2, and
+      // shouldn't just be things I haven't read"). One mailbox at a time, full width, recent
+      // mail read OR unread, unread visibly marked. Tab choice is remembered.
       var biz = data.business || data.emails || [];
       var per = data.personal || [];
-      var body7 = cardShell('INBOX  ·  ' + biz.length + ' work'
-                            + (per.length ? '  ·  ' + per.length + ' personal' : ''), slot);
-      if (!biz.length && !per.length) return empty(body7, 'Both inboxes clear — nothing unread.');
-      function lane(label, rows, cls) {
-        var h = document.createElement('div');
-        h.className = 'in-lane ' + cls;
-        h.textContent = label + ' · ' + rows.length;
-        body7.appendChild(h);
+      var unreadBiz = biz.filter(function (m) { return m.unread; }).length;
+      var unreadPer = per.filter(function (m) { return m.unread; }).length;
+      var body7 = cardShell('INBOX', slot);
+      body7.parentNode.classList.add('card-wide');          // this card earns the width
+      var which = 'biz';
+      try { which = localStorage.getItem('ace2_inbox_tab') === 'per' ? 'per' : 'biz'; } catch (e) {}
+      if (which === 'per' && !per.length && biz.length) which = 'biz';
+
+      var tabs = document.createElement('div'); tabs.className = 'in-tabs';
+      var listWrap = document.createElement('div'); listWrap.className = 'in-list';
+      function mkTab(key, label, count, unread) {
+        var b = document.createElement('button');
+        b.className = 'in-tab' + (key === which ? ' on' : '') + ' ' + key;
+        b.textContent = label + ' ' + count;
+        if (unread) { var d = document.createElement('span'); d.className = 'in-badge';
+                      d.textContent = unread; b.appendChild(d); }
+        b.addEventListener('click', function () {
+          which = key;
+          try { localStorage.setItem('ace2_inbox_tab', key); } catch (e) {}
+          Array.prototype.forEach.call(tabs.children, function (c) { c.classList.remove('on'); });
+          b.classList.add('on'); paint();
+        });
+        return b;
+      }
+      tabs.appendChild(mkTab('biz', 'WORK', biz.length, unreadBiz));
+      tabs.appendChild(mkTab('per', 'PERSONAL', per.length, unreadPer));
+      body7.appendChild(tabs); body7.appendChild(listWrap);
+
+      function paint() {
+        listWrap.innerHTML = '';
+        var rows = which === 'per' ? per : biz;
         if (!rows.length) {
           var none = document.createElement('div'); none.className = 'in-none';
-          none.textContent = 'nothing unread'; body7.appendChild(none); return;
+          none.textContent = which === 'per'
+            ? 'Nothing in the personal inbox for the last two weeks.'
+            : 'Nothing in the work inbox for the last two weeks.';
+          listWrap.appendChild(none); return;
         }
         rows.forEach(function (m) {
-          var row = document.createElement('div'); row.className = 'in-row ' + cls;
+          var row = document.createElement('div');
+          row.className = 'in-row ' + which + (m.unread ? ' unread' : ' read');
+          var top = document.createElement('div'); top.className = 'in-top';
           var from = document.createElement('div'); from.className = 'in-from'; from.textContent = m.from || '';
+          var when = document.createElement('div'); when.className = 'in-when'; when.textContent = (m.date || '').slice(0, 17);
+          top.appendChild(from); top.appendChild(when);
           var subj = document.createElement('div'); subj.className = 'in-subj'; subj.textContent = m.subject || '';
           var snip = document.createElement('div'); snip.className = 'in-snip'; snip.textContent = m.snippet || '';
-          row.appendChild(from); row.appendChild(subj); row.appendChild(snip);
+          row.appendChild(top); row.appendChild(subj); row.appendChild(snip);
           if (m.open_url) {
-            row.classList.add('in-open');
-            row.title = 'Open in Gmail';
+            row.classList.add('in-open'); row.title = 'Open in Gmail';
             row.addEventListener('click', function () { window.open(m.open_url, '_blank', 'noopener'); });
           }
-          body7.appendChild(row);
+          listWrap.appendChild(row);
         });
       }
-      lane('WORK · PFI', biz, 'biz');
-      if (per.length || data.personal) lane('PERSONAL · br80mcgraw', per, 'per');
+      paint();
     }
   }
   // CLEAN BY DEFAULT (Brady's call): no auto-cards on startup — the stage is the orb,
@@ -2076,7 +2107,7 @@
   // Same materializeCard machinery Ace uses, driven client-side so it's instant.
   var DOCK = {
     timeline: { title: 'TODAY',          url: '/calendar?days=1', shape: function (d) { return { events: d.events || [] }; } },
-    inbox:    { title: 'INBOX', url: '/inbox',                    shape: function (d) { return { emails: d.emails || [], business: d.business || d.emails || [], personal: d.personal || [] }; } },
+    inbox:    { title: 'INBOX', url: '/inbox?n=15&scope=all',     shape: function (d) { return { emails: d.emails || [], business: d.business || d.emails || [], personal: d.personal || [] }; } },
     weather:  { title: 'WEATHER',        url: '/weather',         shape: function (d) { return d; } },
     memory:   { title: 'MEMORY',         url: '/memory',          shape: function (d) { return { memories: d.memories || [] }; } }
   };

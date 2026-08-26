@@ -358,14 +358,24 @@ async def tasks():
 
 
 @app.get("/inbox", dependencies=[Depends(require_auth)])
-async def inbox(n: int = 6):
+async def inbox(n: int = 15, scope: str = "all"):
     """BOTH lanes (2026-08-25): PFI/business and Brady's personal br80mcgraw, kept separate.
     `personal` is [] until GOOGLE_TOKEN_JSON_PERSONAL is set, so the card degrades cleanly.
     Each row carries `open_url` so a tap lands on that message IN THE RIGHT ACCOUNT."""
-    from .integrations.tasks_api import get_personal_inbox_structured
+    from .integrations.google_client import get_google_creds, get_google_creds_personal
+    from .integrations.tasks_api import _inbox_rows
+    # scope=all (default for the card) shows RECENT mail read or unread, so Brady can dig through
+    # what came in — not just what's unread. Promos/social stay out either way.
+    q = ("newer_than:14d -category:promotions -category:social" if scope == "all"
+         else "is:unread newer_than:7d -category:promotions -category:social")
+
+    def _rows(getter):
+        c = getter()
+        return _inbox_rows(c, q, n) if c else []
+
     biz, personal = await asyncio.gather(
-        asyncio.to_thread(get_inbox_structured, n),
-        asyncio.to_thread(get_personal_inbox_structured, n),
+        asyncio.to_thread(_rows, get_google_creds),
+        asyncio.to_thread(_rows, get_google_creds_personal),
         return_exceptions=True,
     )
     biz = [] if isinstance(biz, Exception) else biz

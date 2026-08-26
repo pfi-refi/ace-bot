@@ -377,19 +377,32 @@ body {
 .in-snip { color: var(--text-faint); font-size: 11.5px; line-height: 1.4; margin-top: 2px;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
-/* TWO LANES (2026-08-25): work and personal never blur together. The lane label carries the
-   colour; personal rows read cyan so a glance tells you which life an email belongs to. */
-.in-lane { font-family: var(--mono); font-size: 9.5px; letter-spacing: 2px; text-transform: uppercase;
-  color: var(--text-faint); margin: 14px 0 6px; padding-bottom: 5px;
+/* TABBED INBOX (2026-08-25): one mailbox at a time, full width, recent mail read OR unread.
+   Work = aurora, personal = cyan, so a glance says which life you're looking at. */
+.in-tabs { display: flex; gap: 8px; margin: 0 0 12px; padding-bottom: 10px;
   border-bottom: 1px solid var(--aurora-06); }
-.in-lane:first-child { margin-top: 2px; }
-.in-lane.biz { color: var(--aurora); }
-.in-lane.per { color: #53e7ff; }
-.in-none { color: var(--text-faint); font-size: 11.5px; padding: 4px 0 2px; font-style: italic; }
+.in-tab { flex: 1; background: rgba(255,255,255,.02); border: 1px solid var(--aurora-06);
+  color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; letter-spacing: 1.6px;
+  text-transform: uppercase; padding: 9px 10px; cursor: pointer; border-radius: 6px;
+  transition: background .15s, color .15s, border-color .15s; }
+.in-tab:hover { color: var(--text); }
+.in-tab.on.biz { color: var(--aurora); border-color: rgba(69,255,166,.35); background: rgba(69,255,166,.08); }
+.in-tab.on.per { color: #53e7ff; border-color: rgba(83,231,255,.35); background: rgba(83,231,255,.08); }
+.in-badge { display: inline-block; margin-left: 7px; padding: 1px 6px; border-radius: 9px;
+  background: var(--aurora); color: #04150c; font-size: 9.5px; font-weight: 700; vertical-align: 1px; }
+.in-tab.per .in-badge { background: #53e7ff; color: #04212a; }
+.in-list { display: flex; flex-direction: column; }
+.in-none { color: var(--text-faint); font-size: 12px; padding: 14px 0; font-style: italic; text-align: center; }
+.in-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.in-when { font-family: var(--mono); font-size: 9.5px; color: var(--text-faint); white-space: nowrap; }
+/* read mail stays visible but recedes; unread keeps the lit dot */
+.in-row.read { opacity: .62; }
+.in-row.read .in-from::before { background: var(--text-faint); box-shadow: none; }
+.in-row.unread .in-subj { font-weight: 650; }
 .in-row.per .in-from { color: #53e7ff; }
-.in-row.per .in-from::before { background: #53e7ff; box-shadow: 0 0 6px rgba(83,231,255,.6); }
+.in-row.per.unread .in-from::before { background: #53e7ff; box-shadow: 0 0 6px rgba(83,231,255,.6); }
 .in-row.in-open { cursor: pointer; }
-.in-row.in-open:hover { background: rgba(69,255,166,.07); }
+.in-row.in-open:hover { background: rgba(69,255,166,.07); opacity: 1; }
 .in-row.per.in-open:hover { background: rgba(83,231,255,.07); }
 
 /* ---------- DATA BANK — captured to-dos / commitments ---------- */
