@@ -29,7 +29,10 @@ import pytz
 logger = logging.getLogger("ace2.db")
 EASTERN = pytz.timezone("America/New_York")
 
-KINDS = ("note", "todo", "commitment", "followup")
+# 'approval' (2026-08-26): something ACE HAS PREPARED that needs Brady to say go before it
+# executes -- a drafted email, a proposed reschedule, a payment to send. It surfaces in the
+# TODAY card's "waiting on your OK" lane. The seed of the approvals tray.
+KINDS = ("note", "todo", "commitment", "followup", "approval")
 _ready = False
 
 # pg_trgm availability: None = not probed yet, True/False = known. Probed once per

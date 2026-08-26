@@ -410,6 +410,22 @@ body {
   border-radius: 8px; border-bottom: 1px solid var(--aurora-06); transition: background .15s; }
 .db-item:last-child { border-bottom: none; }
 .db-item:hover { background: rgba(69,255,166,.05); }
+/* DUE TODAY card (2026-08-26): three lanes — what Ace has queued for approval, what's late,
+   what's due. Approvals lead because they're the only ones where HE is the bottleneck. */
+.db-sect { font-family: var(--mono); font-size: 9px; letter-spacing: 1.8px; text-transform: uppercase;
+  color: var(--text-faint); margin: 13px 0 5px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--aurora-06); }
+.db-sect:first-child { margin-top: 0; }
+.db-sect.appr { color: #53e7ff; }
+.db-sect.late { color: #ff5a68; }
+.db-sect.now  { color: var(--aurora); }
+.db-sect.soon { color: #ffb020; }
+.db-item.appr .db-box { border-color: rgba(83,231,255,.55); }
+.db-item.appr:hover { background: rgba(83,231,255,.07); }
+.db-item.late .db-box { border-color: rgba(255,90,104,.5); }
+.db-cat, .db-appr { font-family: var(--mono); font-size: 8.5px; letter-spacing: 1px;
+  text-transform: uppercase; padding: 1px 6px; border: 1px solid; border-radius: 3px; }
+.db-appr { color: #53e7ff; border-color: rgba(83,231,255,.45); background: rgba(83,231,255,.1); }
 .db-box { flex: none; width: 16px; height: 16px; margin-top: 1px; padding: 0; cursor: pointer;
   border: 1.5px solid var(--aurora-60); border-radius: 5px; background: transparent;
   color: var(--bg); font-size: 11px; font-weight: 700; line-height: 13px; text-align: center;

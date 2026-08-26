@@ -381,8 +381,12 @@ TOOLS = [
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["note", "todo", "commitment", "followup"],
-                    "description": "What kind of item this is",
+                    "enum": ["note", "todo", "commitment", "followup", "approval"],
+                    "description": ("What kind of item this is. Use 'approval' ONLY for something "
+                                    "YOU have already prepared that needs Brady to say go before "
+                                    "it executes (a drafted email, a proposed reschedule, a "
+                                    "payment to send) -- it surfaces in his TODAY card under "
+                                    "'waiting on your OK'. Never use it for ordinary to-dos."),
                 },
                 "text": {"type": "string", "description": "The item, phrased tightly (~one line)"},
                 "due": {"type": "string", "description": "Optional due date/time in plain words (e.g. 'today 5pm', 'Fri')"},

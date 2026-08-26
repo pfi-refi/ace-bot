@@ -733,7 +733,7 @@
   function slotEl(where) { return (where === 'left') ? $('cards-left') : $('cards'); }
   // WINDOW SYSTEM — pins (cards that stay open across sessions) + per-card size.
   var TITLE_PANEL = { 'TODAY': 'timeline', 'PRIORITY INBOX': 'inbox', 'WEATHER': 'weather',
-                      'MEMORY': 'memory', 'CALENDAR': 'calendar', 'TASKS': 'tasks', 'DATA BANK': 'daybank' };
+                      'MEMORY': 'memory', 'CALENDAR': 'calendar', 'TASKS': 'tasks', 'DUE TODAY': 'daybank' };
   function pinsGet() { try { return JSON.parse(localStorage.getItem('ace2_pins') || '{}'); } catch (e) { return {}; } }
   function pinsSet(p) { localStorage.setItem('ace2_pins', JSON.stringify(p)); }
   // WINDOW MANAGER (desktop): cards are free windows — drag them anywhere by the title
@@ -954,23 +954,51 @@
       sp.later.forEach(function (it) { tlRow(it, 'tl-later', '•'); });
       sp.allday.forEach(function (e) { tlRow({ e: { time: 'All day', title: e.title } }, 'tl-allday', '•'); });
     } else if (panel === 'daybank') {
-      var body6 = cardShell('DATA BANK', slot);
-      var items = data.items || [];
-      if (!items.length) return empty(body6, 'Nothing captured yet.');
-      items.forEach(function (it) {
-        var row = document.createElement('div'); row.className = 'db-item' + (it.status === 'done' ? ' db-done' : '');
-        var box = document.createElement('button'); box.className = 'db-box' + (it.status === 'done' ? ' done' : '');
-        box.title = it.status === 'done' ? 'Reopen' : 'Mark done'; box.textContent = it.status === 'done' ? '✓' : '';
-        box.addEventListener('click', function () { toggleBankItem(it.id, it.status === 'done' ? 'open' : 'done'); });
-        var mid = document.createElement('div'); mid.className = 'db-mid';
-        var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
-        var meta = document.createElement('div'); meta.className = 'db-meta';
-        meta.appendChild(tag('db-kind', it.kind || 'note'));
-        if (it.due) meta.appendChild(tag('db-due', '⏱ ' + it.due));
-        mid.appendChild(txt); mid.appendChild(meta);
-        row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
-      });
+      // TODAY (2026-08-26, Brady): was 'DATA BANK' — a flat dump of whatever was newest, which
+      // is why a test row and a DNS task sat side by side. Now it answers the only question he
+      // opens it for: what's late, what's due, and what is waiting on my OK. 'Data Bank' is
+      // reserved for the curated records layer (people/deals/goals/bills), not the task list.
+      var all6 = (data.items || []).filter(function (x) { return x.status === 'open'; });
+      var appr = all6.filter(function (x) { return x.kind === 'approval'; });
+      var rest = all6.filter(function (x) { return x.kind !== 'approval'; });
+      var late = rest.filter(function (x) { return x.due_days != null && x.due_days < 0; })
+                     .sort(function (a, b) { return a.due_days - b.due_days; });
+      var now6 = rest.filter(function (x) { return x.due_days === 0; });
+      var soon = rest.filter(function (x) { return x.due_days === 1; });
+      var body6 = cardShell('DUE TODAY', slot);
+      if (!late.length && !now6.length && !soon.length && !appr.length) {
+        return empty(body6, 'Nothing due and nothing waiting on you. Clear.');
+      }
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
+      function sect(label, rows, cls) {
+        if (!rows.length) return;
+        var h = document.createElement('div'); h.className = 'db-sect ' + cls;
+        h.textContent = label + ' · ' + rows.length; body6.appendChild(h);
+        rows.forEach(function (it) {
+          var row = document.createElement('div'); row.className = 'db-item ' + cls;
+          var box = document.createElement('button'); box.className = 'db-box';
+          box.title = (cls === 'appr') ? 'Approve — Ace executes this' : 'Mark done';
+          box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
+          var mid = document.createElement('div'); mid.className = 'db-mid';
+          var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
+          var meta = document.createElement('div'); meta.className = 'db-meta';
+          var c = cmdCatOf(it);
+          if (c) { var ct = tag('db-cat', c); ct.style.color = CMD_CATS[c] || '#8aa';
+                   ct.style.borderColor = (CMD_CATS[c] || '#8aa') + '55'; meta.appendChild(ct); }
+          if (cls === 'appr') meta.appendChild(tag('db-appr', 'TAP TO APPROVE'));
+          else if (it.due_days != null) {
+            var d = it.due_days;
+            meta.appendChild(tag('db-due', d < 0 ? (Math.abs(d) + 'd overdue')
+                                                : d === 0 ? 'due today' : 'due tomorrow'));
+          }
+          mid.appendChild(txt); mid.appendChild(meta);
+          row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
+        });
+      }
+      sect('WAITING ON YOUR OK', appr, 'appr');
+      sect('OVERDUE', late, 'late');
+      sect('DUE TODAY', now6, 'now');
+      sect('TOMORROW', soon, 'soon');
     } else if (panel === 'inbox') {
       // TWO LANES (2026-08-25): business + personal, clearly separated, each row tappable
       // straight into the right Gmail account. Falls back to the legacy single list if the
