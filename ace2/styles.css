@@ -491,6 +491,15 @@ body {
 .cmd-b { flex: 1; min-width: 0; }
 .cmd-t { font-size: 14px; color: #eef7f3; line-height: 1.35; }
 .cmd-row.done .cmd-t { color: #63796f; text-decoration: line-through; }
+/* PAID BILL (2026-08-26): stays on the shelf as part of the register — checked and dimmed a
+   little, but NOT struck through, because the obligation still exists and returns next month. */
+.cmd-row.paid .cmd-box { background: #2fd36b; border-color: #2fd36b; }
+.cmd-row.paid .cmd-box::after { content: "✓"; position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; color: #03130d; font-size: 13px; font-weight: 800; }
+.cmd-row.paid .cmd-t { color: #9fb3aa; }
+.cmd-paid { font-family: var(--mono); font-size: 9px; letter-spacing: 1.2px; padding: 2px 7px;
+  border-radius: 3px; color: #2fd36b; border: 1px solid rgba(47,211,107,.4);
+  background: rgba(47,211,107,.1); }
 .cmd-m { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .cmd-tag { font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; display: flex; align-items: center; gap: 5px; color: #9db0bd; border: 1px solid rgba(140,160,175,.18); }
 .cmd-due { font-family: var(--mono); font-size: 9px; color: #38bdf8; border: 1px solid rgba(56,189,248,.3); background: rgba(56,189,248,.07); padding: 2px 7px; border-radius: 3px; }

@@ -457,8 +457,26 @@ def read_items(active_only: bool = True) -> list:
                     return datetime.fromisoformat(ts).astimezone(EASTERN).strftime("%Y-%m-%d")
                 except Exception:
                     return ts[:10]
-            items = [it for it in items if it["status"] == "open"
-                     or _done_et(it["done_ts"]) == today]
+            # BILLS STAY ON THE SHELF ALL MONTH (2026-08-26, Brady: "that should be an untouched
+            # board... just say when they're actually due and how much"). A bill marked paid used
+            # to VANISH until the 1st, so mid-month his register was incomplete — 11 of ~16 bills
+            # were invisible and Ace couldn't state his real monthly obligations. Now a Bills item
+            # paid THIS MONTH stays visible, flagged paid_this_period, and rollover_recurring_bills
+            # still reopens it for the new month. Complete register, and nothing reads as overdue
+            # when he's already paid it.
+            ym = datetime.now(EASTERN).strftime("%Y-%m")
+            def _keep(it):
+                if it["status"] == "open":
+                    return True
+                d = _done_et(it["done_ts"])
+                if d == today:
+                    return True
+                return "Bills" in (it.get("tags") or []) and d[:7] == ym
+            items = [it for it in items if _keep(it)]
+            for it in items:
+                if (it["status"] != "open" and "Bills" in (it.get("tags") or [])
+                        and _done_et(it["done_ts"])[:7] == ym):
+                    it["paid_this_period"] = True
         items.sort(key=lambda it: it["ts"], reverse=True)
         return items
     except Exception as e:

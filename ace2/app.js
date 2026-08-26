@@ -1418,11 +1418,15 @@
         +'<button class="cmd-ecancel cmd-edrop" style="margin-left:auto;color:#ff8080;border-color:#ff808055" title="Archive this item (kept in history, never deleted)">REMOVE</button></div>'
         +'</div></div>';
     }
-    return '<div class="cmd-row '+(done?'done':'')+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
+    // A BILL PAID THIS MONTH is not a finished task — it stays on the shelf marked PAID so the
+    // register is always complete, and rolls over on the 1st (2026-08-26).
+    var paid = !!it.paid_this_period;
+    return '<div class="cmd-row '+(paid?'paid':(done?'done':''))+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
       +'<div class="cmd-box"></div>'
       +'<div class="cmd-b"><div class="cmd-t">'+cmdEsc(it.text)+'</div><div class="cmd-m">'
       +'<span class="cmd-tag" style="color:'+col+';border-color:'+col+'55;background:'+col+'14">'
       +'<span class="cmd-d" style="background:'+col+'"></span>'+c+'</span>'
+      +(paid?'<span class="cmd-paid">PAID THIS MONTH</span>':'')
       +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')+'</div></div>'
       +'<button class="cmd-pencil" title="Edit">✎</button></div>';
   }
