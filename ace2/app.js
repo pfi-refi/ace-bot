@@ -2047,6 +2047,25 @@
     })(0);
   }
 
+  // MORE drawer (2026-08-26): the dock keeps four buttons you'd tap without wanting to talk;
+  // Pulse / Plan my week / Brief are REQUESTS you can just say, so they live behind this.
+  (function () {
+    var mb = document.getElementById('more-btn'), drawer = document.getElementById('quick-more');
+    if (!mb || !drawer) return;
+    mb.addEventListener('click', function () {
+      var open = drawer.classList.toggle('hidden') === false;
+      mb.classList.toggle('active', open);
+      mb.setAttribute('aria-expanded', String(open));
+    });
+    // tapping anything inside closes it again, so the dock returns to four
+    drawer.addEventListener('click', function (e) {
+      if (e.target.closest('.qa')) {
+        drawer.classList.add('hidden'); mb.classList.remove('active');
+        mb.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
+
   $('clip-btn').addEventListener('click', function () { $('capture-file').click(); });
   $('capture-file').addEventListener('change', function (e) {
     // Copy the FileList out before touching .value (iOS can clear it out from under us).

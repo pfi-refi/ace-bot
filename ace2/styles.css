@@ -898,3 +898,8 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
 #discreet-btn.on { color: #ffb020; text-shadow: 0 0 10px rgba(255,176,32,.55); }
 /* Discreet toggle is a VOICE-only concern — hide it in chat mode (typed is private anyway) */
 body.mode-chat #discreet-btn { display: none; }
+
+/* MORE drawer (2026-08-26) — the dock's secondary bank, hidden until asked for. */
+#quick-more { display: contents; }
+#quick-more.hidden { display: none; }
+.qa.qa-more.active { color: var(--aurora); border-color: rgba(69,255,166,.4); }

@@ -68,19 +68,23 @@
        a window, tap again to dismiss it. Ace opens the same windows himself when asked. -->
   <!-- CARBON BLACKOUT dock (2026-08-01, Brady's pick: B1+B4) — two banks: ACT (things Ace
        does) / VIEW (things Ace shows). Pure reskin: every button keeps its exact handler. -->
+  <!-- DOCK (2026-08-26, Brady: "do we need a schedule button and a pulse button and all the
+       other ones"). Four you'd tap while walking, without wanting to talk; everything else is a
+       REQUEST you can just say out loud, so it lives one tap deeper behind MORE. -->
   <div id="quick">
-    <div class="qlbl">ACT</div>
-    <button class="qa qa-cmd" id="command-btn" title="Your tasks & pipeline — Ace's own board"><span class="qg">◧</span>Command</button>
-    <button class="qa" id="pulse-btn" title="How's my business looking? (⌘K works too)"><span class="qg">▦</span>Pulse</button>
-    <button class="qa qa-graph" id="graph-btn" title="The knowledge graph — your whole book of business as a live map"><span class="qg">◉</span>Graph</button>
-    <button class="qa qa-plan" id="plan-week-btn" title="Ace asks you a few questions, then builds your week"><span class="qg">◈</span>Plan my week</button>
-    <button class="qa" data-msg="Give me my morning brief."><span class="qg">☀</span>Brief</button>
-    <div class="qlbl">VIEW</div>
     <button class="qa qa-due" data-panel="daybank" title="What's late, what's due, and anything waiting on your OK"><span class="qg">◔</span>Due today</button>
+    <button class="qa qa-cmd" id="command-btn" title="Your full board — tasks & pipeline"><span class="qg">◧</span>Command</button>
+    <button class="qa" data-panel="inbox" title="Work + personal inbox"><span class="qg">✉</span>Inbox</button>
     <button class="qa" data-panel="timeline" title="Today's schedule"><span class="qg">▤</span>Schedule</button>
-    <button class="qa" data-panel="inbox" title="Priority inbox"><span class="qg">✉</span>Inbox</button>
-    <button class="qa" data-panel="weather" title="Weather"><span class="qg">◍</span>Weather</button>
-    <button class="qa" data-panel="memory" title="What Ace knows"><span class="qg">◆</span>Memory</button>
+    <button class="qa qa-more" id="more-btn" title="Everything else" aria-expanded="false"><span class="qg">⋯</span>More</button>
+    <div id="quick-more" class="hidden">
+      <button class="qa" id="pulse-btn" title="How's my business looking? (⌘K works too)"><span class="qg">▦</span>Pulse</button>
+      <button class="qa qa-plan" id="plan-week-btn" title="Ace asks you a few questions, then builds your week"><span class="qg">◈</span>Plan my week</button>
+      <button class="qa" data-msg="Give me my morning brief."><span class="qg">☀</span>Brief</button>
+      <button class="qa qa-graph" id="graph-btn" title="The knowledge graph — your whole book as a live map"><span class="qg">◉</span>Graph</button>
+      <button class="qa" data-panel="memory" title="What Ace knows"><span class="qg">◆</span>Memory</button>
+      <button class="qa" data-panel="weather" title="Weather"><span class="qg">◍</span>Weather</button>
+    </div>
   </div>
 
   <div id="input-bar">
