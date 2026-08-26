@@ -972,16 +972,39 @@
       });
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
     } else if (panel === 'inbox') {
-      var body7 = cardShell('PRIORITY INBOX', slot);
-      var emails = data.emails || [];
-      if (!emails.length) return empty(body7, 'Inbox clear — nothing unread.');
-      emails.forEach(function (m) {
-        var row = document.createElement('div'); row.className = 'in-row';
-        var from = document.createElement('div'); from.className = 'in-from'; from.textContent = m.from || '';
-        var subj = document.createElement('div'); subj.className = 'in-subj'; subj.textContent = m.subject || '';
-        var snip = document.createElement('div'); snip.className = 'in-snip'; snip.textContent = m.snippet || '';
-        row.appendChild(from); row.appendChild(subj); row.appendChild(snip); body7.appendChild(row);
-      });
+      // TWO LANES (2026-08-25): business + personal, clearly separated, each row tappable
+      // straight into the right Gmail account. Falls back to the legacy single list if the
+      // server hasn't been updated yet.
+      var biz = data.business || data.emails || [];
+      var per = data.personal || [];
+      var body7 = cardShell('INBOX  ·  ' + biz.length + ' work'
+                            + (per.length ? '  ·  ' + per.length + ' personal' : ''), slot);
+      if (!biz.length && !per.length) return empty(body7, 'Both inboxes clear — nothing unread.');
+      function lane(label, rows, cls) {
+        var h = document.createElement('div');
+        h.className = 'in-lane ' + cls;
+        h.textContent = label + ' · ' + rows.length;
+        body7.appendChild(h);
+        if (!rows.length) {
+          var none = document.createElement('div'); none.className = 'in-none';
+          none.textContent = 'nothing unread'; body7.appendChild(none); return;
+        }
+        rows.forEach(function (m) {
+          var row = document.createElement('div'); row.className = 'in-row ' + cls;
+          var from = document.createElement('div'); from.className = 'in-from'; from.textContent = m.from || '';
+          var subj = document.createElement('div'); subj.className = 'in-subj'; subj.textContent = m.subject || '';
+          var snip = document.createElement('div'); snip.className = 'in-snip'; snip.textContent = m.snippet || '';
+          row.appendChild(from); row.appendChild(subj); row.appendChild(snip);
+          if (m.open_url) {
+            row.classList.add('in-open');
+            row.title = 'Open in Gmail';
+            row.addEventListener('click', function () { window.open(m.open_url, '_blank', 'noopener'); });
+          }
+          body7.appendChild(row);
+        });
+      }
+      lane('WORK · PFI', biz, 'biz');
+      if (per.length || data.personal) lane('PERSONAL · br80mcgraw', per, 'per');
     }
   }
   // CLEAN BY DEFAULT (Brady's call): no auto-cards on startup — the stage is the orb,
@@ -2053,7 +2076,7 @@
   // Same materializeCard machinery Ace uses, driven client-side so it's instant.
   var DOCK = {
     timeline: { title: 'TODAY',          url: '/calendar?days=1', shape: function (d) { return { events: d.events || [] }; } },
-    inbox:    { title: 'PRIORITY INBOX', url: '/inbox',           shape: function (d) { return { emails: d.emails || [] }; } },
+    inbox:    { title: 'INBOX', url: '/inbox',                    shape: function (d) { return { emails: d.emails || [], business: d.business || d.emails || [], personal: d.personal || [] }; } },
     weather:  { title: 'WEATHER',        url: '/weather',         shape: function (d) { return d; } },
     memory:   { title: 'MEMORY',         url: '/memory',          shape: function (d) { return { memories: d.memories || [] }; } }
   };

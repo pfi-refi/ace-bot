@@ -359,7 +359,30 @@ async def tasks():
 
 @app.get("/inbox", dependencies=[Depends(require_auth)])
 async def inbox(n: int = 6):
-    return {"emails": await asyncio.to_thread(get_inbox_structured, n)}
+    """BOTH lanes (2026-08-25): PFI/business and Brady's personal br80mcgraw, kept separate.
+    `personal` is [] until GOOGLE_TOKEN_JSON_PERSONAL is set, so the card degrades cleanly.
+    Each row carries `open_url` so a tap lands on that message IN THE RIGHT ACCOUNT."""
+    from .integrations.tasks_api import get_personal_inbox_structured
+    biz, personal = await asyncio.gather(
+        asyncio.to_thread(get_inbox_structured, n),
+        asyncio.to_thread(get_personal_inbox_structured, n),
+        return_exceptions=True,
+    )
+    biz = [] if isinstance(biz, Exception) else biz
+    personal = [] if isinstance(personal, Exception) else personal
+
+    def _link(rows, account):
+        for m in rows:
+            if m.get("id"):
+                m["open_url"] = ("https://mail.google.com/mail/?authuser="
+                                 + account + "#all/" + m["id"])
+        return rows
+
+    return {
+        "emails": _link(biz, "pfi@platinumfortuneimpact.com"),          # legacy key — keep
+        "business": _link(biz, "pfi@platinumfortuneimpact.com"),
+        "personal": _link(personal, "br80mcgraw@gmail.com"),
+    }
 
 
 @app.get("/memory", dependencies=[Depends(require_auth)])

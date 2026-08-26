@@ -377,6 +377,21 @@ body {
 .in-snip { color: var(--text-faint); font-size: 11.5px; line-height: 1.4; margin-top: 2px;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
+/* TWO LANES (2026-08-25): work and personal never blur together. The lane label carries the
+   colour; personal rows read cyan so a glance tells you which life an email belongs to. */
+.in-lane { font-family: var(--mono); font-size: 9.5px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--text-faint); margin: 14px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--aurora-06); }
+.in-lane:first-child { margin-top: 2px; }
+.in-lane.biz { color: var(--aurora); }
+.in-lane.per { color: #53e7ff; }
+.in-none { color: var(--text-faint); font-size: 11.5px; padding: 4px 0 2px; font-style: italic; }
+.in-row.per .in-from { color: #53e7ff; }
+.in-row.per .in-from::before { background: #53e7ff; box-shadow: 0 0 6px rgba(83,231,255,.6); }
+.in-row.in-open { cursor: pointer; }
+.in-row.in-open:hover { background: rgba(69,255,166,.07); }
+.in-row.per.in-open:hover { background: rgba(83,231,255,.07); }
+
 /* ---------- DATA BANK — captured to-dos / commitments ---------- */
 .db-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 8px; margin: 0 -8px;
   border-radius: 8px; border-bottom: 1px solid var(--aurora-06); transition: background .15s; }
