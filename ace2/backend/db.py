@@ -577,6 +577,20 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                     best_score, best = score, it
             if best_sc and best_sc_score >= 0.85:
                 return True, {**best_sc, "dup": True}          # true same-column twin
+            # NEAR-IDENTICAL TEXT IS A TWIN, WHATEVER COLUMN IT LANDS IN (2026-08-26). The
+            # cross-column allowance below exists to stop a Bills item being swallowed by a
+            # differently-worded Money item — real, keep it. But it also let the SAME SENTENCE
+            # in twice whenever Ace guessed a different category on the second capture (live
+            # example: "Ask Robin about her personal deals…" filed under BOTH Networking and
+            # Deals, 100% identical). That is the duplicate source Brady kept hitting — and the
+            # reason completions "don't stick": he closes one twin and the other stays open.
+            # 0.90+ means the same sentence (or a shortened version of it), so collapse it;
+            # 0.85-0.90 is a genuine paraphrase about the same subject and still inserts as
+            # "similar". Tested against Brady's real board: the items that MUST stay separate
+            # (truck payment vs truck arrears, Mission Lane payoff vs minimum, the two Klarna
+            # accounts) score 0.06-0.35 — nowhere near the line, so the data-loss fix holds.
+            if best and best_score >= 0.90:
+                return True, {**best, "dup": True, "cross_column": True}
             if best and best_score >= 0.85:                     # only a cross-column match
                 similar = {"id": best["id"], "text": best["text"], "status": best["status"]}
             # Trigram second opinion: catches rewordings token overlap can't (nicknames,
