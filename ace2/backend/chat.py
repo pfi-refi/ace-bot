@@ -958,13 +958,15 @@ async def apply_sweep(h: int, facts_text: str, triage_text: str, reflection_text
                     verb = parts[0].upper()
                     if verb == "DONE" and len(parts) >= 2:
                         iid = parts[1].split()[0].strip("[]") if parts[1] else ""
-                        # NO-TOUCH SHELVES (2026-08-26, Brady): Bills recur every month and Goals
-                        # close only when genuinely achieved — the background sweep must never
-                        # auto-close either from a passing mention. Enforced in CODE, not just the
+                        # NO-TOUCH SHELVES (2026-08-26, Brady): Bills recur monthly, Goals close
+                        # only when genuinely achieved, and DEALS close only when Brady says every
+                        # requirement is met AND it paid out — a submitted app or a scheduled
+                        # paramed is progress, not completion. The sweep must never auto-close any
+                        # of the three from a passing mention. Enforced in CODE, not just the
                         # prompt, because the sweep is exactly where silent wrong-closes happened.
                         _it = next((x for x in existing_items if x.get("id") == iid), None)
                         _cat = next((t for t in ((_it or {}).get("tags") or [])
-                                     if t in ("Bills", "Goals")), None)
+                                     if t in ("Bills", "Goals", "Deals")), None)
                         if _cat:
                             logger.info("sweep: refused to auto-close %s item %s", _cat, iid)
                             continue
