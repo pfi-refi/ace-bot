@@ -465,16 +465,34 @@ def read_items(active_only: bool = True) -> list:
             # still reopens it for the new month. Complete register, and nothing reads as overdue
             # when he's already paid it.
             ym = datetime.now(EASTERN).strftime("%Y-%m")
+
+            def _is_recurring_bill(it) -> bool:
+                """A RECURRING OBLIGATION, not a one-off task that happens to sit in Bills.
+                The Bills column also holds actions ('Call the gas company', 'Check the sewer
+                application') and those SHOULD disappear when done. A real bill names an amount
+                AND a repeating due day ('$88.40 — due 18th', '$50/mo'). Requiring both keeps
+                completed chores and old test rows off the shelf."""
+                import re as _re
+                if "Bills" not in (it.get("tags") or []):
+                    return False
+                t = (it.get("text") or "")
+                if "$" not in t:
+                    return False
+                return bool(_re.search(r"due\s+(the\s+)?\d{1,2}(st|nd|rd|th)\b", t, _re.I)
+                            or _re.search(r"/\s*mo(nth)?\b", t, _re.I)
+                            or _re.search(r"\bmonthly\b", t, _re.I))
+
             def _keep(it):
                 if it["status"] == "open":
                     return True
                 d = _done_et(it["done_ts"])
                 if d == today:
                     return True
-                return "Bills" in (it.get("tags") or []) and d[:7] == ym
+                # only DONE (never 'dropped' — those are archived mistakes) recurring bills
+                return (it["status"] == "done" and _is_recurring_bill(it) and d[:7] == ym)
             items = [it for it in items if _keep(it)]
             for it in items:
-                if (it["status"] != "open" and "Bills" in (it.get("tags") or [])
+                if (it["status"] == "done" and _is_recurring_bill(it)
                         and _done_et(it["done_ts"])[:7] == ym):
                     it["paid_this_period"] = True
         items.sort(key=lambda it: it["ts"], reverse=True)
