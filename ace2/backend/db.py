@@ -312,6 +312,9 @@ def recent_turns(limit: int = 12) -> list:
 CATEGORIES = ("Money", "Bills", "Opportunities", "Goals", "Personal",
               "Deals", "Agents", "Admin", "Networking", "Business", "Tech")
 _CANON_CAT = {c.lower(): c for c in CATEGORIES}
+# Legacy category names → their current home, so old rows normalize on any write instead of
+# lingering as dead tags (2026-08-26: "Job Hunt" became "Opportunities").
+_CANON_CAT.update({"job hunt": "Opportunities"})
 
 
 def _item_cat(it: dict):
