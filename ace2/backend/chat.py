@@ -527,9 +527,16 @@ def _due_tag(it) -> str:
     return f"  [{when}{f' · {on}' if on else ''}]"
 
 
+# How much of an item's text Ace actually gets to READ. The old flat 100 chars amputated
+# 19 of 49 open items — including the Chris diligence (583 chars hidden) and the gas balance.
+# Full priority text costs ~350 tokens/turn, which is nothing against quoting a stale number.
+_PRIO_CHARS = 700   # Money/Bills/Opportunities/Goals/Personal — these carry dollars and dates
+_BACK_CHARS = 240   # back-burner still gets enough to be actionable
+
+
 def _format_daybank(items: list) -> str:
     """Render the board for Ace's per-turn context. Stage ④ (2026-08-13): PRIORITY columns
-    (Money/Bills/Opportunities/Goals/Personal) are shown in full, due-sorted, with EXACT due labels
+    (Money/Bills/Opportunities/Goals/Personal) are shown in full (text to _PRIO_CHARS), due-sorted, with EXACT due labels
     so Ace reasons about what's imminent instead of reciting a flat 88-line wall. Back-burner
     columns are capped and summarized — the FULL board is still reachable: update_item/complete
     resolve by `match` text server-side, so an item Ace can't see here is still completable by a
@@ -542,8 +549,14 @@ def _format_daybank(items: list) -> str:
     def _cat(it):
         return next((t for t in (it.get("tags") or []) if t in _ALL_CATS), "Admin")
 
-    def _row(it):
-        return f"- [{it.get('id','?')}] {(it.get('text','') or '')[:100]}{_due_tag(it)}"
+    def _row(it, cap=_BACK_CHARS):
+        txt = (it.get("text", "") or "")
+        # A silent cut is worse than a short row: on 2026-08-26 the gas item's real balance
+        # ($438.84) and its disconnection date sat past the old 100-char cut, so Ace confidently
+        # quoted the stale $191 that WAS visible. Mark the cut so he knows to pull the rest —
+        # update_item/complete resolve by match text, so the full item is always reachable.
+        body = txt if len(txt) <= cap else txt[:cap].rstrip() + " …[TRUNCATED — ask for the full item before quoting numbers]"
+        return f"- [{it.get('id','?')}] {body}{_due_tag(it)}"
 
     def _due_key(it):
         dd = it.get("due_days")
@@ -554,13 +567,13 @@ def _format_daybank(items: list) -> str:
         col = sorted((it for it in open_items if _cat(it) == c), key=_due_key)
         if col:
             lines.append(f"{c} ({len(col)}):")
-            lines += [f"  {_row(it)[2:]}" for it in col]
+            lines += [f"  {_row(it, _PRIO_CHARS)[2:]}" for it in col]
     bb = [it for it in open_items if _cat(it) in _BACKBURNER_CATS]
     if bb:
         bb.sort(key=_due_key)
         CAP = 14
         back.append(f"BACK-BURNER ({len(bb)} items — Deals/Agents/Admin/Networking/Business/Tech):")
-        back += [f"  {_row(it)[2:]}  [{_cat(it)}]" for it in bb[:CAP]]
+        back += [f"  {_row(it, _BACK_CHARS)[2:]}  [{_cat(it)}]" for it in bb[:CAP]]
         if len(bb) > CAP:
             back.append(f"  …+{len(bb) - CAP} more back-burner items (say a few words to pull or complete any — resolved by match)")
     out = ["PRIORITY (money & life — act on these first):"] + lines + [""] + back
