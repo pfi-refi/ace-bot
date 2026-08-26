@@ -378,8 +378,17 @@ async def inbox(n: int = 15, scope: str = "all"):
         asyncio.to_thread(_rows, get_google_creds_personal),
         return_exceptions=True,
     )
-    biz = [] if isinstance(biz, Exception) else biz
-    personal = [] if isinstance(personal, Exception) else personal
+    # Don't swallow failures silently — an empty inbox and a broken inbox looked identical,
+    # which is exactly how "WORK: 0 messages" hid a real error (2026-08-25).
+    errs = {}
+    if isinstance(biz, Exception):
+        logger.error("inbox: business lane failed: %s", biz)
+        errs["business"] = f"{type(biz).__name__}: {biz}"[:200]
+        biz = []
+    if isinstance(personal, Exception):
+        logger.error("inbox: personal lane failed: %s", personal)
+        errs["personal"] = f"{type(personal).__name__}: {personal}"[:200]
+        personal = []
 
     def _link(rows, account):
         for m in rows:
@@ -388,11 +397,14 @@ async def inbox(n: int = 15, scope: str = "all"):
                                  + account + "#all/" + m["id"])
         return rows
 
-    return {
+    out = {
         "emails": _link(biz, "pfi@platinumfortuneimpact.com"),          # legacy key — keep
         "business": _link(biz, "pfi@platinumfortuneimpact.com"),
         "personal": _link(personal, "br80mcgraw@gmail.com"),
     }
+    if errs:
+        out["errors"] = errs
+    return out
 
 
 @app.get("/memory", dependencies=[Depends(require_auth)])
