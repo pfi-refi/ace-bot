@@ -8,7 +8,7 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v49';   // v49: dock simplified to 4 + More drawer
+const CACHE_VERSION = 'ace2-shell-v50';   // v50: mobile card-body renders full height (page scrolls, not the widget)
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 

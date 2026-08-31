@@ -353,12 +353,69 @@ _DUE_GRACE_DAYS = 5
 
 
 def _find_date(s: str, today):
-    """Find the first date in a string — month+day ('aug 17') or ordinal day ('the 18th')."""
+    """Find the first date in a string.
+
+    Shapes handled, in priority order: ISO ('2026-09-13'), slash ('9/4', 'Fri 9/4'),
+    relative ('today', 'tomorrow', 'tonight'), weekday name ('Saturday' -> the NEXT one),
+    month+day ('aug 17'), ordinal day ('the 18th').
+
+    The first four were added 2026-08-31 after a live audit found 19 of 19 board items
+    carrying a due string and only 4 resolving to a date — and those 4 matched on the item
+    TEXT, not the due field. Every phrase Ace actually writes ('tomorrow', 'Wed 9/2',
+    'Sat 8/29', ISO) fell through, so the DUE TODAY card was permanently empty. The card
+    was fine; the parser was starving it.
+    """
     import re
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
     if not s:
         return None
     s = s.lower()
+
+    m = re.search(r"\b(20\d\d)-(\d{1,2})-(\d{1,2})\b", s)          # 2026-09-13
+    if m:
+        try:
+            return _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", s)     # 9/4, Fri 9/4, 8/29/26
+    if m:
+        mo, day = int(m.group(1)), int(m.group(2))
+        yr = m.group(3)
+        if 1 <= mo <= 12 and 1 <= day <= 31:
+            if yr:
+                yr = int(yr)
+                yr += 2000 if yr < 100 else 0
+            else:
+                yr = today.year
+            try:
+                d = _date(yr, mo, day)
+            except ValueError:
+                return None
+            if not m.group(3):
+                # bare M/D: a date far in the past means next year, far ahead means last year
+                if (today - d).days > 40:
+                    d = _date(yr + 1, mo, day)
+                elif (d - today).days > 320:
+                    d = _date(yr - 1, mo, day)
+            return d
+
+    if re.search(r"\b(today|tonight|this\s+(?:morning|afternoon|evening))\b", s):
+        return today
+    if re.search(r"\btomorrow\b", s):
+        return today + _td(days=1)
+
+    # Whole words only. A trailing [a-z]* here would read "monthly" as Monday and
+    # "satisfied" as Saturday — and "monthly" is on half the bills.
+    m = re.search(r"\b(monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu"
+                  r"|friday|fri|saturday|sat|sunday|sun)\b", s)
+    if m:
+        want = {"monday": 0, "mon": 0, "tuesday": 1, "tues": 1, "tue": 1,
+                "wednesday": 2, "wed": 2, "thursday": 3, "thurs": 3, "thur": 3, "thu": 3,
+                "friday": 4, "fri": 4, "saturday": 5, "sat": 5, "sunday": 6, "sun": 6}[m.group(1)]
+        ahead = (want - today.weekday()) % 7
+        return today + _td(days=ahead or 7)   # a bare weekday name means the NEXT one
+
     m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", s)
     if m:
         try:

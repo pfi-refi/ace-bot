@@ -615,6 +615,12 @@ body.dropping::after { content: 'DROP TO CAPTURE'; position: fixed; inset: 14px;
     padding: 12px 12px calc(14px + env(safe-area-inset-bottom)); gap: 14px; }
   #stage { display: flex; flex-direction: column; gap: 14px; justify-content: flex-start; }
   .card-slot { position: static; width: 100%; max-height: none; overflow: visible; order: -1; }
+  /* The slot going full-height is only half the fix — .card-body's 300px cap survived here,
+     so every widget stayed a small scrolling window nested inside a scrolling page, which on
+     iOS steals the drag and reads as "it doesn't fit and I can't adjust it" (Brady, 8/31).
+     Let the body render at full height; the PAGE does the scrolling, as intended above. */
+  .card-body, .card.card-wide .card-body, .card-free .card-body {
+    max-height: none; overflow: visible; }
   .card-slot:empty { display: none; }
   :root { --orb-size: clamp(150px, 30vh, 240px); }   /* compact orb — widgets are the star on mobile */
   #orb-wrap { order: 1; }                              /* orb drops below the cards */
