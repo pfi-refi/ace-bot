@@ -658,11 +658,23 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                     continue
                 inter = len(norm & other)
                 union = len(norm | other) or 1
+                # SIZE GUARD (2026-08-31). The two containment rules below divide by the
+                # SHORTER token set, which turns every short item into a magnet: a 252-token
+                # capture was refused as a duplicate of "5 deals a month" because it contained
+                # both of that item's two tokens (score 0.90, Jaccard 0.008). Six more short
+                # items swallowed it the same way. Net effect: Ace writes a long, detailed item,
+                # add_item answers dup:True, NOTHING is stored, and the caller reports success —
+                # silent data loss, the exact failure this dedup exists to prevent.
+                # Containment only means something when the two are comparably sized; otherwise
+                # fall through to Jaccard, which charges for everything the longer item does not
+                # share. 0.5 keeps the real paraphrase case ("Book Donna's strategy session" vs
+                # "Donna — … needs a strategy session", ratio 0.8) well inside the gate.
+                ratio = min(len(norm), len(other)) / max(len(norm), len(other))
                 if other == norm:
                     score = 1.0
-                elif inter >= 2 and inter / min(len(norm), len(other)) >= 0.8:
+                elif ratio >= 0.5 and inter >= 2 and inter / min(len(norm), len(other)) >= 0.8:
                     score = 0.9
-                elif inter >= 3 and inter / min(len(norm), len(other)) >= 0.6:
+                elif ratio >= 0.5 and inter >= 3 and inter / min(len(norm), len(other)) >= 0.6:
                     score = 0.85   # longer paraphrase: 'Book Donna's strategy session' vs
                                    # 'Donna — … needs a strategy session'
                 elif inter / union >= 0.6:
