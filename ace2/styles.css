@@ -909,3 +909,42 @@ body.mode-chat #discreet-btn { display: none; }
 #quick-more { display: contents; }
 #quick-more.hidden { display: none; }
 .qa.qa-more.active { color: var(--aurora); border-color: rgba(69,255,166,.4); }
+
+/* ================================================================== COOL MODE (2026-09-01)
+   Brady: "my laptop gets sooooo hot in like 2 minutes."
+
+   The cause is a combination, not one heavy thing. Three full-screen layers animate forever
+   (body::after auroraBreath, #overlay::after gridFlow on a 3D-perspective masked grid,
+   #overlay::before deckScan) and ten surfaces carry backdrop-filter. backdrop-filter must
+   RE-SAMPLE AND RE-BLUR whatever sits behind it every frame — so the moving background
+   invalidates all ten blurs continuously, forever, even with the app untouched. That is a
+   pinned GPU, which is why it never cools down.
+
+   Cool mode stops the ambient motion and trades the live blur for an opaque panel fill.
+   The layered look survives; the per-frame work does not. Everything that responds to YOU
+   (card materialize, hover lift, tool pills, the orb reacting to speech) is untouched. */
+body.cool::after,
+body.cool #overlay::after,
+body.cool #overlay::before { animation: none !important; }
+
+/* Opaque panels: same colours, no live blur. This is the single biggest win — it removes
+   the re-blur that the animated background was triggering on every surface, every frame. */
+body.cool .card,
+body.cool #chat-panel,
+body.cool #messages .msg,
+body.cool .tool-pill,
+body.cool .gr-detail,
+body.cool #dock {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.cool .card { background: linear-gradient(172deg, #0f2320 0%, #091419 52%, #070d12 100%)
+  padding-box, var(--panel-edge) border-box; }
+body.cool #chat-panel { background: linear-gradient(172deg, #0e211e 0%, #08131a 100%); }
+
+/* A hidden tab should cost nothing at all — this app sits open in a background tab for hours. */
+body.tab-hidden *,
+body.tab-hidden *::before,
+body.tab-hidden *::after { animation-play-state: paused !important; }
+
+#cool-btn.on { color: var(--aurora); border-color: rgba(69,255,166,.4); }

@@ -305,6 +305,39 @@
   }
 
   /* ============================================================ CHAT PANEL (toggle) */
+  /* ---------- COOL MODE (2026-09-01) ----------
+     Three full-screen layers animated forever behind ten backdrop-filter surfaces, so every
+     blur re-rendered every frame with the app idle — the laptop never got a chance to cool.
+     Cool mode stops the ambient motion and drops the live blur. Default is AUTO: on while the
+     battery is discharging, off on mains, and a manual choice always wins over both. */
+  var coolPref = localStorage.getItem('ace2_cool') || 'auto';
+  function applyCool(on) { document.body.classList.toggle('cool', !!on);
+    var b = document.getElementById('cool-btn'); if (b) b.classList.toggle('on', !!on); }
+  function resolveCool() {
+    if (coolPref === 'on')  { applyCool(true);  return; }
+    if (coolPref === 'off') { applyCool(false); return; }
+    if (navigator.getBattery) {
+      navigator.getBattery().then(function (bat) {
+        applyCool(!bat.charging);
+        bat.addEventListener('chargingchange', function () {
+          if (coolPref === 'auto') applyCool(!bat.charging);
+        });
+      }).catch(function () { applyCool(true); });   // no answer -> assume laptop, stay cool
+    } else { applyCool(true); }                      // Safari/iOS have no Battery API
+  }
+  resolveCool();
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('#cool-btn'); if (!b) return;
+    coolPref = document.body.classList.contains('cool') ? 'off' : 'on';
+    try { localStorage.setItem('ace2_cool', coolPref); } catch (err) {}
+    resolveCool();
+  });
+
+  /* A backgrounded tab should cost nothing — this sits open for hours. */
+  document.addEventListener('visibilitychange', function () {
+    document.body.classList.toggle('tab-hidden', document.hidden);
+  });
+
   var chatOpen = localStorage.getItem('ace2_chat') === 'on';
   /* The conversation opens as its OWN FULL SCREEN — a separate "tab", not a floating window
      (Brady). Opening builds a #chat-view overlay that covers the whole dashboard: its own header
