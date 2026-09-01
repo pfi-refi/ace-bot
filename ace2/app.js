@@ -188,7 +188,7 @@
       // Idle in cool mode drops to ~4fps: still alive, ~6x cheaper than the old 25fps.
       var _cool = document.body.classList.contains('cool');
       var gap = amp > 0.001 ? 0
-              : (stillMode ? 500 : (_cool ? 250 : (_orm ? 80 : 40)));
+              : (stillMode ? 500 : (_orm ? 80 : 40));   // 250ms in cool mode STUTTERED — reverted
       if (now - _orbPaint < gap) return;
       _orbPaint = now;
       var t = now / 1000; last = now;
