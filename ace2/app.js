@@ -2216,8 +2216,18 @@
     timeline: { title: 'TODAY',          url: '/calendar?days=1', shape: function (d) { return { events: d.events || [] }; } },
     inbox:    { title: 'INBOX', url: '/inbox?n=15&scope=all',     shape: function (d) { return { emails: d.emails || [], business: d.business || d.emails || [], personal: d.personal || [] }; } },
     weather:  { title: 'WEATHER',        url: '/weather',         shape: function (d) { return d; } },
-    memory:   { title: 'MEMORY',         url: '/memory',          shape: function (d) { return { memories: d.memories || [] }; } }
+    memory:   { title: 'MEMORY',         url: '/memory',          shape: function (d) { return { memories: d.memories || [] }; } },
+    // DUE TODAY was missing here (2026-09-01). The button shipped with data-panel="daybank",
+    // REHYDRATE knew the route, but DOCK did not — so the click handler hit `if (!cfg) return`
+    // and the button did NOTHING unless the card happened to be pinned from a previous session.
+    // Two config tables, one of them updated. The guard below stops that shipping again.
+    daybank:  { title: 'DUE TODAY',      url: '/daybank',         shape: function (d) { return { items: d.items || [] }; } }
   };
+  // Every dock button must have a DOCK entry, or it is silently dead on click.
+  Array.prototype.forEach.call(document.querySelectorAll('.qa[data-panel]'), function (b) {
+    var k = b.getAttribute('data-panel');
+    if (!DOCK[k]) console.warn('[ace] dock button "' + k + '" has no DOCK entry — it will do nothing');
+  });
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-panel]'), function (btn) {
     btn.addEventListener('click', function () {
       var p = btn.getAttribute('data-panel'), cfg = DOCK[p]; if (!cfg) return;
@@ -2233,7 +2243,7 @@
   // some to stay open", but it's your choice per card via the 📌).
   var REHYDRATE = {
     timeline: DOCK.timeline, inbox: DOCK.inbox, weather: DOCK.weather, memory: DOCK.memory,
-    daybank:  { url: '/daybank',         shape: function (d) { return { items: d.items || [] }; } },
+    daybank:  DOCK.daybank,   // one definition, so these two tables cannot drift apart again
     calendar: { url: '/calendar?days=7', shape: function (d) { return { events: d.events || [] }; } },
     tasks:    { url: '/tasks',           shape: function (d) { return { tasks: d.tasks || [], lists: d.lists || null }; } }
   };
