@@ -69,7 +69,13 @@
       if (stillMode) { running = false; paintStill(); return; }    // freeze: one frame, loop OFF
       requestAnimationFrame(frame);
       var idle = (now - _lastTouch) > 20000;                       // untouched 20s → chill
-      var gap = _rm ? (idle ? 400 : 66) : (idle ? 120 : 33);       // ms between paints
+      // COOL MODE (2026-09-01): this is a FULL-SCREEN canvas cleared and refilled every
+      // paint — at 30fps active it is the largest steady GPU cost left after the blur
+      // came off. Slow it hard rather than freezing it: Brady found the frozen sky
+      // "looks like it glitches". 5fps still drifts; it just costs ~6x less.
+      var _cool = document.body.classList.contains('cool');
+      var gap = _cool ? (idle ? 500 : 200)
+                      : (_rm ? (idle ? 400 : 66) : (idle ? 120 : 33));   // ms between paints
       if (now - _lastPaint < gap) return;                          // FPS cap: skip the draw, keep the loop
       _lastPaint = now;
       var t = now / 1000;
@@ -178,7 +184,11 @@
       requestAnimationFrame(frame);
       if (document.hidden) return;                       // COOL MODE: pause the orb in background
       // voice = smooth 60fps; idle = ~25fps; STILL MODE idle = ~2fps whisper (near-zero heat)
-      var gap = amp > 0.001 ? 0 : (stillMode ? 500 : (_orm ? 80 : 40));
+      // Speech always renders at full rate — that is the moment the orb earns its cost.
+      // Idle in cool mode drops to ~4fps: still alive, ~6x cheaper than the old 25fps.
+      var _cool = document.body.classList.contains('cool');
+      var gap = amp > 0.001 ? 0
+              : (stillMode ? 500 : (_cool ? 250 : (_orm ? 80 : 40)));
       if (now - _orbPaint < gap) return;
       _orbPaint = now;
       var t = now / 1000; last = now;
