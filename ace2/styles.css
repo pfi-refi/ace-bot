@@ -948,3 +948,19 @@ body.tab-hidden *::before,
 body.tab-hidden *::after { animation-play-state: paused !important; }
 
 #cool-btn.on { color: var(--aurora); border-color: rgba(69,255,166,.4); }
+
+/* Reschedule from the DUE TODAY card (2026-09-01). The due chip is a button; tapping it
+   opens a row of one-tap dates. The Command board's ✎ pencil still handles the free-text
+   case ("Fri 3pm") — this is for the common move: it slipped, push it. */
+.db-due-btn { background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; color: inherit; letter-spacing: inherit; }
+.db-due-btn:hover { text-decoration: underline; }
+.db-due-btn:focus-visible { outline: 2px solid var(--aurora); outline-offset: 2px; border-radius: 3px; }
+.db-pick { display: flex; gap: 5px; flex-wrap: wrap; width: 100%; margin-top: 6px; }
+.db-pick-b { font-family: var(--mono); font-size: 9.5px; letter-spacing: .5px;
+  padding: 3px 8px; border-radius: 4px; cursor: pointer;
+  color: var(--aurora); background: var(--aurora-12);
+  border: 1px solid rgba(69,255,166,.32); }
+.db-pick-b:hover { background: var(--aurora-25); }
+.db-pick-b.db-pick-clear { color: var(--text-faint); background: none;
+  border-color: rgba(255,255,255,.18); }

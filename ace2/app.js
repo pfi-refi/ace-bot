@@ -1044,8 +1044,26 @@
           if (cls === 'appr') meta.appendChild(tag('db-appr', 'TAP TO APPROVE'));
           else if (it.due_days != null) {
             var d = it.due_days;
-            meta.appendChild(tag('db-due', d < 0 ? (Math.abs(d) + 'd overdue')
-                                                : d === 0 ? 'due today' : 'due tomorrow'));
+            var chip = document.createElement('button');
+            chip.className = 'db-due db-due-btn';
+            chip.title = 'Tap to reschedule';
+            chip.textContent = (d < 0 ? (Math.abs(d) + 'd overdue')
+                                      : d === 0 ? 'due today' : 'due tomorrow') + ' ▾';
+            chip.addEventListener('click', function (ev) {
+              ev.stopPropagation();
+              var open = meta.querySelector('.db-pick');
+              if (open) { open.remove(); return; }          // tap again to close
+              var pick = document.createElement('span'); pick.className = 'db-pick';
+              dueChoices().forEach(function (c) {
+                var b = document.createElement('button');
+                b.className = 'db-pick-b' + (c.due === '' ? ' db-pick-clear' : '');
+                b.textContent = c.label;
+                b.addEventListener('click', function (e2) { e2.stopPropagation(); setBankDue(it.id, c.due); });
+                pick.appendChild(b);
+              });
+              meta.appendChild(pick);
+            });
+            meta.appendChild(chip);
           }
           mid.appendChild(txt); mid.appendChild(meta);
           row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
@@ -1124,6 +1142,35 @@
   }
   // CLEAN BY DEFAULT (Brady's call): no auto-cards on startup — the stage is the orb,
   // the dock summons surfaces on demand, and loadToday() keeps the up-next strip live.
+  // RESCHEDULE FROM THE CARD (2026-09-01, Brady: "the ability to adjust the due date").
+  // The Command board has had a due field behind the ✎ pencil all along, but the DUE TODAY
+  // card is where he is actually LOOKING at something late and deciding to move it. Sends a
+  // month-name date ("Sep 4"), which db._find_date parses unambiguously — a weekday name
+  // would be read as "the NEXT one" and a bare slash date is fine but reads worse on the chip.
+  function setBankDue(id, due) {
+    fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
+                                     body: JSON.stringify({ id: id, due: due }) })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (d && d.items) materializeCard('daybank', { items: d.items });
+        if (typeof cmdSync === 'function') cmdSync();
+      })
+      .catch(function () {});
+  }
+  var _MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function dueChoices() {
+    function at(days) { var d = new Date(); d.setDate(d.getDate() + days); return d; }
+    function fmt(d) { return _MON[d.getMonth()] + ' ' + d.getDate(); }
+    var mon = at(1); while (mon.getDay() !== 1) mon.setDate(mon.getDate() + 1);  // next Monday
+    return [
+      { label: 'Today',    due: 'today' },
+      { label: 'Tomorrow', due: 'tomorrow' },
+      { label: fmt(at(3)), due: fmt(at(3)) },
+      { label: 'Mon ' + fmt(mon).split(' ')[1], due: fmt(mon) },
+      { label: 'Clear',    due: '' }
+    ];
+  }
+
   function toggleBankItem(id, status) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
       .then(function (r) { return r.ok ? r.json() : null; })
