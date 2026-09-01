@@ -400,6 +400,14 @@ def _find_date(s: str, today):
                     d = _date(yr - 1, mo, day)
             return d
 
+    m = re.search(r"\bmid[-\s]?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", s)
+    if m:                                # 'mid-September' -> the 15th of that month
+        mo = _DUE_MONTHS[m.group(1)]
+        yr = today.year + (1 if mo < today.month - 1 else 0)
+        return _date(yr, mo, 15)
+    if re.search(r"\bmid[-\s]?month\b", s):
+        return _date(today.year, today.month, 15)
+
     if re.search(r"\b(today|tonight|this\s+(?:morning|afternoon|evening))\b", s):
         return today
     if re.search(r"\btomorrow\b", s):
@@ -475,6 +483,13 @@ def parse_due(text: str, due: str = None, today=None):
     d = _find_date(due, today)          # the due FIELD is unambiguous — any date in it is the due
     if d:
         return d
+    # A due FIELD that is SET but unparseable ("mid-September", "this week") still means Brady
+    # named the due date there — do not go scavenging the text for a different one. On
+    # 2026-09-01 the sewer bill read due="mid-September" with text "due mid-month, NOT 8/27
+    # (that date was stale/wrong)", and the text scan pulled 8/27 out of the very sentence
+    # disowning it, marking a current bill 5 days overdue.
+    if (due or "").strip():
+        return None
     t = (text or "").lower()            # in TEXT, only a date right after 'due' / 'by' / 'pay'
     for m in re.finditer(r"\b(?:due|by|pay(?:ment)?)\b", t):
         d = _find_date(t[m.end():m.end() + 22], today)
