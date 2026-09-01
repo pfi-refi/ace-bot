@@ -180,9 +180,22 @@
     // Sonar pulses — expanding rings from the core, more often when he's speaking
     var pulses = [], lastPulse = 0;
 
+    var _orbOffscreen = false;
+    if (window.IntersectionObserver) {
+      try {
+        new IntersectionObserver(function (es) {
+          _orbOffscreen = !es[0].isIntersecting;
+        }, { threshold: 0.01 }).observe(canvas);
+      } catch (e) { _orbOffscreen = false; }   // observer refused → keep painting, never go dark
+    }
+
     function frame(now) {
       requestAnimationFrame(frame);
-      if (document.hidden) return;                       // COOL MODE: pause the orb in background
+      if (document.hidden) return;                       // tab in the background
+      // ...and don't paint an orb nobody can SEE. The loop only ever checked the tab, so in
+      // chat mode (panel over it on desktop, scrolled past it on phone) it kept rendering 25
+      // frames a second of a hidden canvas. Costs nothing to skip and changes nothing visible.
+      if (_orbOffscreen) return;
       // voice = smooth 60fps; idle = ~25fps; STILL MODE idle = ~2fps whisper (near-zero heat)
       // Speech always renders at full rate — that is the moment the orb earns its cost.
       // Idle in cool mode drops to ~4fps: still alive, ~6x cheaper than the old 25fps.
