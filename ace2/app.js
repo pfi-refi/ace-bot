@@ -1680,8 +1680,24 @@
     }; });
     var f=v.querySelector('#cmd-add');
     if(f) f.onsubmit=function(e){ e.preventDefault(); var inp=v.querySelector('#cmd-input'); var t=(inp.value||'').trim(); if(!t) return; inp.value='';
+      // READ THE ANSWER (2026-09-05). This dropped the body and swallowed every error, so a
+      // dedup refusal — ok:true, dup:true, nothing written — looked exactly like a save: the
+      // input cleared, the board refetched, nothing appeared. The tick and edit handlers in
+      // this same file already check; only add was blind.
+      // READ THE ANSWER (2026-09-05). This dropped the body and swallowed every error, so a
+      // dedup refusal — ok:true, dup:true, nothing written — looked exactly like a save: the
+      // input cleared, the board refetched, nothing appeared. Same idiom as the editor's
+      // RETRY SAVE: hand the text back rather than eat it.
+      var addPH = inp.placeholder;   // 'Add to <category>…' — restore the real one, not a guess
+      function addFailed(msg){ inp.value = t; inp.placeholder = msg; inp.focus();
+        setTimeout(function(){ inp.placeholder = addPH; }, 4000); }
       fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat})})
-        .then(function(){ return cmdFetch(); }).then(cmdRender).catch(function(){}); };
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(d){
+          if (d && d.dup) { addFailed('Already on your board — nothing added'); return; }
+          if (!d || !d.ok) { addFailed('Could not save that — try again'); return; }
+          return cmdFetch().then(cmdRender);
+        }).catch(function(){ addFailed('Could not save that — try again'); }); };
   }
 
   /* ============================================================ KNOWLEDGE GRAPH

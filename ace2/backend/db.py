@@ -498,6 +498,21 @@ def parse_due(text: str, due: str = None, today=None):
     return None
 
 
+def _done_et(ts) -> str:
+    """A done_ts (stored UTC) as its EASTERN calendar date.
+
+    Promoted out of read_items 2026-09-05: tools.py was doing a raw ts[:10], which is the
+    exact bug the comment inside read_items warns about — anything closed 8pm-midnight ET
+    reads as the next day. One definition, so the next caller cannot get it wrong.
+    """
+    if not ts:
+        return ""
+    try:
+        return datetime.fromisoformat(ts).astimezone(EASTERN).strftime("%Y-%m-%d")
+    except Exception:
+        return str(ts)[:10]
+
+
 def read_items(active_only: bool = True) -> list:
     ensure_ready()
     try:
@@ -525,13 +540,6 @@ def read_items(active_only: bool = True) -> list:
             # so anything closed 8pm–midnight ET (UTC = tomorrow) VANISHED from the view — the
             # "Ace doesn't mark some items off" bug (2026-08-19 audit). Convert to Eastern first.
             today = datetime.now(EASTERN).strftime("%Y-%m-%d")
-            def _done_et(ts):
-                if not ts:
-                    return ""
-                try:
-                    return datetime.fromisoformat(ts).astimezone(EASTERN).strftime("%Y-%m-%d")
-                except Exception:
-                    return ts[:10]
             # BILLS STAY ON THE SHELF ALL MONTH (2026-08-26, Brady: "that should be an untouched
             # board... just say when they're actually due and how much"). A bill marked paid used
             # to VANISH until the 1st, so mid-month his register was incomplete — 11 of ~16 bills

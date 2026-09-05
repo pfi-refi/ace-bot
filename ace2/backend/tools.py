@@ -697,7 +697,9 @@ def _do_capture_item(kind="note", text="", due=None, category=None, **_):
             # Actionable receipt (2026-07-31): id + status so the model can pivot to
             # update_item instead of dead-ending (the old receipt had neither).
             st = res.get("status", "open")
-            when = (res.get("done_ts") or "")[:10]
+            # done_ts is UTC; a raw [:10] compares a UTC date to an Eastern one, so anything
+            # closed 8pm-midnight ET reads one day late. Same bug db.py:524 documents.
+            when = db._done_et(res.get("done_ts")) or ""
             state = "open" if st == "open" else f"already {st}{f' {when}' if when else ''}"
             return (f"◆ Already on your board as [{res.get('id')}] ({state}): "
                     f"{res.get('text', text)} — to change or complete it, use update_item "

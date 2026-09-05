@@ -1778,7 +1778,7 @@ def _push_warn(msg: str, *args) -> list:
     return []
 
 
-def _push_now(title: str, body: str, url: str) -> list:
+def _push_now(title: str, body: str, url: str, tag: str = "ace") -> list:
     """BLOCKING fan-out to every stored device; returns per-endpoint results. Run it in a
     thread (send_push does) — pywebpush is sync `requests` under the hood. A device that
     answers 404/410 is gone for good (app deleted, endpoint rotated), so it's DROPPED
@@ -1793,7 +1793,11 @@ def _push_now(title: str, body: str, url: str) -> list:
     if not db.enabled():
         return _push_warn("no DATABASE_URL, nowhere to store subscriptions")
     subs = db.list_push_subs()
-    payload = json.dumps({"title": title, "body": body, "url": url or "/"})
+    # TAG PER ALERT TYPE (2026-09-05). sw.js keys the notification on d.tag and the server
+    # never sent one, so every push collapsed onto the constant "ace" — a mid-morning nudge
+    # silently REPLACED an unread morning brief on the lock screen. Distinct tags stack.
+    payload = json.dumps({"title": title, "body": body, "url": url or "/",
+                          "tag": tag or "ace"})
     out = []
     for s in subs:
         tail = s["endpoint"][-24:]
@@ -1816,12 +1820,13 @@ def _push_now(title: str, body: str, url: str) -> list:
     return out
 
 
-def send_push(title: str, body: str, url: str = "/") -> None:
+def send_push(title: str, body: str, url: str = "/", tag: str = "ace") -> None:
     """FIRE-AND-FORGET phone alert. Safe from anywhere — sync or async, hot path or not:
     it hands off to a daemon thread and returns immediately, and it never raises."""
     try:
         threading.Thread(target=_push_now, name="ace2-push", daemon=True,
-                         args=(title or "ACE", (body or "").strip()[:180], url or "/")).start()
+                         args=(title or "ACE", (body or "").strip()[:180], url or "/",
+                               tag or "ace")).start()
     except Exception as e:
         logger.warning("push: send_push could not start a thread: %s", e)
 

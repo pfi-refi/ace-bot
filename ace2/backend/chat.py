@@ -1323,7 +1323,7 @@ async def deliver_brief(kind: str, text: str) -> str:
         # keep the real brief inside the app (it's in the thread + HUD already).
         body = ("Your game plan's ready — open Ace to read it." if _discreet[0]
                 else text)
-        send_push(title, body, "/")
+        send_push(title, body, "/", tag="brief")
     except Exception as e:
         logger.warning("brief phone push skipped: %s", e)
     try:
@@ -1699,7 +1699,7 @@ async def _watch_pass_once(force: bool = False, dry_run: bool = False) -> dict:
         try:
             from .main import send_push
             body = ("Ace has a heads-up for you — open to read." if _discreet[0] else text)
-            send_push("ACE · Heads-up", body, "/")
+            send_push("ACE · Heads-up", body, "/", tag="nudge")
         except Exception as e:
             logger.warning("nudge phone push skipped: %s", e)
         logger.info("nudge delivered (%d today): %s", sent_today + 1, text[:80])
@@ -1787,7 +1787,7 @@ async def _reminder_once(force: bool = False, dry_run: bool = False) -> dict:
     try:
         from .main import send_push
         push_body = ("You've got items due — open Ace." if _discreet[0] else body)
-        send_push("ACE · Due Now", push_body, "/")
+        send_push("ACE · Due Now", push_body, "/", tag="reminder")
     except Exception as e:
         logger.warning("reminder push skipped: %s", e)
     try:
@@ -2274,10 +2274,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             logger.warning("hit MAX_TOOL_ITERS for: %s", user_text[:80])
 
         reply = "".join(full_reply).strip()
-        if fast and not reply and not passthrough_called:
-            # An empty completion makes ElevenLabs treat the turn as an LLM failure
-            # and cascade — always give voice something to say.
-            reply = "I'm here — say that again for me?"
+        if not reply and not passthrough_called:
+            # An empty completion makes ElevenLabs treat the turn as an LLM failure and
+            # cascade. On the TYPED path it was worse and silent: the frontend discards an
+            # empty bubble, so exhausting MAX_TOOL_ITERS meant Ace ran eight tools and said
+            # nothing at all. Both paths now always get something back.
+            reply = ("I'm here — say that again for me?" if fast else
+                     "I ran out of steps on that one before I could answer. Ask me again and "
+                     "I'll take a narrower run at it.")
         await emit("final", {"text": reply})
 
         # Persist to 2.0's OWN history (best-effort; never blocks the reply). ONLY the real

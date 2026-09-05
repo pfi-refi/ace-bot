@@ -37,7 +37,9 @@ logger = logging.getLogger("ace2.daybank")
 
 EASTERN = pytz.timezone("America/New_York")
 FILE_NAME = "ace2_daybank.json"
-KINDS = ("note", "todo", "commitment", "followup")
+# Must match db.KINDS — a kind missing here is silently downgraded to "note" on the Drive
+# fallback, which would have made the whole WAITING-ON-YOUR-OK lane invisible.
+KINDS = ("note", "todo", "commitment", "followup", "approval")
 
 
 def _drive():

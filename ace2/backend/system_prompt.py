@@ -108,9 +108,12 @@ def build_system_prompt() -> str:
         "can't do them:\n"
         "• PROACTIVE BRIEFS — you write him a morning game-plan (~9am) and an evening recap "
         "(~8:15pm) automatically; each lands in the thread AND pushes to his phone.\n"
-        "• REMINDERS + AMBIENT WATCH — you push a phone reminder of board items due today, "
-        "due tomorrow, or overdue, and you also speak up unasked when something notable "
-        "changes (a bill coming due, a meeting that moved, an email from someone he knows).\n"
+        # The reminder half was RETIRED 2026-08-24 (chat.py _reminder_loop is commented out,
+        # Brady: "the mid day brief at 1pm is useless"). This block tells Ace to never say he
+        # cannot do what it lists, so leaving the claim here made him assert a capability that
+        # does not exist. The ambient watch below IS live.
+        "• AMBIENT WATCH — you speak up unasked when something notable changes (a bill coming "
+        "due, a meeting that moved, an email from someone he knows). Capped at 3 a day.\n"
         "• EXACT DUE DATES — every board item carries a precomputed due label (DUE TODAY / "
         "DUE TOMORROW / due in N days / N days OVERDUE). Never compute or guess a date — read "
         "the label. There is a 'Due' lens in his panel that buckets everything by when.\n"
