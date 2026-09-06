@@ -33,6 +33,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytz
 from anthropic import AsyncAnthropic
@@ -523,8 +524,12 @@ async def _live_context() -> tuple:
     # becomes the first line of the fast half — still stated up front, just after the part
     # that doesn't change. (It was first because voice kept losing the date; it stays
     # prominent, and the voice path builds its own context and is untouched here.)
+    _chg = _changelog_block()
     slow = [
         _profile_block(),
+        *(["", "WHAT CHANGED IN YOU RECENTLY (newest first — this is what you can do NOW; if "
+           "Brady asks what's new or what you can do, answer from this, and never describe a "
+           "fix as still pending when it is listed here):", _chg] if _chg else []),
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
@@ -2044,6 +2049,39 @@ async def _refresh_recap() -> None:
         logger.warning("recap refresh failed: %s", e)
     finally:
         _recap_running[0] = False
+
+
+# ── ACE KNOWS WHAT CHANGED IN HIMSELF (2026-09-06) ─────────────────────────────────
+# Brady: "each time we fix something on Ace he needs to know about it." Twice in one morning
+# he did not — his memory still called the upgrade session a future plan, and his board
+# context had no idea the records/actions model existed. Both were patched by hand, which
+# does not scale and silently rots the moment someone forgets.
+#
+# So the changelog SHIPS WITH THE CODE and he reads the top of it. It cannot drift from what
+# is deployed, because it is deployed. It rides in the SLOW half of the context — the cached
+# block — so it changes only when a deploy changes it, and costs effectively nothing per turn.
+_CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+_CHANGELOG_ENTRIES = 5
+_changelog_cache = {"mtime": 0.0, "text": ""}
+
+
+def _changelog_block() -> str:
+    """The most recent entries, read from disk and cached on mtime."""
+    try:
+        st = _CHANGELOG.stat()
+        if _changelog_cache["mtime"] == st.st_mtime:
+            return _changelog_cache["text"]
+        raw = _CHANGELOG.read_text(errors="replace")
+        body = raw.split("---", 1)[1] if "---" in raw else raw
+        parts = [p.strip() for p in body.split("\n## ") if p.strip()]
+        out = []
+        for p in parts[:_CHANGELOG_ENTRIES]:
+            out.append("- " + " ".join(p.replace("\n", " ").split())[:400])
+        text = "\n".join(out)
+        _changelog_cache.update(mtime=st.st_mtime, text=text)
+        return text
+    except Exception:
+        return ""
 
 
 def _recap_block() -> str:
