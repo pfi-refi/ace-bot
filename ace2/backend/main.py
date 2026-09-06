@@ -293,6 +293,10 @@ async def health():
         "uptime_seconds": int(time.time() - START_TIME),
         "auth_required": auth_enabled(),
         "locked": locked(),
+        # Whether the 1h prompt cache preflight passed. Observable on purpose: this is the
+        # feature that broke every call on 3 Aug, and "did it come up?" should not require
+        # reading deploy logs.
+        "cache_ttl": "1h" if chat._ttl_ok[0] else "5m",
     }
 
 

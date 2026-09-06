@@ -395,6 +395,53 @@ def _format_today_schedule(events: list, now: datetime) -> str:
     return "\n".join(lines) if lines else "(nothing on the calendar today)"
 
 
+# ── 1-HOUR PROMPT CACHE (Phase 6 step 4, 2026-09-06) ───────────────────────────────
+# WHY IT BROKE ON 3 AUG, precisely: `ttl` on a cache_control block requires the
+# extended-cache-ttl-2025-04-11 beta, and `betas` is a parameter of client.BETA.messages —
+# it does not exist on client.messages. Passing ttl on the standard endpoint is rejected, so
+# every call failed at once. Verified against the installed SDK (0.125.0), not remembered.
+#
+# WHY IT IS WORTH REDOING. The cached prefix is now ~20k tokens (system prompt + tool schemas
+# + the memory block added in step 1). At a 5-minute TTL that prefix is re-WRITTEN several
+# times a day at 1.25x rate; at an hour it is written a fraction as often. This is the
+# largest remaining lever, and bigger than it was before step 1 put memory in the prefix.
+#
+# AND IT IS PREFLIGHTED. Something that once broke every call does not get shipped on faith:
+# one tiny call at boot proves the beta is accepted before any of Brady's turns depend on it.
+# If it fails, the process falls back to the plain 5-minute cache and says so in the log —
+# degraded, never broken. ACE2_CACHE_TTL=5m disables it without a deploy.
+_TTL_BETA = "extended-cache-ttl-2025-04-11"
+_CACHE_TTL = os.environ.get("ACE2_CACHE_TTL", "1h").strip().lower()
+_ttl_ok = [False]        # set by the preflight; False ⇒ standard endpoint, 5-minute cache
+
+
+def _cc(ttl: bool = True) -> dict:
+    """A cache_control block: 1h when the preflight passed, otherwise the plain 5m one."""
+    return ({"type": "ephemeral", "ttl": "1h"} if (ttl and _ttl_ok[0])
+            else {"type": "ephemeral"})
+
+
+async def preflight_cache_ttl() -> bool:
+    """Prove the 1h cache beta is accepted BEFORE any real turn relies on it."""
+    if _CACHE_TTL != "1h":
+        logger.info("cache ttl: 5m (ACE2_CACHE_TTL=%s)", _CACHE_TTL)
+        return False
+    try:
+        client = _anthropic()
+        await client.beta.messages.create(
+            model=VOICE_MODEL, max_tokens=1, betas=[_TTL_BETA],
+            system=[{"type": "text", "text": "ok",
+                     "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            messages=[{"role": "user", "content": "hi"}])
+        _ttl_ok[0] = True
+        logger.info("cache ttl: 1h ENABLED (beta %s accepted)", _TTL_BETA)
+        return True
+    except Exception as e:
+        _ttl_ok[0] = False
+        logger.warning("cache ttl: 1h REFUSED (%s) — staying on the 5m cache", e)
+        return False
+
+
 def _anthropic() -> AsyncAnthropic:
     global _client
     if _client is None:
@@ -837,6 +884,7 @@ async def prime_ctx() -> None:
     the context keep-warm AND the learning sweep (Ace teaching himself from conversations)."""
     await _refresh_ctx()
     await asyncio.to_thread(load_discreet)   # remember the Discreet Mode setting across restarts
+    await preflight_cache_ttl()   # prove the 1h cache beta BEFORE a real turn depends on it
     if not _ctx_keepwarm_started[0]:
         _ctx_keepwarm_started[0] = True
         asyncio.create_task(_ctx_keepwarm())
@@ -2319,10 +2367,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # mark them as a cached prefix — Haiku stops re-paying ~6k tokens of prefill
             # per turn, pulling first-token well under the lead-in threshold.
             voice_tools = [dict(t) for t in VOICE_TOOLS] + list(extra_tools or [])
-            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = {"type": "ephemeral"}
+            voice_tools[len(VOICE_TOOLS) - 1]["cache_control"] = _cc()
             cached_system = [
                 {"type": "text", "text": build_system_prompt(),
-                 "cache_control": {"type": "ephemeral"}},
+                 "cache_control": _cc()},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()},
             ]
             stream_kwargs = dict(model=VOICE_MODEL, max_tokens=1500, system=cached_system,
@@ -2340,7 +2388,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # header; passing ttl without it broke every call (2026-08-03). Reverted to the
             # standard 5-min ephemeral cache — safe. Re-add 1h WITH the header, verified.
             typed_tools = [dict(t) for t in tools.TOOLS] + list(mcp_schemas) + [dict(tools.WEB_SEARCH)]
-            typed_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            typed_tools[-1]["cache_control"] = _cc()
             # THREE BLOCKS, TWO BREAKPOINTS (Phase 6 step 1, 2026-09-06). The cache is a
             # PREFIX over tools → system → messages, so each breakpoint extends the cached
             # span. Block 2 is the slow half of the context — measured at ~4,600 tokens of
@@ -2350,9 +2398,9 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # one re-write of the slow half, not the whole prefix.
             typed_system = [
                 {"type": "text", "text": build_system_prompt(),
-                 "cache_control": {"type": "ephemeral"}},
+                 "cache_control": _cc()},
                 {"type": "text", "text": "\n\n---\nWHAT YOU KNOW\n" + ctx_slow,
-                 "cache_control": {"type": "ephemeral"}},
+                 "cache_control": _cc()},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()},
             ]
             stream_kwargs = dict(
@@ -2372,7 +2420,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     try:
         for _ in range(MAX_TOOL_ITERS):
             turn_text = []
-            async with client.messages.stream(**stream_kwargs) as stream:
+            # `betas` exists ONLY on client.beta.messages — sending a 1h ttl to the standard
+            # endpoint is exactly what broke every call on 3 Aug. The preflight decides which
+            # of these two we are on, at boot, before any turn depends on it.
+            _stream_cm = (client.beta.messages.stream(betas=[_TTL_BETA], **stream_kwargs)
+                          if _ttl_ok[0] else client.messages.stream(**stream_kwargs))
+            async with _stream_cm as stream:
                 async for event in stream:
                     if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
                         turn_text.append(event.delta.text)
