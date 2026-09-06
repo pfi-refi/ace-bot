@@ -22,7 +22,8 @@ import logging
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+import re as _re
+from datetime import datetime, timedelta
 
 import pytz
 
@@ -344,6 +345,8 @@ def canon_tags(tags: list) -> list:
     return out
 
 
+_DUE_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _DUE_MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 
@@ -400,6 +403,24 @@ def _find_date(s: str, today):
                     d = _date(yr - 1, mo, day)
             return d
 
+    # AN EXPLICIT DATE ALWAYS BEATS A RELATIVE WORD (moved above the relative block
+    # 2026-09-05). pin_due writes "Sep 6 (tomorrow)" to keep the row readable; if the
+    # relative check ran first it would match "tomorrow" and the pinned date would drift
+    # forward every single day — exactly the bug pinning exists to kill.
+    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", s)
+    if m:
+        try:
+            d = _date(today.year, _DUE_MONTHS[m.group(1)], int(m.group(2)))
+            if (today - d).days > 40:
+                d = _date(today.year + 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
+            elif (d - today).days > 320:
+                # 'dec 28' read on Jan 2 parses as ~a year OUT; it means LAST year's date
+                # (just missed / recent context), not 11+ months away (2026-08-23 scrub M4).
+                d = _date(today.year - 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
+            return d
+        except ValueError:
+            return None
+
     m = re.search(r"\bmid[-\s]?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", s)
     if m:                                # 'mid-September' -> the 15th of that month
         mo = _DUE_MONTHS[m.group(1)]
@@ -424,19 +445,6 @@ def _find_date(s: str, today):
         ahead = (want - today.weekday()) % 7
         return today + _td(days=ahead or 7)   # a bare weekday name means the NEXT one
 
-    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", s)
-    if m:
-        try:
-            d = _date(today.year, _DUE_MONTHS[m.group(1)], int(m.group(2)))
-            if (today - d).days > 40:
-                d = _date(today.year + 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
-            elif (d - today).days > 320:
-                # 'dec 28' read on Jan 2 parses as ~a year OUT; it means LAST year's date
-                # (just missed / recent context), not 11+ months away (2026-08-23 scrub M4).
-                d = _date(today.year - 1, _DUE_MONTHS[m.group(1)], int(m.group(2)))
-            return d
-        except ValueError:
-            return None
     m = re.search(r"\b(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b", s)
     if m:
         day = int(m.group(1))
@@ -470,6 +478,45 @@ def _find_date(s: str, today):
                     if mo > 12:
                         mo, y = 1, y + 1
     return None
+
+
+_RELATIVE_DUE = _re.compile(
+    r"\b(today|tonight|tomorrow|tmrw|this (?:week|morning|afternoon|evening|weekend)"
+    r"|next (?:week|month)|end of (?:the )?week|eow|later today)\b", _re.I)
+
+
+def pin_due(due: str, today=None) -> str:
+    """Freeze relative due wording to a real date AT WRITE TIME.
+
+    "tomorrow" was stored verbatim and re-resolved against the CURRENT day on every read, so
+    an item due "tomorrow" was due tomorrow FOREVER and could never go overdue. Proof from the
+    live board 2026-09-05: three items carried due="tomorrow" and all three resolved to 09-06
+    despite being written on 08-17, 08-30 and 09-03 — one of them nineteen days stale.
+
+    Anything already absolute ("Sep 8", "the 17th", "Wed 9/9") is left exactly as typed; only
+    wording that MOVES gets pinned, and the original is kept alongside so the row still reads
+    like a person wrote it: "tomorrow" -> "Sep 6 (tomorrow)".
+
+    Vague spans ("this week", "next week") pin to their END — the last day they could honestly
+    mean — so they surface late rather than never.
+    """
+    raw = (due or "").strip()
+    if not raw or not _RELATIVE_DUE.search(raw):
+        return raw
+    today = today or datetime.now(EASTERN).date()
+    low = raw.lower()
+    if _re.search(r"\bnext week\b", low):
+        d = today + timedelta(days=(6 - today.weekday()) + 7)      # end of next week
+    elif _re.search(r"\bnext month\b", low):
+        d = (today.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    elif _re.search(r"\bthis week(end)?\b|\bend of (the )?week\b|\beow\b", low):
+        d = today + timedelta(days=6 - today.weekday())            # this Sunday
+    elif _re.search(r"\btomorrow\b|\btmrw\b", low):
+        d = today + timedelta(days=1)
+    else:                                                          # today / tonight / this morning...
+        d = today
+    stamp = "%s %d" % (_DUE_MONTH_NAMES[d.month - 1], d.day)
+    return "%s (%s)" % (stamp, raw)
 
 
 def parse_due(text: str, due: str = None, today=None):
@@ -750,7 +797,7 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     item = {
         "id": uuid.uuid4().hex[:8], "ts": datetime.now(EASTERN).isoformat(),
         "kind": kind, "text": text, "status": "open", "tags": tags or [],
-        "due": (due or None), "done_ts": None,
+        "due": (pin_due(due) or None), "done_ts": None,
     }
     try:
         import json
@@ -1011,7 +1058,7 @@ def update_item(item_id: str, status: str = None, text: str = None,
             if tags is not None:
                 sets.append("tags = %s::jsonb"); args.append(json.dumps(canon_tags(tags)))
             if due is not None:
-                sets.append("due = %s"); args.append(due.strip() or None)
+                sets.append("due = %s"); args.append(pin_due(due) or None)
             if (superseded_by or "").strip():
                 sets.append("superseded_by = %s"); args.append(superseded_by.strip())
             if not sets:
