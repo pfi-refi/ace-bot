@@ -2079,6 +2079,73 @@ async def _fast_context() -> str:
 
 
 STAGE_TOOLS = [t for t in tools.TOOLS if t["name"] in tools.UI_TOOLS]
+# ── THE BUCKET PASS (Phase 4 tail, 2026-09-06) ─────────────────────────────────────
+# Replaces a keyword classifier that got ~10% of the live board wrong in a way tuning could
+# not fix: it read "Ace Ready Mix" (a concrete supplier) as Ace's own work, a row that only
+# COMPARED against Groundworks as Groundworks work, and "sitting on it until his birthday" as
+# a personal errand. What a row is ABOUT is not what it MENTIONS — that is a judgment call.
+#
+# ONE batched call for the whole unclassified backlog, not one per item, and it fills only
+# EMPTY buckets so a correction Brady makes is never overwritten. Runs rarely: once the board
+# is classified there is nothing left to do.
+_BUCKET_MODEL = os.environ.get("ACE2_BUCKET_MODEL", "claude-haiku-4-5-20251001")
+
+
+async def bucket_pass(limit: int = 60) -> dict:
+    """Classify open ACTIONS that have no stored bucket. Returns a small report."""
+    try:
+        items = await asyncio.to_thread(daybank.read_items, False)
+        todo = [i for i in items
+                if i.get("status") == "open" and i.get("entry") == "action"
+                and not i.get("bucket_set")][:limit]
+        if not todo:
+            return {"classified": 0, "note": "every open action already has a bucket"}
+        listing = "\n".join(f"[{i['id']}] {(i.get('text') or '')[:220]}" for i in todo)
+        prompt = (
+            "File each of Brady's open actions into ONE lane. The test is WHOSE TIME IT TAKES, "
+            "not what the row is about — a haircut is Personal even when it is for a Groundworks "
+            "interview, and buying a dress for someone's wedding is Personal even though the "
+            "wedding is Damon's.\n\n"
+            "GFI/PFI — his insurance book: clients, deals, commissions, prospecting, licensing, "
+            "the PFI entity, the Chris Stout/Morgan offer.\n"
+            "Groundworks — the CFI job he starts 9/14: Tony, training, study material, onboarding.\n"
+            "Side Work — paid work for other owners: Damon's concrete and pours, Woody, his "
+            "uncle's greenhouse, websites and DNS he does for them. NOTE 'Ace Ready Mix' is a "
+            "CONCRETE SUPPLIER, not Ace the assistant.\n"
+            "Personal — his own life and household: money, bills, taxes, family, Gabby, health, "
+            "errands.\n"
+            "Ace — building or fixing Ace himself: defects, upgrade sessions, deploys.\n\n"
+            "A row that merely MENTIONS a lane is not in it — 'how does the offer read against "
+            "Groundworks by then' is a GFI/PFI decision, not Groundworks work.\n\n"
+            "Answer one line per item, exactly 'id: Lane', nothing else. Use only those five "
+            "lane names.\n\n" + listing
+        )
+        client = _anthropic()
+        r = await client.messages.create(
+            model=_BUCKET_MODEL, max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}])
+        out = "".join(getattr(b, "text", "") for b in r.content)
+        valid = set(db.BUCKETS)
+        by_id = {i["id"]: i for i in todo}
+        applied, skipped = 0, 0
+        for line in out.splitlines():
+            m = re.match(r"\s*\[?([0-9a-f]{6,8})\]?\s*[:\-]\s*(.+?)\s*$", line)
+            if not m:
+                continue
+            iid, lane = m.group(1), m.group(2).strip().strip(".")
+            if iid not in by_id or lane not in valid:
+                skipped += 1
+                continue
+            ok, _ = await asyncio.to_thread(daybank.update_item, iid, bucket=lane)
+            applied += int(bool(ok))
+        logger.info("bucket pass: %d classified, %d unusable, %d candidates",
+                    applied, skipped, len(todo))
+        return {"classified": applied, "unusable": skipped, "candidates": len(todo)}
+    except Exception as e:
+        logger.warning("bucket pass failed: %s", e)
+        return {"classified": 0, "error": str(e)}
+
+
 # ── THE DUPLICATE JUDGE (Phase 4, 2026-09-05) ──────────────────────────────────────
 # Registered into db.set_dup_judge at startup. It is only ever called when db has already
 # decided the row is NOT a lexical twin AND a shortlist survived the money/date guard, so it

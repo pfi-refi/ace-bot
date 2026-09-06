@@ -1639,6 +1639,12 @@
   // columns recede to MUTED slate — the board is visual-first on what matters now.
   var CMD_CATS = { 'Money':'#2fd36b', 'Bills':'#ff8c1a', 'Opportunities':'#38bdf8', 'Goals':'#ffb020', 'Personal':'#ff4757', 'Deals':'#8091a8', 'Agents':'#748097', 'Admin':'#8b95a3', 'Networking':'#6f7d95', 'Business':'#79869c', 'Tech':'#828da0' };
   var CMD_ORDER = ['Money','Bills','Opportunities','Goals','Personal','Deals','Agents','Admin','Networking','Business','Tech'];
+  // THE FIVE LANES (2026-09-06). Filed by WHOSE TIME IT TAKES, not what the row is about —
+  // the haircut is Personal even when it is for a Groundworks interview. Separate axis from
+  // the 11 categories, which say what a row IS; this says whose day it comes out of.
+  var CMD_LANES = ['GFI/PFI','Groundworks','Side Work','Personal','Ace'];
+  var LANE_COLORS = { 'GFI/PFI':'#38bdf8', 'Groundworks':'#ff8c1a', 'Side Work':'#2fd36b',
+                      'Personal':'#ff4757', 'Ace':'#8091a8' };
   var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[], editing:null };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
@@ -1695,6 +1701,10 @@
       // is finished but must STAY (Feliz's annuity is closed and paid, not deleted).
       var dEntry = (cmd.draft && cmd.draft.entry) || it.entry || 'action';
       var dState = (cmd.draft && cmd.draft.state) || it.state || 'active';
+      var dBucket = (cmd.draft && cmd.draft.bucket) || it.bucket || 'Personal';
+      var bOpts = CMD_LANES.map(function (o) {
+        return '<option value="'+o+'"'+(o===dBucket?' selected':'')+'>'+o+'</option>';
+      }).join('');
       var eOpts = ['action', 'record'].map(function (o) {
         return '<option value="'+o+'"'+(o===dEntry?' selected':'')+'>'+
                (o === 'action' ? 'ACTION — ends when done' : 'RECORD — has a state')+'</option>';
@@ -1709,6 +1719,7 @@
         +'<textarea class="cmd-etext" rows="2">'+cmdEsc(dText)+'</textarea>'
         +'<div class="cmd-erow"><select class="cmd-ecat">'+opts+'</select>'
         +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(dDue)+'"></div>'
+        +'<div class="cmd-erow"><select class="cmd-ebucket"'+(dEntry==='record'?' disabled':'')+'>'+bOpts+'</select></div>'
         +'<div class="cmd-erow"><select class="cmd-eentry">'+eOpts+'</select>'
         +'<select class="cmd-estate"'+(dEntry==='action'?' disabled':'')+'>'+sOpts+'</select></div>'
         +'<div class="cmd-erow"><input class="cmd-ewait" placeholder="waiting on who? (e.g. Tony, approval)" '
@@ -1749,7 +1760,8 @@
         cat:   er.querySelector('.cmd-ecat').value,
         due:   er.querySelector('.cmd-edue').value,
         entry: er.querySelector('.cmd-eentry').value,
-        state: er.querySelector('.cmd-estate').value
+        state: er.querySelector('.cmd-estate').value,
+        bucket: (er.querySelector('.cmd-ebucket') || {}).value
       };
     }
     if(cmd.min){
@@ -1764,8 +1776,8 @@
       var dot=c==='All'?'':'<span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>';
       return '<button class="cmd-chip '+(c===cmd.cat?'on':'')+'" data-cat="'+c+'">'+dot+c+'</button>';
     }).join('');
-    var LN={due:'Due',pipeline:'Pipeline',all:'All',done:'Done'};
-    var lenses=['due','pipeline','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
+    var LN={due:'Due',pipeline:'Pipeline',lanes:'Lanes',all:'All',done:'Done'};
+    var lenses=['due','pipeline','lanes','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
     var items=cmd.items.filter(function(x){ return cmd.cat==='All'||cmdCatOf(x)===cmd.cat; });
     // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
     // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
@@ -1785,6 +1797,17 @@
     }
     else if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
     else if(cmd.lens==='all'){ body=items.slice().sort(byAge).filter(function(x){return x.status!=='dropped';}).map(cmdRow).join(''); }
+    else if(cmd.lens==='lanes'){
+      // ACTIONS only: a lane answers "whose time does this take", and a record has no ending
+      // to spend time on. Records stay visible under the pipeline lens.
+      var acts=items.filter(function(x){ return x.status==='open' && x.entry!=='record'; });
+      CMD_LANES.forEach(function(L){
+        var g=acts.filter(function(x){ return (x.bucket||'Personal')===L; }).sort(byAge);
+        if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'
+          +LANE_COLORS[L]+'"></span>'+L+' · '+g.length+'</div>'+g.map(cmdRow).join(''); }
+      });
+      if(!body) body='<div class="cmd-empty">No open actions.</div>';
+    }
     else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status==='open';}).sort(byAge); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
     var addCat=cmd.cat==='All'?'Money':cmd.cat;
@@ -1836,7 +1859,9 @@
       var eSel = row.querySelector('.cmd-eentry'), sSel = row.querySelector('.cmd-estate'),
           wIn  = row.querySelector('.cmd-ewait');
       if (!eSel || !sSel || !wIn) return;
+      var bSel = row.querySelector('.cmd-ebucket');
       function sync(){
+        if (bSel) bSel.disabled = (eSel.value !== 'action');   // a record has no lane
         sSel.disabled = (eSel.value !== 'record');
         wIn.disabled  = (eSel.value !== 'record' || sSel.value !== 'waiting');
         if (wIn.disabled) wIn.value = '';
@@ -1852,6 +1877,8 @@
         text: (ta.value || '').trim(),
         category: row.querySelector('.cmd-ecat').value,
         entry: row.querySelector('.cmd-eentry').value,
+        bucket: (row.querySelector('.cmd-eentry').value === 'action'
+                 ? row.querySelector('.cmd-ebucket').value : ''),
         state: (row.querySelector('.cmd-eentry').value === 'record'
                 ? row.querySelector('.cmd-estate').value : ''),
         waiting_on: (row.querySelector('.cmd-estate').value === 'waiting'

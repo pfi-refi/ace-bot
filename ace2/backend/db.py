@@ -99,7 +99,8 @@ def _init_schema():
         #              closed the four records that vanished in one update on 5 Sept.
         # All nullable with no backfill in this statement: an un-migrated row behaves exactly as
         # it does today, so this migration cannot change behavior on its own.
-        for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT"):
+        for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT",
+                     "bucket TEXT"):
             cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
@@ -691,8 +692,8 @@ def read_items(active_only: bool = True) -> list:
     try:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
-                        "parent_id, superseded_by, entry, state, waiting_on, closed_by "
-                        "FROM daybank_items")
+                        "parent_id, superseded_by, entry, state, waiting_on, closed_by, "
+                        "bucket FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
         items = []
@@ -708,8 +709,14 @@ def read_items(active_only: bool = True) -> list:
             it["entry"] = r[10] or _derive_entry(it)
             it["state"] = r[11] or (_derive_state(it) if it["entry"] == "record" else None)
             it["waiting_on"] = r[12] or (_waiting_on(it.get("text")) if it["state"] == "waiting" else None)
-            it["bucket"] = (derive_bucket(it.get("text"), _item_cat(it))
+            # A STORED bucket always wins: it is either the judgment pass or Brady's own
+            # correction, and the keyword default exists only so an unclassified row still
+            # lands somewhere sane.
+            it["bucket"] = (r[14] or derive_bucket(it.get("text"), _item_cat(it))
                             if it["entry"] == "action" else None)
+            # Callers need to tell a JUDGED/corrected bucket from the keyword default — the
+            # classification pass fills only empties, so it must never overwrite Brady.
+            it["bucket_set"] = bool(r[14])
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None
@@ -1240,7 +1247,8 @@ def remove_push_sub(endpoint: str) -> bool:
 def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None, match: str = None,
                 superseded_by: str = None, closed_by: str = None,
-                entry: str = None, state: str = None, waiting_on: str = None) -> tuple:
+                entry: str = None, state: str = None, waiting_on: str = None,
+                bucket: str = None) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
@@ -1286,6 +1294,8 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("state = %s"); args.append(state)
             if waiting_on is not None:
                 sets.append("waiting_on = %s"); args.append((waiting_on.strip() or None))
+            if bucket in BUCKETS:
+                sets.append("bucket = %s"); args.append(bucket)
             if not sets:
                 return False, "nothing to update"
             args.append(item_id)

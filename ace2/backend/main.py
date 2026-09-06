@@ -537,6 +537,7 @@ class DaybankUpdateReq(BaseModel):
     # nothing could override them, so a row the heuristic called wrong stayed wrong — an
     # uncorrectable classifier on the board Brady already distrusts. A stored value wins over
     # the derivation, which also makes 'settled' reachable: it is never derived, only set.
+    bucket: str = ""     # which lane an ACTION belongs to ("" = leave)
     entry: str = ""      # "action" | "record" ("" = leave / keep deriving)
     state: str = ""      # "active" | "waiting" | "settled" (records only)
     waiting_on: str | None = None   # who it is parked on ("" clears; None = leave)
@@ -650,6 +651,13 @@ async def brief_run(kind: str = "morning"):
     if text:
         return {"ok": True, "kind": kind, "chars": len(text)}
     return {"ok": False, "error": "brief generation failed"}
+
+
+@app.post("/daybank/bucket_pass", dependencies=[Depends(require_auth)])
+async def daybank_bucket_pass(limit: int = 60):
+    """Classify open ACTIONS that have no stored bucket, in one batched model call.
+    Fills only EMPTY buckets — a lane Brady set himself is never overwritten."""
+    return {"ok": True, **(await chat.bucket_pass(limit))}
 
 
 @app.post("/selfaudit/run", dependencies=[Depends(require_auth)])
@@ -766,6 +774,10 @@ async def daybank_update(req: DaybankUpdateReq):
     if req.state and req.state not in ("active", "waiting", "settled"):
         return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
                 "error": "unknown state '%s' — use active, waiting or settled" % req.state}
+    if req.bucket and req.bucket not in db.BUCKETS:
+        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+                "error": "unknown bucket '%s' — use one of: %s"
+                         % (req.bucket, ", ".join(db.BUCKETS))}
     if req.state and req.entry == "action":
         return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
                 "error": "state applies to records, not actions — set entry='record' too"}
@@ -782,7 +794,7 @@ async def daybank_update(req: DaybankUpdateReq):
         tags = [cat] + keep
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
-        (req.entry or None), (req.state or None), req.waiting_on)
+        (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None))
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":
