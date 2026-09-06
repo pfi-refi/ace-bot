@@ -1017,6 +1017,10 @@
       var all6 = (data.items || []).filter(function (x) { return x.status === 'open'; });
       var appr = all6.filter(function (x) { return x.kind === 'approval'; });
       var rest = all6.filter(function (x) { return x.kind !== 'approval'; });
+      // SETTLED = nothing pending. It drops out of every action lane (including the dated
+      // ones, unlike an active record) but stays on the board and in the store — the plan's
+      // Feliz case: closed and paid is settled, not deleted.
+      rest = rest.filter(function (x) { return x.state !== 'settled'; });
       var late = rest.filter(function (x) { return x.due_days != null && x.due_days < 0; })
                      .sort(function (a, b) { return a.due_days - b.due_days; });
       var now6 = rest.filter(function (x) { return x.due_days === 0; });
@@ -1671,11 +1675,30 @@
       var opts = CMD_ORDER.map(function (o) {
         return '<option value="'+o+'"'+(o===dCat?' selected':'')+'>'+o+'</option>';
       }).join('');
+      // CORRECTABLE CLASSIFICATION (2026-09-06). entry/state were derived on every read with
+      // no way to override, so a row the heuristic got wrong stayed wrong. These two selects
+      // are the override, and they are also the only way to reach 'settled' — a record that
+      // is finished but must STAY (Feliz's annuity is closed and paid, not deleted).
+      var dEntry = (cmd.draft && cmd.draft.entry) || it.entry || 'action';
+      var dState = (cmd.draft && cmd.draft.state) || it.state || 'active';
+      var eOpts = ['action', 'record'].map(function (o) {
+        return '<option value="'+o+'"'+(o===dEntry?' selected':'')+'>'+
+               (o === 'action' ? 'ACTION — ends when done' : 'RECORD — has a state')+'</option>';
+      }).join('');
+      var sOpts = ['active', 'waiting', 'settled'].map(function (o) {
+        return '<option value="'+o+'"'+(o===dState?' selected':'')+'>'+
+               (o === 'waiting' ? 'WAITING — parked on someone else'
+                : o === 'settled' ? 'SETTLED — finished, keep it' : 'ACTIVE')+'</option>';
+      }).join('');
       return '<div class="cmd-row cmd-editing" data-id="'+it.id+'" style="border-left-color:'+col+'">'
         +'<div class="cmd-eform">'
         +'<textarea class="cmd-etext" rows="2">'+cmdEsc(dText)+'</textarea>'
         +'<div class="cmd-erow"><select class="cmd-ecat">'+opts+'</select>'
         +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(dDue)+'"></div>'
+        +'<div class="cmd-erow"><select class="cmd-eentry">'+eOpts+'</select>'
+        +'<select class="cmd-estate"'+(dEntry==='action'?' disabled':'')+'>'+sOpts+'</select></div>'
+        +'<div class="cmd-erow"><input class="cmd-ewait" placeholder="waiting on who? (e.g. Tony, approval)" '
+        +'value="'+cmdEsc(it.waiting_on||'')+'"'+(dState==='waiting'?'':' disabled')+'></div>'
         +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button>'
         +'<button class="cmd-ecancel cmd-edrop" style="margin-left:auto;color:#ff8080;border-color:#ff808055" title="Archive this item (kept in history, never deleted)">REMOVE</button></div>'
         +'</div></div>';
@@ -1703,9 +1726,11 @@
     if (cmd.editing) {
       var er = v.querySelector('.cmd-row.cmd-editing');
       if (er) cmd.draft = {
-        text: er.querySelector('.cmd-etext').value,
-        cat:  er.querySelector('.cmd-ecat').value,
-        due:  er.querySelector('.cmd-edue').value
+        text:  er.querySelector('.cmd-etext').value,
+        cat:   er.querySelector('.cmd-ecat').value,
+        due:   er.querySelector('.cmd-edue').value,
+        entry: er.querySelector('.cmd-eentry').value,
+        state: er.querySelector('.cmd-estate').value
       };
     }
     if(cmd.min){
@@ -1785,6 +1810,20 @@
       }
       cmd.editing = null; cmd.draft = null; cmdRender();
     }; });
+    // The three classification controls gate each other: state is meaningless on an action,
+    // and waiting_on only means anything while the state IS waiting. Toggle live rather than
+    // waiting for a save to reject it.
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-row.cmd-editing'), function(row){
+      var eSel = row.querySelector('.cmd-eentry'), sSel = row.querySelector('.cmd-estate'),
+          wIn  = row.querySelector('.cmd-ewait');
+      if (!eSel || !sSel || !wIn) return;
+      function sync(){
+        sSel.disabled = (eSel.value !== 'record');
+        wIn.disabled  = (eSel.value !== 'record' || sSel.value !== 'waiting');
+        if (wIn.disabled) wIn.value = '';
+      }
+      eSel.onchange = sync; sSel.onchange = sync; sync();
+    });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
       var row = b.closest('.cmd-row'); if (!row) return;
       var id = row.getAttribute('data-id');
@@ -1793,6 +1832,11 @@
         id: id,
         text: (ta.value || '').trim(),
         category: row.querySelector('.cmd-ecat').value,
+        entry: row.querySelector('.cmd-eentry').value,
+        state: (row.querySelector('.cmd-eentry').value === 'record'
+                ? row.querySelector('.cmd-estate').value : ''),
+        waiting_on: (row.querySelector('.cmd-estate').value === 'waiting'
+                     ? (row.querySelector('.cmd-ewait').value || '').trim() : ''),
         due: (row.querySelector('.cmd-edue').value || '').trim()
       };
       if (!body.text) { ta.style.borderColor = '#ff6b6b'; ta.focus(); return; }   // blank = no-op server-side

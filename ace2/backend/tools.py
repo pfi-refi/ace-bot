@@ -409,7 +409,16 @@ TOOLS = [
             "you're not sure which id, pass match='a few words of the task' instead and the "
             "board finds it — if it's ambiguous you'll get candidates back to choose from or "
             "ask Brady. When Brady says something is finished, ALWAYS complete the existing "
-            "item — never capture_item a completion as a new task."
+            "item — never capture_item a completion as a new task.\n"
+            "CLASSIFY IT when Brady's words say what KIND of thing it is. An ACTION has a "
+            "natural end and leaves when done ('mail Rebecca's packet'). A RECORD has a STATE "
+            "and is updated forever — a deal, a client, a bill, a goal, a person. Set "
+            "state='waiting' the moment something is parked on someone ELSE ('submitted, "
+            "waiting on approval', 'just waiting, no push') and put WHO in waiting_on: a "
+            "waiting record is protected from auto-closing, because nothing on Brady's side "
+            "finishes it. Set state='settled' when a record is finished but must STAY — "
+            "Feliz's annuity is closed and paid, that is settled, not deleted. Never close a "
+            "record to mean 'settled'."
         ),
         "input_schema": {
             "type": "object",
@@ -424,6 +433,18 @@ TOOLS = [
                     "description": "Optional: move the item to this board column",
                 },
                 "due": {"type": "string", "description": "Optional new due in plain words ('' clears it)"},
+                "entry": {
+                    "type": "string", "enum": ["action", "record"],
+                    "description": "What KIND of row: 'action' ends and leaves; 'record' has a state and persists",
+                },
+                "state": {
+                    "type": "string", "enum": ["active", "waiting", "settled"],
+                    "description": "Records only. 'waiting' = parked on someone else (protected from auto-close); 'settled' = finished but kept",
+                },
+                "waiting_on": {
+                    "type": "string",
+                    "description": "With state='waiting': WHO or WHAT it is parked on ('Tony', 'approval')",
+                },
             },
             "required": [],
         },
@@ -716,7 +737,8 @@ def _do_capture_item(kind="note", text="", due=None, category=None, **_):
     return f"⚠️ Could not capture: {res}"
 
 
-def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None, **_):
+def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None,
+                    entry=None, state=None, waiting_on=None, **_):
     tags = None
     if category:
         _CATS = {"Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
@@ -733,7 +755,8 @@ def _do_update_item(id="", match=None, status=None, text=None, category=None, du
     # Ace's own hand. The Command panel stamps 'brady'; the split is what makes "who closed
     # this?" answerable at all (2026-09-05).
     ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match,
-                                  closed_by="ace")
+                                  closed_by="ace", entry=entry, state=state,
+                                  waiting_on=waiting_on)
     if ok:
         verb = {"done": "Completed", "open": "Reopened", "dropped": "Archived"}.get(status, "Updated")
         moved = f" → [{category}]" if category else ""

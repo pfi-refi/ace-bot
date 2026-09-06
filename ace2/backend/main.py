@@ -533,6 +533,13 @@ class DaybankUpdateReq(BaseModel):
     text: str = ""       # new wording ("" = leave)
     category: str = ""   # move to another board column ("" = leave)
     due: str | None = None   # new due ("" clears it; None = leave)
+    # CORRECTABLE CLASSIFICATION (2026-09-06). entry/state were DERIVED on every read and
+    # nothing could override them, so a row the heuristic called wrong stayed wrong — an
+    # uncorrectable classifier on the board Brady already distrusts. A stored value wins over
+    # the derivation, which also makes 'settled' reachable: it is never derived, only set.
+    entry: str = ""      # "action" | "record" ("" = leave / keep deriving)
+    state: str = ""      # "active" | "waiting" | "settled" (records only)
+    waiting_on: str | None = None   # who it is parked on ("" clears; None = leave)
 
 
 class DaybankAddReq(BaseModel):
@@ -741,6 +748,17 @@ async def daybank_update(req: DaybankUpdateReq):
     if cat_err:
         return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
                 "error": cat_err}
+    # Same refuse-don't-drop rule as category: an unknown value comes back as an error, never
+    # as a silent no-op that still answers ok:true.
+    if req.entry and req.entry not in ("action", "record"):
+        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+                "error": "unknown entry '%s' — use action or record" % req.entry}
+    if req.state and req.state not in ("active", "waiting", "settled"):
+        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+                "error": "unknown state '%s' — use active, waiting or settled" % req.state}
+    if req.state and req.entry == "action":
+        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+                "error": "state applies to records, not actions — set entry='record' too"}
     status = req.status or None
     text = req.text.strip() or None
     tags = None
@@ -753,7 +771,8 @@ async def daybank_update(req: DaybankUpdateReq):
                 if t not in _CATS]
         tags = [cat] + keep
     ok, _msg = await asyncio.to_thread(
-        daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady")
+        daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
+        (req.entry or None), (req.state or None), req.waiting_on)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":
@@ -772,7 +791,9 @@ async def daybank_update(req: DaybankUpdateReq):
         except Exception as e:
             logger.warning("win-logging failed: %s", e)
     items = await asyncio.to_thread(daybank.read_items, True)
-    return {"ok": ok, "items": items, "category": cat or None}
+    _now = next((x for x in items if x.get("id") == req.id), None) or {}
+    return {"ok": ok, "items": items, "category": cat or None,
+            "entry": _now.get("entry"), "state": _now.get("state")}
 
 
 # ── THE KNOWLEDGE GRAPH — Brady's book of business as a navigable map ───────────
