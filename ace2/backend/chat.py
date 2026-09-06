@@ -837,6 +837,12 @@ async def prime_ctx() -> None:
         # Steward desk will own due-date nudges with real triggers instead of a clock).
         # asyncio.create_task(_reminder_loop())
         asyncio.create_task(_graph_warm_loop())   # keep the knowledge map instant to open
+        # PHASE 5 (2026-09-06): Ace auditing his OWN bookkeeping, on Railway's clock instead of
+        # a laptop cron that went dark 53 hours in one week. Different job from _watch_loop
+        # above — that one watches BRADY's world, this one watches Ace. Pure database reads, no
+        # model call, so it costs nothing and cannot get expensive exactly when things break.
+        from . import selfaudit
+        asyncio.create_task(selfaudit.loop())
 
 
 # ── The LEARNING AGENT: a background sub-agent that sweeps conversations so Ace teaches ───

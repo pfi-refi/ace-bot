@@ -652,6 +652,16 @@ async def brief_run(kind: str = "morning"):
     return {"ok": False, "error": "brief generation failed"}
 
 
+@app.post("/selfaudit/run", dependencies=[Depends(require_auth)])
+async def selfaudit_run(push: bool = False):
+    """Run Ace's self-audit now and return the findings. Read-only and free — database reads
+    and deterministic comparisons, no model call. push=false by default so checking on it
+    can't fire a lock-screen notification."""
+    from . import selfaudit
+    findings = await asyncio.to_thread(selfaudit.run_once, push)
+    return {"ok": True, "count": len(findings), "findings": findings}
+
+
 @app.post("/watch/run", dependencies=[Depends(require_auth)])
 async def watch_run(force: bool = False, dry_run: bool = False):
     """Run ONE ambient watch pass now and report what it decided — the test hook for the loop
