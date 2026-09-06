@@ -1184,16 +1184,28 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
     from . import db
     try:
         stats = await asyncio.to_thread(_board_stats)
-        events_raw, wx, convo = await asyncio.gather(
+        from .integrations import bills_sheet
+        events_raw, wx, convo, bills_res = await asyncio.gather(
             asyncio.to_thread(get_events_structured, 2 if kind == "eod" else 1),
             get_weather(),
             asyncio.to_thread(_unified_thread, 16),
+            bills_sheet.fetch_bills(),
             return_exceptions=True,
         )
         def ok(v, d):
             return d if isinstance(v, Exception) else v
         now = datetime.now(EASTERN)
         events = ok(events_raw, [])
+        # MONEY COMES FROM THE SHEET, NEVER FROM THE BOARD (2026-09-05). Bill amounts used to
+        # live in board prose and rotted there: six of nine were wrong on 9/5, including an
+        # electric account nine days from disconnection that the board showed as a routine
+        # $276. Brady maintains the sheet anyway; Ace reads it and stores nothing. If it is
+        # unreachable the brief SAYS SO rather than falling back on figures it cannot vouch for.
+        _b = ok(bills_res, ([], "the sheet lookup failed"))
+        _bills, _bills_err = _b if isinstance(_b, tuple) else ([], "the sheet lookup failed")
+        money_block = (bills_sheet.format_due_soon(_bills, 10, now.date()) if _bills
+                       else "(couldn't read the budget sheet — %s. Say so plainly; do NOT quote "
+                            "bill amounts from the board, they are not maintained.)" % _bills_err)
         today_str = now.strftime("%Y-%m-%d")
         sched = _format_today_schedule([e for e in events if e.get("date") == today_str], now)
         tomorrow_block = ""
@@ -1286,7 +1298,10 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
             f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
             f"CHANGE SINCE THE LAST BRIEF:\n{delta_block}\n\n"
-            f"BOARD DATA (reference — pull only what's imminent, do NOT recite):\n{stats}\n\nHIS GOALS:\n"
+            f"MONEY DUE IN THE NEXT 10 DAYS — from Brady's budget sheet, the ONLY trustworthy\n"
+            f"source for any dollar figure. Board items are NOT maintained for amounts:\n{money_block}\n\n"
+            f"BOARD DATA (reference — pull only what's imminent, do NOT recite, and NEVER quote a\n"
+            f"dollar amount from it):\n{stats}\n\nHIS GOALS:\n"
             + ("\n".join(f"- {g}" for g in goals) or "(none)")
             + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
                + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
