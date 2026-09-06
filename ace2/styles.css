@@ -964,3 +964,12 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 .db-pick-b:hover { background: var(--aurora-25); }
 .db-pick-b.db-pick-clear { color: var(--text-faint); background: none;
   border-color: rgba(255,255,255,.18); }
+
+/* NEEDS A DATE lane (2026-09-05) — undated action items, oldest first. Deliberately quieter
+   than the overdue/due lanes: it is triage, not today's work. */
+.db-sect.nodate { color: var(--text-faint); }
+.db-item.nodate .db-text { color: rgba(234,255,245,.72); }
+.db-item.nodate .db-due-btn { color: var(--text-faint); }
+.db-item.nodate .db-due-btn:hover { color: var(--aurora); }
+.db-sect.nodate-more { color: var(--text-faint); font-size: 9.5px; letter-spacing: .5px;
+  padding-top: 6px; text-transform: none; }

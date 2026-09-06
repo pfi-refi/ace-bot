@@ -1021,8 +1021,21 @@
                      .sort(function (a, b) { return a.due_days - b.due_days; });
       var now6 = rest.filter(function (x) { return x.due_days === 0; });
       var soon = rest.filter(function (x) { return x.due_days === 1; });
+      // NEEDS A DATE (2026-09-05). 44 of 72 open items had no due date at all, so they could
+      // never appear here, never go overdue, and were invisible from the day they were written
+      // — seven of them for 39 days. Goals are EXCLUDED: "In bed by 11", "get closer with god"
+      // are aspirations Brady never wanted dated, and Bills carry their own cycle. Show only
+      // the oldest few so this nudges instead of dumping the backlog into his action list.
+      var NODATE_SHOW = 6;
+      var undated = rest.filter(function (x) {
+        if (x.due_days != null) return false;
+        var c = cmdCatOf(x);
+        return c !== 'Goals' && c !== 'Bills';
+      }).sort(function (a, b) { return (a.ts || '') < (b.ts || '') ? -1 : 1; });
+      var undatedMore = Math.max(0, undated.length - NODATE_SHOW);
+      undated = undated.slice(0, NODATE_SHOW);
       var body6 = cardShell('DUE TODAY', slot);
-      if (!late.length && !now6.length && !soon.length && !appr.length) {
+      if (!late.length && !now6.length && !soon.length && !appr.length && !undated.length) {
         return empty(body6, 'Nothing due and nothing waiting on you. Clear.');
       }
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
@@ -1042,6 +1055,26 @@
           if (c) { var ct = tag('db-cat', c); ct.style.color = CMD_CATS[c] || '#8aa';
                    ct.style.borderColor = (CMD_CATS[c] || '#8aa') + '55'; meta.appendChild(ct); }
           if (cls === 'appr') meta.appendChild(tag('db-appr', 'TAP TO APPROVE'));
+          else if (cls === 'nodate') {
+            var add = document.createElement('button');
+            add.className = 'db-due db-due-btn'; add.title = 'Give this a date';
+            add.textContent = 'no date ▾';
+            add.addEventListener('click', function (ev) {
+              ev.stopPropagation();
+              var open = meta.querySelector('.db-pick');
+              if (open) { open.remove(); return; }
+              var pick = document.createElement('span'); pick.className = 'db-pick';
+              dueChoices().forEach(function (c) {
+                if (c.due === '') return;            // "Clear" is meaningless here
+                var b = document.createElement('button');
+                b.className = 'db-pick-b'; b.textContent = c.label;
+                b.addEventListener('click', function (e2) { e2.stopPropagation(); setBankDue(it.id, c.due); });
+                pick.appendChild(b);
+              });
+              meta.appendChild(pick);
+            });
+            meta.appendChild(add);
+          }
           else if (it.due_days != null) {
             var d = it.due_days;
             var chip = document.createElement('button');
@@ -1073,6 +1106,12 @@
       sect('OVERDUE', late, 'late');
       sect('DUE TODAY', now6, 'now');
       sect('TOMORROW', soon, 'soon');
+      sect('NEEDS A DATE', undated, 'nodate');
+      if (undatedMore) {
+        var more = document.createElement('div'); more.className = 'db-sect nodate-more';
+        more.textContent = '+' + undatedMore + ' more with no date — open Command to work through them';
+        body6.appendChild(more);
+      }
     } else if (panel === 'inbox') {
       // TWO LANES (2026-08-25): business + personal, clearly separated, each row tappable
       // straight into the right Gmail account. Falls back to the legacy single list if the
