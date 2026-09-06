@@ -208,6 +208,14 @@ def _confirm_gate(name: str, args: dict, turn_id: int):
     _pending_confirm[name] = {"turn": turn_id, "ts": now}
     return True, clean
 EFFORT = os.environ.get("ACE2_EFFORT", "low")   # low|medium|high|xhigh|max — LEAN MODE: was medium
+# EFFORT PER ROUTE (Phase 6 step 5, 2026-09-06). Auditing this found it is ALREADY route-
+# scoped: output_config is set on the typed path only, and the background passes (learn
+# sweep, briefs, the dedup judge, the bucket pass) never pass one. So the remaining question
+# is only what a TYPED turn deserves, and that is not a saving — raising it RAISES the bill.
+# It is Brady's money, so the knob ships defaulted to today's behaviour and the decision is
+# his: ACE2_EFFORT_TYPED=medium costs more per typed turn and buys deeper reasoning on the
+# turns where he is actually working a deal. Nothing changes until he sets it.
+EFFORT_TYPED = os.environ.get("ACE2_EFFORT_TYPED", EFFORT).strip().lower()
 MAX_TOKENS = int(os.environ.get("ACE2_MAX_TOKENS", "16000"))  # ceiling covers thinking+tools+prose; only billed if used
 MAX_TOOL_ITERS = 8
 NOW_WINDOW_MIN = 90  # an event that started within this many minutes reads as "in progress"
@@ -2407,7 +2415,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 model=MODEL, max_tokens=MAX_TOKENS, system=typed_system, messages=messages,
                 tools=typed_tools,
                 thinking={"type": "adaptive"},
-                output_config={"effort": EFFORT},
+                output_config={"effort": EFFORT_TYPED},
             )
     except Exception as e:
         # Setup failure (bad key, MCP registry down) must NEVER die silently — a silent
