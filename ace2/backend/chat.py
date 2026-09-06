@@ -883,6 +883,16 @@ async def compose_sweep(force: bool = False) -> dict:
                 "them where he can't track or complete them. Facts are durable CONTEXT ONLY: who "
                 "people are, a deal's or person's STATUS, decisions made, numbers, and commitments "
                 "already agreed — never open action items.\n"
+                "★ WHO ELSE IS IN THE ROOM (2026-09-05): Brady says so in plain language — 'I'm "
+                "with my new manager', 'Gabby's here', 'I'm on with the lender'. What he says "
+                "while positioning for SOMEONE ELSE is social, not durable: 'I'm going full time "
+                "with Groundworks', said in front of a new manager, was what that moment "
+                "required, not a decision he made. Record what is actually true — that the "
+                "conversation happened, who was there, what was genuinely agreed — never the "
+                "positioning itself as his plan. When you cannot tell whether a line was meant "
+                "for YOU or for an audience, LEAVE IT OUT: this is the one place where the "
+                "'err toward capturing' rule above does not apply, because a wrong fact about "
+                "his intentions steers every brief and every answer that follows it.\n"
                 "If truly nothing new, reply with the single word NONE.\n\n"
                 # MOST-RECENT known facts (2026-08-11 review fix): was existing[:80] = core +
                 # OLDEST, so the sweep never saw recently-added facts and kept re-extracting them.
@@ -1123,6 +1133,30 @@ async def _ctx_keepwarm() -> None:
 # and lands in the ONE thread (so it's waiting in chat) + pushes live to open HUDs.
 _BRIEF_TIMES = {"morning": (9, 0), "eod": (20, 15)}   # Eastern — Brady wants the day to open at 9
 
+# THE THREE WAYS THE BRIEF LIED (2026-09-05). Each rule below is a morning Brady actually got.
+# Shared by both briefs because all three failed in both.
+_BRIEF_RULES = (
+    "\n\nTHESE THREE RULES OUTRANK EVERYTHING ABOVE.\n"
+    "(1) THE CONVERSATION OUTRANKS THE BOARD. The board is written once and rarely revisited; "
+    "what Brady SAID is newer and truer. Where the thread and a board item disagree, the thread "
+    "wins outright — never repeat the stale version, and never quietly narrate around it. Say "
+    "the current truth, and where the gap matters, name it in one plain clause ('your board "
+    "still has the truck at $500 — it's $473 now') so he knows to fix it. You have no tools "
+    "here and cannot edit the board yourself. The [id] on each row is for YOUR reference only: "
+    "never print one — this lands on his lock screen.\n"
+    "(2) NEVER ASSERT PROGRESS YOU HAVE NOT VERIFIED. Say he did something ONLY if it is marked "
+    "✓ in CHANGE SINCE THE LAST BRIEF, or he said so himself in the thread. You once told him "
+    "'you crushed the gym' ninety minutes after he said he skipped it. No inferring a workout "
+    "from a goal, no 'you've been consistent' from a feeling, no crediting him with an item "
+    "just because it is on the board. With no evidence, say nothing about it — encouragement "
+    "is welcome, invented history is not.\n"
+    "(3) KNOW WHEN SOMEONE ELSE IS IN THE ROOM. Brady says so plainly ('I'm with my manager', "
+    "'Gabby's here', 'I'm on with the lender'). What he says while positioning for someone else "
+    "is SOCIAL, not a commitment — 'I'm going full time with Groundworks', said in front of a "
+    "new manager, is what that moment needed, not a decision he made. Never carry a statement "
+    "made TO a third party into the brief as his intention, his plan, or a fact about his week."
+)
+
 
 def _board_stats() -> str:
     """Deterministic business snapshot from Ace's own store — no LLM guessing."""
@@ -1144,15 +1178,26 @@ def _board_stats() -> str:
     # PIVOT (2026-08-10) + deterministic dates (2026-08-13): hand the brief the open Money
     # actions and the Bills register with a PRE-COMPUTED [DUE ...] label per item, so the model
     # never guesses timing (it was saying 'tomorrow' for something 5 days out).
-    def _line(i, cap=104):
-        t = (i.get("text", "") or "")[:cap]
+    # ITEMS, NOT A DIGEST (2026-09-05). Two defects lived in this function. (1) Every line was
+    # cut to 104 chars — the same silent amputation that had Ace quoting stale numbers in chat,
+    # so a bill's real terms ended mid-sentence. (2) ONLY Money and Bills were ever listed as
+    # items; every other category reached the brief as a bare COUNT, so a dated session or a
+    # commitment filed under Personal/Deals was invisible — and the model filled the hole by
+    # blending unrelated Opportunities rows into things Brady never said ("$200/day angles").
+    # Ids ride along so a stale row can be NAMED: this pass has no tools and cannot write to
+    # the board, and pointing at [id] beats narrating around it.
+    def _line(i, cap=300, show_cat=False):
+        t = (i.get("text", "") or "")
+        body = t if len(t) <= cap else t[:cap].rstrip() + " …[truncated — ask before quoting]"
+        tag = f"({cat(i)}) " if show_cat else ""
+        head = f"  - [{i.get('id','?')}] {tag}{body}"
         dd = i.get("due_days")
         if dd is None:
-            return f"  - {t}"
+            return head
         when = ("DUE TODAY" if dd == 0 else "DUE TOMORROW" if dd == 1
                 else f"due in {dd} days" if dd > 0 else f"{abs(dd)} days OVERDUE")
         on = i.get("due_on") or ""
-        return f"  - {t}  [{when}{f' — {on}' if on else ''}]"
+        return f"{head}  [{when}{f' — {on}' if on else ''}]"
     money = [i for i in open_items if cat(i) == "Money"]
     if money:
         lines.append("OPEN MONEY ACTIONS (priority — flag anything time-critical):\n"
@@ -1161,9 +1206,21 @@ def _board_stats() -> str:
     if bills:
         lines.append("BILLS (the [DUE ...] label is EXACT — use it, never compute a date yourself):\n"
                      + "\n".join(_line(i) for i in sorted(bills, key=lambda x: (x.get("due_days") is None, x.get("due_days", 999)))[:18]))
-    jobs = [i.get("text", "") for i in open_items if cat(i) == "Opportunities"]
+    jobs = [i for i in open_items if cat(i) == "Opportunities"]
     if jobs:
-        lines.append("JOB HUNT / INCOME MOVES:\n" + "\n".join(f"  - {t[:90]}" for t in jobs[:6]))
+        lines.append("JOB HUNT / INCOME MOVES:\n" + "\n".join(
+            _line(i) for i in sorted(
+                jobs, key=lambda x: (x.get("due_days") is None, x.get("due_days", 999)))[:8]))
+    # Everything else that is actually DATED. Money/Bills/Opportunities have their own sections
+    # above; without this block a dated appointment, session or deal never reached the brief.
+    other = [i for i in open_items
+             if cat(i) not in ("Money", "Bills", "Opportunities")
+             and i.get("due_days") is not None]
+    if other:
+        lines.append("ALSO ON THE CLOCK (dated items from every other category — sessions, "
+                     "appointments, deals, personal commitments):\n" + "\n".join(
+                         _line(i, show_cat=True)
+                         for i in sorted(other, key=lambda x: x.get("due_days", 999))[:14]))
     # Wins from memory (the win-logger writes "Deal won:" / "Goal reached:" facts)
     try:
         wins = [f for f in db.read_facts_full()
@@ -1254,10 +1311,10 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
         dl = []
         if done_recent:
             dl.append("KNOCKED OUT since the last brief:")
-            dl += [f"  ✓ {i['text'][:72]}" for i in done_recent[:8]]
+            dl += [f"  ✓ {i['text'][:160]}" for i in done_recent[:8]]
         if new_recent:
             dl.append("NEW on the board since the last brief:")
-            dl += [f"  + {i['text'][:72]}" + (f"  [{c}]" if (c := _cat_of(i)) else "")
+            dl += [f"  + {i['text'][:160]}" + (f"  [{c}]" if (c := _cat_of(i)) else "")
                    for i in new_recent[:8]]
         delta_block = "\n".join(dl) or "(nothing closed or added since the last brief)"
         # PIVOT (2026-08-10): Brady stepped back from GFI/PFI to dig out financially. The brief
@@ -1294,6 +1351,7 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                 "it was a slow day, own it. ~100 words. No EMD. Gabby's in the loop, so shared money "
                 "talk is fine. Plain text, no markdown, no section labels."
             )
+        ask += _BRIEF_RULES
         return (
             f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
             f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
