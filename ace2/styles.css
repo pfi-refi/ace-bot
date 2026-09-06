@@ -984,3 +984,9 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 .db-box.parked-box:hover { background: none; }
 .db-item.parked .db-wait { font-family: var(--mono); font-size: 9px; letter-spacing: .8px;
   text-transform: uppercase; color: #8fa3b0; opacity: .85; }
+
+/* The record↔action link (Phase 4, 2026-09-06). Quiet on purpose — it is provenance, not
+   status: an action shows the record it came out of, a record shows how much is live under it. */
+.cmd-link { font-family: var(--mono); font-size: 9px; letter-spacing: .6px; text-transform: uppercase;
+  color: #7f8c99; border: 1px solid #7f8c9933; background: #7f8c9912; border-radius: 3px;
+  padding: 1px 5px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }

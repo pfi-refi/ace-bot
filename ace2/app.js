@@ -1666,6 +1666,20 @@
     if (!cmd.open) return;
     cmdFetch().then(function(){ if (cmd.open && !cmd.editing) cmdRender(); }).catch(function(){});
   }
+  function cmdParentChip(it){
+    if (!it.parent_id) return '';
+    var p = (cmd.items || []).filter(function(x){ return x.id === it.parent_id; })[0];
+    var label = p ? p.text.replace(/\s+/g,' ').slice(0, 34) : it.parent_id;
+    return '<span class="cmd-link" title="Spawned from this record — completing this leaves it standing">'
+         + '\u21b3 ' + cmdEsc(label) + (p && p.text.length > 34 ? '\u2026' : '') + '</span>';
+  }
+  function cmdChildChip(it){
+    if (it.entry !== 'record') return '';
+    var n = (cmd.items || []).filter(function(x){
+      return x.parent_id === it.id && x.status === 'open'; }).length;
+    if (!n) return '';
+    return '<span class="cmd-link">' + n + ' open action' + (n>1?'s':'') + '</span>';
+  }
   function cmdRow(it){
     var c=cmdCatOf(it), col=CMD_CATS[c], done=it.status==='done';
     if (cmd.editing === it.id) {
@@ -1712,7 +1726,12 @@
       +'<span class="cmd-tag" style="color:'+col+';border-color:'+col+'55;background:'+col+'14">'
       +'<span class="cmd-d" style="background:'+col+'"></span>'+c+'</span>'
       +(paid?'<span class="cmd-paid">PAID THIS MONTH</span>':'')
-      +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')+'</div></div>'
+      +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')
+      // THE LINK, BOTH WAYS (2026-09-06). An action spawned from a record shows where it came
+      // from; a record shows how many open actions hang off it. Without this the two row types
+      // just coexist — the split only pays off when you can see that completing the action
+      // leaves the record standing.
+      +cmdParentChip(it)+cmdChildChip(it)+'</div></div>'
       +'<button class="cmd-pencil" title="Edit">✎</button></div>';
   }
   function cmdRender(resetScroll){

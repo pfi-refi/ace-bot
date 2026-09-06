@@ -101,10 +101,16 @@ def _drive_read_items(active_only: bool = True) -> list:
         return []
 
 
-def add_item(kind: str, text: str, due: str = None, tags: list = None) -> tuple:
-    """Capture one item. Postgres when enabled, else Drive."""
+def add_item(kind: str, text: str, due: str = None, tags: list = None,
+             parent_id: str = None) -> tuple:
+    """Capture one item. Postgres when enabled, else Drive.
+
+    parent_id links a spawned ACTION back to the RECORD it came out of, so completing the
+    action leaves the record standing. Drive has no such column — the link is dropped there
+    rather than failing the capture, since Drive is the degraded fallback path.
+    """
     if db.enabled():
-        return db.add_item(kind, text, due, tags)
+        return db.add_item(kind, text, due, tags, parent_id=parent_id)
     return _drive_add_item(kind, text, due, tags)
 
 

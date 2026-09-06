@@ -79,7 +79,11 @@ LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", "claude-haiku-4-5-20251001")
 # On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
 # confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
 # says yes, only then does the second call actually send). Built once for cache stability.
-_VOICE_TOOL_DENY = set()
+# Source reading is a TYPED-path activity: it returns dozens of lines to reason over, which
+# is the opposite of what a live call needs, and the voice brain is the small fast model.
+# Brady asking "why was the brief off?" out loud still works — Ace answers from context and
+# can read the code properly when he is back at the keyboard.
+_VOICE_TOOL_DENY = {"read_own_code"}
 
 # ---- Confirm-before-execute gate (guardrails, 2026-07-19) ----------------------------
 # Two-phase confirm for outward/destructive tools. A gated tool NEVER executes on its

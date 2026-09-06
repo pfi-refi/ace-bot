@@ -21,7 +21,9 @@ caller (chat.py). Do not call these straight from the event loop.
 """
 
 import logging
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import brain, daybank, memory_db
 from .integrations.calendar_api import (
@@ -374,7 +376,12 @@ TOOLS = [
             "existing item instead (complete it, or fold the new details into its text/due). "
             "A completion ('I did X', 'X is handled') is NEVER a capture — it's update_item "
             "status='done'. Always pick the best-fitting category. (For a hard-dated "
-            "appointment, also create a calendar event.) One item per call."
+            "appointment, also create a calendar event.) One item per call.\n"
+            "SPAWN FROM A RECORD: when the thing to do comes OUT of a record — the Rebecca "
+            "record says her payout cleared and a packet needs mailing — pass that record's id "
+            "as parent_id. The action then completes on its own without touching the record, "
+            "which is the whole point: closing 'drop off her packet' used to delete Feliz the "
+            "client. Never re-capture the record itself as a task."
         ),
         "input_schema": {
             "type": "object",
@@ -395,8 +402,45 @@ TOOLS = [
                     "enum": ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
                     "description": "Which board column this belongs on (pick the best fit)",
                 },
+                "parent_id": {
+                    "type": "string",
+                    "description": "Optional: the RECORD id this action came out of, so completing the action leaves the record standing",
+                },
             },
             "required": ["kind", "text"],
+        },
+    },
+    {
+        "name": "read_own_code",
+        "description": (
+            "READ YOUR OWN SOURCE. You are a running program and this is the code that runs "
+            "you. Use it when Brady says something you produced was wrong — a brief that was "
+            "off, a board item that behaved oddly, a number you got from somewhere — and you "
+            "cannot explain WHY from what you can see. Search first, then read the range "
+            "around the hit.\n"
+            "ALWAYS CITE file:line when you explain your own behavior, and say plainly when "
+            "the code does not show what you expected — a confident wrong reading of your own "
+            "source is worse than 'I looked and I can't tell'. This is READ ONLY: you cannot "
+            "change or deploy yourself. If a fix is needed, describe it and capture_item it so "
+            "a person applies it.\n"
+            "Real example: 'the brief was off' three times in one week; the cause was that the "
+            "brief received ITEMS for Money and Bills and only a COUNT for every other "
+            "category, so a session due that day was invisible to it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "search": {
+                    "type": "string",
+                    "description": "Regex/text to find across the app's source. Start here — returns path:line hits.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File to read, relative to the app root (e.g. 'backend/chat.py', 'app.js')",
+                },
+                "start": {"type": "integer", "description": "First line to read (default 1)"},
+                "lines": {"type": "integer", "description": "How many lines (default/max 200)"},
+            },
         },
     },
     {
@@ -710,9 +754,86 @@ def _do_save_memory(fact, **_):
         return f"⚠️ Save memory failed: {e}"
 
 
-def _do_capture_item(kind="note", text="", due=None, category=None, **_):
+# ── ACE READS HIS OWN SOURCE (2026-09-06) ──────────────────────────────────────────
+# WHY. Brady told Ace the brief was "off" three times in one week and neither of them could
+# say why, because Ace cannot see the code that builds his brief. The actual cause was that
+# _board_stats handed him ITEMS for Money and Bills only and a bare COUNT for every other
+# category — a fact sitting in a file he had no access to. He experienced the symptom with no
+# access to the cause.
+#
+# READ ONLY, AND THAT IS THE LINE. Ace is the thing Brady depends on; a self-applied deploy
+# could take out his own recovery path at 9am with nobody watching. This matches his existing
+# tiered-autonomy doctrine — auto = read/draft/capture, queue-for-approval = writes. Proposing
+# a change is a board item a human applies, never a commit.
+_SRC_ROOT = Path(__file__).resolve().parent.parent          # the ace2/ directory
+_SRC_OK_EXT = {".py", ".js", ".css", ".html", ".md", ".toml", ".json", ".txt"}
+_SRC_SKIP = {"node_modules", ".git", "__pycache__", ".venv", "snapshots"}
+_SRC_MAX_LINES = 200
+_SRC_MAX_HITS = 40
+# Nothing secret should live in the repo (credentials are Railway env vars), but a source
+# reader must not become the one place that leaks one if that ever stops being true.
+_SECRETish = re.compile(r"(?i)(api[_-]?key|secret|password|token|bearer)\s*[:=]\s*['\"][^'\"]{8,}")
+
+
+def _src_files():
+    for p in _SRC_ROOT.rglob("*"):
+        if not p.is_file() or p.suffix.lower() not in _SRC_OK_EXT:
+            continue
+        if any(part in _SRC_SKIP for part in p.parts):
+            continue
+        yield p
+
+
+def _src_redact(line: str) -> str:
+    return _SECRETish.sub(lambda m: m.group(0).split("=")[0].split(":")[0] + "= «redacted»", line)
+
+
+def _do_read_own_code(search=None, path=None, start=None, lines=None, **_):
+    try:
+        if search:
+            rx = re.compile(search, re.I)
+            hits, scanned = [], 0
+            for f in _src_files():
+                scanned += 1
+                try:
+                    for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                        if rx.search(line):
+                            rel = f.relative_to(_SRC_ROOT)
+                            hits.append(f"{rel}:{n}: {_src_redact(line.strip())[:190]}")
+                            if len(hits) >= _SRC_MAX_HITS:
+                                break
+                except Exception:
+                    continue
+                if len(hits) >= _SRC_MAX_HITS:
+                    break
+            if not hits:
+                return f"No match for {search!r} across {scanned} source files."
+            more = " (stopped at the cap — narrow the search)" if len(hits) >= _SRC_MAX_HITS else ""
+            return f"{len(hits)} match(es){more}:\n" + "\n".join(hits)
+
+        if not path:
+            return "⚠️ Pass search='pattern' to find code, or path='backend/chat.py' to read it."
+        target = (_SRC_ROOT / path).resolve()
+        if not str(target).startswith(str(_SRC_ROOT)) or not target.is_file():
+            return f"⚠️ No such file inside the app: {path}"
+        if target.suffix.lower() not in _SRC_OK_EXT:
+            return f"⚠️ Not a readable source file: {path}"
+        all_lines = target.read_text(errors="replace").splitlines()
+        s0 = max(1, int(start or 1))
+        n = min(int(lines or _SRC_MAX_LINES), _SRC_MAX_LINES)
+        chunk = all_lines[s0 - 1:s0 - 1 + n]
+        if not chunk:
+            return f"{path} has {len(all_lines)} lines; {s0} is past the end."
+        body = "\n".join(f"{s0 + i}: {_src_redact(l)}" for i, l in enumerate(chunk))
+        tail = f"\n… {len(all_lines) - (s0 - 1 + len(chunk))} more lines" if s0 - 1 + len(chunk) < len(all_lines) else ""
+        return f"{path} (lines {s0}-{s0 + len(chunk) - 1} of {len(all_lines)}):\n{body}{tail}"
+    except Exception as e:
+        return f"⚠️ Could not read source: {e}"
+
+
+def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=None, **_):
     tags = [category] if category else None
-    ok, res = daybank.add_item(kind, text, due=due, tags=tags)
+    ok, res = daybank.add_item(kind, text, due=due, tags=tags, parent_id=parent_id)
     if ok:
         if isinstance(res, dict) and res.get("dup"):
             # Actionable receipt (2026-07-31): id + status so the model can pivot to
@@ -809,6 +930,7 @@ _DISPATCH = {
     "update_item": _do_update_item,
     "set_privacy": _do_set_privacy,
     "update_profile": _do_update_profile,
+    "read_own_code": _do_read_own_code,
 }
 
 
