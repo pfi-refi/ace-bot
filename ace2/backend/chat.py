@@ -627,7 +627,24 @@ def _format_daybank(items: list) -> str:
         # quoted the stale $191 that WAS visible. Mark the cut so he knows to pull the rest —
         # update_item/complete resolve by match text, so the full item is always reachable.
         body = txt if len(txt) <= cap else txt[:cap].rstrip() + " …[TRUNCATED — ask for the full item before quoting numbers]"
-        return f"- [{it.get('id','?')}] {body}{_due_tag(it)}"
+        # THE MODEL WAS INVISIBLE TO HIM (2026-09-06). Phase 4 put records/actions, the WAITING
+        # state and the five lanes in the database and the panel, but this — the board as ACE
+        # sees it — still rendered a flat category list. So he treated a record parked on
+        # someone else exactly like a to-do Brady owes, which is the whole failure the split
+        # exists to prevent. The tags are short on purpose; they cost a few tokens a row.
+        mark = ""
+        if it.get("state") == "waiting":
+            who = it.get("waiting_on")
+            # The legend above says what these MEAN — repeating it on every row cost ~475
+            # tokens a turn for no added information. The tag carries only the data.
+            mark = f" [PARKED · {who}]" if who else " [PARKED]"
+        elif it.get("state") == "settled":
+            mark = " [SETTLED]"
+        elif it.get("entry") == "record":
+            mark = " [RECORD]"
+        elif it.get("bucket"):
+            mark = f" [{it['bucket']}]"
+        return f"- [{it.get('id','?')}] {body}{_due_tag(it)}{mark}"
 
     def _due_key(it):
         dd = it.get("due_days")
@@ -647,7 +664,15 @@ def _format_daybank(items: list) -> str:
         back += [f"  {_row(it, _BACK_CHARS)[2:]}  [{_cat(it)}]" for it in bb[:CAP]]
         if len(bb) > CAP:
             back.append(f"  …+{len(bb) - CAP} more back-burner items (say a few words to pull or complete any — resolved by match)")
-    out = ["PRIORITY (money & life — act on these first):"] + lines + [""] + back
+    parked_n = sum(1 for it in open_items if it.get("state") == "waiting")
+    legend = ("HOW TO READ THIS BOARD: an ACTION ends when it is done. A [RECORD] has a STATE "
+              "and is updated forever — a client, a bill, a goal — never 'complete' one to mean "
+              "it is settled. [PARKED] means it is waiting on someone ELSE: it is real and it "
+              "matters, but it is NOT something Brady can act on, so never list it as his to-do "
+              "or push him on it. The [Lane] tag says whose time an action takes.")
+    if parked_n:
+        legend += f" {parked_n} row(s) are parked right now."
+    out = [legend, "", "PRIORITY (money & life — act on these first):"] + lines + [""] + back
     if done_today:
         out += ["", f"DONE TODAY ({len(done_today)}): " + " · ".join(
             (it.get('text','') or '')[:40] for it in done_today[:12])]
