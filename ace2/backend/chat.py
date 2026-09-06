@@ -431,7 +431,7 @@ def _mem_slim(mem_list: list, head: int = 40, tail: int = 70) -> list:
             + list(mem_list[-tail:]))
 
 
-async def _live_context() -> str:
+async def _live_context() -> tuple:
     """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
     + data bank concurrently."""
     memory, cal_all, bank, inbox, personal, wx = await asyncio.gather(
@@ -457,9 +457,18 @@ async def _live_context() -> str:
     bank_str = _format_daybank(ok(bank, []))
     p_list = ok(personal, [])   # [] until Brady links br80mcgraw — nothing shows before then
     personal_block = "\n".join(f"- {m['from']}: {m['subject']}" for m in p_list)
-    parts = [
-        f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
-        "",
+    # SPLIT FOR CACHING (Phase 6 step 1, 2026-09-06). Measured on the live store, ACE MEMORY
+    # alone is ~4,600 tokens and was re-sent UNCACHED on every typed turn — the largest
+    # repeated cost in the request. It only changes when the learning sweep files a fact, so
+    # it belongs in its own cached block; the profile and the recap move with it for the same
+    # reason. Everything below them changes turn to turn and must stay out of the cache.
+    #
+    # ORDER MATTERS: the cache is a PREFIX, so the slow half has to come first and nothing
+    # volatile may be interleaved into it. CURRENT TIME therefore moves out of position 1 and
+    # becomes the first line of the fast half — still stated up front, just after the part
+    # that doesn't change. (It was first because voice kept losing the date; it stays
+    # prominent, and the voice path builds its own context and is untouched here.)
+    slow = [
         _profile_block(),
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
@@ -467,6 +476,9 @@ async def _live_context() -> str:
         "",
         "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
         _recap_block(),
+    ]
+    parts = [
+        f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
         "TODAY'S SCHEDULE (relative to the current time above):",
         today_sched,
@@ -494,7 +506,7 @@ async def _live_context() -> str:
         "Tasks is retired — never route tasks there unless Brady explicitly says 'Google'):",
         bank_str,
     ]
-    return "\n".join(parts)
+    return "\n".join(slow), "\n".join(parts)
 
 
 def _format_weather(w) -> str:
@@ -2269,8 +2281,15 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         logger.warning("early user-persist failed: %s", e)
 
     try:
-        ctx = await (_fast_context() if fast else _live_context())
-        system = build_system_prompt() + "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()
+        # Voice builds its own single-block context; typed comes back split into a SLOW half
+        # (profile + memory + recap — cacheable) and a FAST half (time, schedule, calendar,
+        # inbox, weather, board — different every turn).
+        if fast:
+            ctx_slow, ctx = "", await _fast_context()
+        else:
+            ctx_slow, ctx = await _live_context()
+        # (The old single `system` string was assembled here and never read — the real
+        #  system blocks are built per-path below. Dropped rather than kept in sync.)
         messages = await _load_messages(user_text, prior)
     except Exception as e:
         logger.error("context build failed: %s", e)
@@ -2322,8 +2341,17 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # standard 5-min ephemeral cache — safe. Re-add 1h WITH the header, verified.
             typed_tools = [dict(t) for t in tools.TOOLS] + list(mcp_schemas) + [dict(tools.WEB_SEARCH)]
             typed_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            # THREE BLOCKS, TWO BREAKPOINTS (Phase 6 step 1, 2026-09-06). The cache is a
+            # PREFIX over tools → system → messages, so each breakpoint extends the cached
+            # span. Block 2 is the slow half of the context — measured at ~4,600 tokens of
+            # memory alone, re-sent uncached on every typed turn until now. It only changes
+            # when the learning sweep files a fact, so between sweeps this reads at 10% of
+            # rate instead of full. If it DOES change, block 1 still hits: a miss here costs
+            # one re-write of the slow half, not the whole prefix.
             typed_system = [
                 {"type": "text", "text": build_system_prompt(),
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "\n\n---\nWHAT YOU KNOW\n" + ctx_slow,
                  "cache_control": {"type": "ephemeral"}},
                 {"type": "text", "text": "\n\n---\nLIVE CONTEXT\n" + ctx + _discreet_note()},
             ]
@@ -2350,6 +2378,26 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                         turn_text.append(event.delta.text)
                         await emit("delta", {"text": event.delta.text})
                 final = await stream.get_final_message()
+
+            # COST INSTRUMENTATION (Phase 6, 2026-09-06). Nothing measured the cache before
+            # this, which made every optimization in this phase unverifiable — and would have
+            # hidden a repeat of 3 Aug, when the 1-hour TTL broke every call silently. One line
+            # per model call: what was cached, what was written, what was paid full rate.
+            # `hit` is the fraction of the prefix served from cache — if it collapses after a
+            # prompt edit, that edit invalidated the cache and the next line will show it.
+            try:
+                _u = getattr(final, "usage", None)
+                if _u is not None:
+                    _rd = getattr(_u, "cache_read_input_tokens", 0) or 0
+                    _wr = getattr(_u, "cache_creation_input_tokens", 0) or 0
+                    _in = getattr(_u, "input_tokens", 0) or 0
+                    _tot = _rd + _wr + _in
+                    logger.info("usage[%s] in=%d cache_read=%d cache_write=%d out=%d hit=%.0f%%",
+                                "voice" if fast else "typed", _in, _rd, _wr,
+                                getattr(_u, "output_tokens", 0) or 0,
+                                (100.0 * _rd / _tot) if _tot else 0.0)
+            except Exception:
+                pass
 
             if turn_text:
                 full_reply.append("".join(turn_text))
