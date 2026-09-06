@@ -768,6 +768,65 @@ def find_items(query: str, status: str = "open") -> list:
     return [it for _s, it in scored[:4]]
 
 
+# ── SEMANTIC DEDUP (Phase 4, 2026-09-05) ───────────────────────────────────────────
+# WHY A MODEL AND NOT A THRESHOLD. Brady's live duplicate — "Sienna's aunt — signature packet
+# still pending, just waiting, no push needed" vs "Sienna's aunt — signature packet sent to
+# her, once signed back it can be issued" — scores 0.267 on token overlap, because the two
+# rows say the same thing in almost no shared words. The pairs that must NEVER merge (truck
+# payment vs truck arrears, Mission Lane minimum vs payoff) score 0.077 and 0.143. There is no
+# cutoff that separates 0.267 from 0.143, so no amount of tuning fixes this class. Judgment does.
+#
+# The judge is INJECTED (chat.py registers a Haiku-backed one at startup) so this module keeps
+# no model dependency and stays unit-testable. Unset ⇒ byte-identical behavior to before.
+_DUP_JUDGE = None
+
+
+def set_dup_judge(fn) -> None:
+    """fn(new_text, [candidate items]) -> matching item id, or '' — see chat.py."""
+    global _DUP_JUDGE
+    _DUP_JUDGE = fn
+
+
+_MONEY_RE = _re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
+_DAYNUM_RE = _re.compile(r"\bdue\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\b", _re.I)
+
+
+def _distinguishing(a: str, b: str) -> bool:
+    """True when two texts CONTRADICT on money or due-day and must never be merged.
+
+    Runs BEFORE the model, deliberately: this is the rule that protects the truck payment from
+    its arrears and a card's minimum from its payoff, and it is the expensive mistake to get
+    wrong, so it stays deterministic and testable rather than delegated. Elaboration is not
+    contradiction — one text carrying an amount the other simply omits is fine.
+    """
+    am, bm = set(_MONEY_RE.findall(a or "")), set(_MONEY_RE.findall(b or ""))
+    if am and bm and am != bm:
+        return True
+    ad, bd = set(_DAYNUM_RE.findall(a or "")), set(_DAYNUM_RE.findall(b or ""))
+    if ad and bd and ad != bd:
+        return True
+    return False
+
+
+def _dup_candidates(text: str, norm: set, items: list, limit: int = 4) -> list:
+    """Cheap, high-recall shortlist for the judge: open rows sharing >=2 meaningful tokens,
+    minus anything the money/date guard says is a different thing. Precision is the judge's
+    job; this only has to avoid sending it nonsense."""
+    out = []
+    for it in items:
+        if it.get("status") != "open":
+            continue
+        other = _norm_item(it.get("text", ""))
+        shared = norm & other
+        if len(shared) < 2:
+            continue
+        if _distinguishing(text, it.get("text", "")):
+            continue
+        out.append((len(shared), it))
+    out.sort(key=lambda p: -p[0])
+    return [it for _, it in out[:limit]]
+
+
 def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True) -> tuple:
     text = (text or "").strip()
     if not text:
@@ -875,6 +934,21 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                     pass
             if best and best_score >= 0.45 and not similar:
                 similar = {"id": best["id"], "text": best["text"], "status": best["status"]}
+    # LAST GATE BEFORE INSERT: the lexical rules above have decided this is NOT a twin, which
+    # is exactly where the Sienna duplicate got through. Only reached when a shortlist exists,
+    # so a clearly-novel item still costs nothing.
+    if dedup and _DUP_JUDGE is not None:
+        try:
+            _norm = _norm_item(text)
+            _cands = _dup_candidates(text, _norm, read_items(active_only=False)) if _norm else []
+            if _cands:
+                _hit = _DUP_JUDGE(text, _cands) or ""
+                _match = next((c for c in _cands if c.get("id") == _hit), None)
+                if _match:
+                    logger.info("semantic dedup: %r collapsed into %s", text[:60], _match["id"])
+                    return True, {**_match, "dup": True, "semantic": True}
+        except Exception as e:                      # a judge failure must never block a write
+            logger.warning("semantic dedup skipped: %s", e)
     item = {
         "id": uuid.uuid4().hex[:8], "ts": datetime.now(EASTERN).isoformat(),
         "kind": kind, "text": text, "status": "open", "tags": tags or [],

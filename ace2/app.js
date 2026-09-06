@@ -1027,15 +1027,29 @@
       // are aspirations Brady never wanted dated, and Bills carry their own cycle. Show only
       // the oldest few so this nudges instead of dumping the backlog into his action list.
       var NODATE_SHOW = 6;
+      // RECORDS ARE NOT TO-DOS (2026-09-05, Phase 4). A record has a STATE, not an ending —
+      // "Jordan's license result status unknown", "Gabby got turned down from the job" are
+      // things Brady tracks, not things he does, and they were sitting in his action list.
+      // DATED records stay in the dated lanes below on purpose: a bill due today genuinely
+      // needs him, and hiding it would repeat the bug this phase exists to fix. Only the
+      // UNDATED reference noise comes out.
       var undated = rest.filter(function (x) {
         if (x.due_days != null) return false;
+        if (x.entry === 'record') return false;
         var c = cmdCatOf(x);
         return c !== 'Goals' && c !== 'Bills';
       }).sort(function (a, b) { return (a.ts || '') < (b.ts || '') ? -1 : 1; });
+      // PARKED — records waiting on someone else. This lane is the whole point of the WAITING
+      // state: six live rows ("everything submitted, waiting on approval", "just waiting, no
+      // push needed") had nowhere to be, so they either cluttered the action list or got
+      // closed. They must be VISIBLE and must not read as work.
+      var parked = all6.filter(function (x) { return x.state === 'waiting'; })
+                       .sort(function (a, b) { return (a.ts || '') < (b.ts || '') ? -1 : 1; });
       var undatedMore = Math.max(0, undated.length - NODATE_SHOW);
       undated = undated.slice(0, NODATE_SHOW);
       var body6 = cardShell('DUE TODAY', slot);
-      if (!late.length && !now6.length && !soon.length && !appr.length && !undated.length) {
+      if (!late.length && !now6.length && !soon.length && !appr.length && !undated.length
+          && !parked.length) {
         return empty(body6, 'Nothing due and nothing waiting on you. Clear.');
       }
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
@@ -1046,8 +1060,15 @@
         rows.forEach(function (it) {
           var row = document.createElement('div'); row.className = 'db-item ' + cls;
           var box = document.createElement('button'); box.className = 'db-box';
-          box.title = (cls === 'appr') ? 'Approve — Ace executes this' : 'Mark done';
-          box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
+          // A parked record is not completable from here — it finishes when the other person
+          // acts, and one stray tap is how four records vanished on 5 Sept.
+          if (cls === 'parked') {
+            box.className = 'db-box parked-box'; box.disabled = true;
+            box.title = it.waiting_on ? ('Waiting on ' + it.waiting_on) : 'Waiting on someone else';
+          } else {
+            box.title = (cls === 'appr') ? 'Approve — Ace executes this' : 'Mark done';
+            box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
+          }
           var mid = document.createElement('div'); mid.className = 'db-mid';
           var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
           var meta = document.createElement('div'); meta.className = 'db-meta';
@@ -1098,6 +1119,10 @@
             });
             meta.appendChild(chip);
           }
+          if (cls === 'parked' && it.waiting_on) {
+            var w = document.createElement('span'); w.className = 'db-wait';
+            w.textContent = 'waiting on ' + it.waiting_on; meta.appendChild(w);
+          }
           mid.appendChild(txt); mid.appendChild(meta);
           row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
         });
@@ -1107,6 +1132,7 @@
       sect('DUE TODAY', now6, 'now');
       sect('TOMORROW', soon, 'soon');
       sect('NEEDS A DATE', undated, 'nodate');
+      sect('PARKED — WAITING ON SOMEONE ELSE', parked, 'parked');
       if (undatedMore) {
         var more = document.createElement('div'); more.className = 'db-sect nodate-more';
         more.textContent = '+' + undatedMore + ' more with no date — open Command to work through them';

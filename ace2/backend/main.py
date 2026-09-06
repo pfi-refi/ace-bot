@@ -261,6 +261,15 @@ async def _prime_voice_ctx():
             logger.warning("voice ctx prime failed: %s", e)
     asyncio.create_task(_bg())
 
+    # SEMANTIC DEDUP (Phase 4, 2026-09-05). db keeps no model dependency; the judge is handed
+    # in here. If this line is ever removed, dedup silently reverts to lexical-only — which is
+    # the behavior that let the same signature packet onto the board twice.
+    try:
+        db.set_dup_judge(chat._dup_judge)
+        logger.info("semantic dedup judge registered (%s)", chat._DUP_JUDGE_MODEL)
+    except Exception as e:
+        logger.warning("dup judge not registered: %s", e)
+
     async def _audit():
         # Log the LIVE ElevenLabs agent settings (voice, turn/soft-timeout, enabled tools)
         # so a drifted dashboard config shows up in the deploy logs, not just in a bad call.

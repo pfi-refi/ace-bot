@@ -973,3 +973,14 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 .db-item.nodate .db-due-btn:hover { color: var(--aurora); }
 .db-sect.nodate-more { color: var(--text-faint); font-size: 9.5px; letter-spacing: .5px;
   padding-top: 6px; text-transform: none; }
+
+/* PARKED — records waiting on someone else (Phase 4, 2026-09-05). Deliberately the quietest
+   lane on the card: it must be VISIBLE, because six of these had nowhere to live and either
+   cluttered the action list or got closed, but it must not read as work Brady owes anyone.
+   The checkbox is inert here — a parked record ends when the other person acts. */
+.db-sect.parked { color: #8fa3b0; }
+.db-item.parked .db-text { color: rgba(234,255,245,.62); }
+.db-box.parked-box { cursor: default; opacity: .38; border-style: dashed; }
+.db-box.parked-box:hover { background: none; }
+.db-item.parked .db-wait { font-family: var(--mono); font-size: 9px; letter-spacing: .8px;
+  text-transform: uppercase; color: #8fa3b0; opacity: .85; }

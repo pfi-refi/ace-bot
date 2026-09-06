@@ -2069,6 +2069,53 @@ async def _fast_context() -> str:
 
 
 STAGE_TOOLS = [t for t in tools.TOOLS if t["name"] in tools.UI_TOOLS]
+# ── THE DUPLICATE JUDGE (Phase 4, 2026-09-05) ──────────────────────────────────────
+# Registered into db.set_dup_judge at startup. It is only ever called when db has already
+# decided the row is NOT a lexical twin AND a shortlist survived the money/date guard, so it
+# runs rarely and costs about a tenth of a cent when it does.
+#
+# The case it exists for: two rows about Sienna's aunt's signature packet, worded so
+# differently that token overlap scored 0.267 — below the pairs that must never merge. Only
+# meaning separates them.
+_DUP_JUDGE_MODEL = os.environ.get("ACE2_DUP_MODEL", "claude-haiku-4-5-20251001")
+_dup_sync_client = None
+
+
+def _dup_judge(new_text: str, candidates: list) -> str:
+    """Return the id of the candidate describing the SAME real-world thing, else ''."""
+    global _dup_sync_client
+    try:
+        from anthropic import Anthropic
+        if _dup_sync_client is None:
+            _dup_sync_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        listing = "\n".join(f"[{c.get('id')}] {(c.get('text') or '')[:240]}" for c in candidates)
+        prompt = (
+            "Brady's board must hold ONE row per real-world thing. Decide whether the NEW row "
+            "is the SAME THING as one of the EXISTING rows — meaning he would UPDATE that row "
+            "rather than keep both.\n\n"
+            "SAME thing: the same commitment, deal, bill or task described again — later, "
+            "shorter, or in different words. Wording overlap does not matter; what the row "
+            "REFERS TO does.\n"
+            "DIFFERENT things, even when they name the same person or account: an ACTION vs a "
+            "STATE ('mail Rebecca's packet' vs 'Rebecca's payout cleared'), two separate "
+            "obligations, two stages he tracks apart, or anything with a different amount or "
+            "date.\n\n"
+            "Answer with the bracketed id alone, or NONE. When unsure, answer NONE — a wrong "
+            "merge silently destroys a row Brady wrote, which is far worse than a duplicate "
+            "he can see and merge himself.\n\n"
+            f"NEW:\n{new_text[:400]}\n\nEXISTING:\n{listing}"
+        )
+        r = _dup_sync_client.messages.create(
+            model=_DUP_JUDGE_MODEL, max_tokens=16,
+            messages=[{"role": "user", "content": prompt}])
+        out = "".join(getattr(b, "text", "") for b in r.content).strip()
+        m = re.search(r"[0-9a-f]{6,8}", out)
+        return m.group(0) if m and "NONE" not in out.upper() else ""
+    except Exception as e:
+        logger.warning("dup judge failed (insert proceeds): %s", e)
+        return ""
+
+
 VOICE_TOOLS = [t for t in tools.TOOLS if t["name"] not in _VOICE_TOOL_DENY] + [tools.BUILD_ON_SCREEN]
 # Picking which card to show is a simple call — run it on Haiku, not Opus, so the stage
 # pass adds minimal cost/latency on top of every voice turn.
