@@ -869,7 +869,8 @@ def _dup_candidates(text: str, norm: set, items: list, limit: int = 4) -> list:
     return [it for _, it in out[:limit]]
 
 
-def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True) -> tuple:
+def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True,
+             parent_id: str = None) -> tuple:
     text = (text or "").strip()
     if not text:
         return False, "empty text"
@@ -999,10 +1000,14 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     try:
         import json
         with _conn() as c, c.cursor() as cur:
+            # parent_id links a spawned ACTION back to the RECORD it came from ("mail Rebecca's
+            # packet" -> the Rebecca record), so completing the action cannot take the record
+            # with it. The column has existed since 2026-07-31 but nothing could ever set it.
             cur.execute(
-                "INSERT INTO daybank_items (id, ts, kind, text, status, tags, due, done_ts) "
-                "VALUES (%s, %s::timestamptz, %s, %s, 'open', %s::jsonb, %s, NULL)",
-                (item["id"], item["ts"], kind, text, json.dumps(item["tags"]), item["due"]))
+                "INSERT INTO daybank_items (id, ts, kind, text, status, tags, due, done_ts, "
+                "parent_id) VALUES (%s, %s::timestamptz, %s, %s, 'open', %s::jsonb, %s, NULL, %s)",
+                (item["id"], item["ts"], kind, text, json.dumps(item["tags"]), item["due"],
+                 (parent_id or None)))
         if similar:
             item["similar"] = similar   # heads-up, not a block: caller can merge/update
         return True, item
