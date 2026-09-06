@@ -336,21 +336,63 @@ def audit(now: dict, prev: dict | None) -> list:
         recurring = {a.replace(",", "") for a in _PERMO.findall(t)}
         if not recurring:
             continue
+        # THIRD CORRECTION (2026-09-06 10:32), from two false positives on rows I had just
+        # IMPROVED. A well-written bill row legitimately carries several monthly figures:
+        #   "$106/mo minimum ... ~$70/mo is interest, so only ~$36 hits principal"
+        #   "$27/mo minimum ... needs ~$220/mo to clear before the rate jumps"
+        # Those are DECOMPOSITIONS and TARGETS, not competing claims. `len(recurring) > 1`
+        # treated them as contradictions and shouted HIGH at the two best rows on the board.
+        #
+        # A real contradiction is two amounts that each claim to BE the obligation — the truck
+        # row's "$500/mo, due 17th" against its own "$473 resuming 9/15". So an amount only
+        # counts as competing when nothing right before it marks it as a part, a target, or
+        # the past.
+        _NOTCLAIM = re.compile(
+            r"\b(interest|principal|of which|needs?|takes?|requires?|to\s+clear|toward|"
+            r"raised\s+from|up\s+from|down\s+from|was|were|old|previously|instead\s+of)\b",
+            re.I)
+        # A WINDOW, not adjacency: "Interest is about $57/mo" puts the marker 18 characters
+        # back, which a tight \W{0,14} anchor missed. 30 chars is wide enough for the phrasings
+        # that actually occur and still narrow enough that the truck row's "…due 17th. Payments
+        # $473 resuming" contains no marker and stays a real contradiction.
+        _LOOKBACK = 30
+
+        # The marker can sit on EITHER side: "needs ~$220/mo" puts it before, "~$70/mo is
+        # interest" puts it after. Checking only backwards left Capital One flagged.
+        _NOTCLAIM_AFTER = re.compile(
+            r"^\s*(?:/\s*mo|per\s+month|monthly)?\s*(?:is|goes|of)?\s*"
+            r"(interest|principal|toward|to\s+principal)", re.I)
+
+        def _claims(text_, amounts):
+            out = set()
+            for m in re.finditer(r"\$\s*~?([\d,]+(?:\.\d{1,2})?)", text_):
+                a = m.group(1).replace(",", "")
+                if a not in amounts:
+                    continue
+                if _NOTCLAIM.search(text_[max(0, m.start() - _LOOKBACK):m.start()]):
+                    continue
+                if _NOTCLAIM_AFTER.search(text_[m.end():m.end() + 34]):
+                    continue
+                out.add(a)
+            return out
+
+        claiming = _claims(t, recurring)
         live_others = set()
         for seg in re.split(r"[.;]|\s—\s", t):
             if _DEAD.search(seg):
                 continue                       # this clause is explaining the past, not asserting
-            for a in _AMT.findall(seg):
-                a = a.replace(",", "")
+            for a in _claims(seg, {x.replace(",", "") for x in _AMT.findall(seg)}):
                 if a not in recurring:
                     live_others.add(a)
-        if not live_others:
-            continue
-        if len(recurring) > 1 or _CUE.search(t):
+        if len(claiming) > 1:
+            contradictions.append(i)
+        elif live_others and _CUE.search(t):
             contradictions.append(i)
     if contradictions:
         findings.append({
-            "class": "STALE", "severity": "high",
+            # Downgraded from high 2026-09-06: even a true hit here is "a row has a stale
+            # number", not something broken. HIGH pushes to Brady's lock screen.
+            "class": "STALE", "severity": "medium",
             "detail": f"{len(contradictions)} row(s) state two different amounts for the same "
                       f"recurring obligation — the truck-row failure",
             "texts": [(x.get("text") or "")[:96] for x in contradictions[:5]],

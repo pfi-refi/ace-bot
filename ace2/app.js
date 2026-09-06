@@ -677,9 +677,9 @@
       case 'run_on_hud': runOnHud(msg.message); break;
       case 'confirmation': renderConfirm(msg.text); break;
       case 'final': if (streamMsg) finalizeStream(streamMsg, msg.text); break;
-      case 'error': removeTyping(); discardEmptyStream(); addAceMessage(msg.text); state.busy = false;
+      case 'error': removeTyping(); discardEmptyStream(); collapseTools(); addAceMessage(msg.text); state.busy = false;
         if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
-      case 'done': discardEmptyStream(); streamMsg = null; activeTool = null; state.busy = false;
+      case 'done': discardEmptyStream(); collapseTools(); streamMsg = null; state.busy = false;
         if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
     }
   }
@@ -753,9 +753,45 @@
   function appendToStream(s, t) { s.text += t; s.body.textContent = s.text; scrollBottom(); }
   function discardEmptyStream() { if (streamMsg && !streamMsg.text && streamMsg.el.parentNode) { streamMsg.el.parentNode.removeChild(streamMsg.el); streamMsg = null; } }
   function finalizeStream(s, txt) { s.body.textContent = txt || s.text; if (s.cursor.parentNode) s.cursor.parentNode.removeChild(s.cursor); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); s.el.appendChild(ts); speak(txt || s.text); scrollBottom(); markUnread(); }
+  /* ONE LIVE STATUS LINE, NOT A STACK OF RECEIPTS (2026-09-06, Brady: "he should operate how
+     you do with a single item that's just showing what it's doing so it doesn't list out 15").
+     Every tool used to append its own pill BELOW Ace's reply, so a turn with six tool calls
+     buried what he actually said and Brady had to scroll UP to read it. Now a single node is
+     MOVED to the bottom and relabelled as work happens, and at the end of the turn it collapses
+     to one summary line placed ABOVE the reply — so the last thing on screen is always his
+     words, and the receipt is still there if Brady wants to see what was done. */
+  var toolSteps = [];
   function renderTool(msg) {
-    if (msg.status === 'running') { activeTool = document.createElement('div'); activeTool.className = 'tool-pill'; activeTool.innerHTML = '<span class="spin">◈</span> '; activeTool.appendChild(document.createTextNode(msg.label + '…')); messagesEl.appendChild(activeTool); scrollBottom(); }
-    else if (activeTool) { activeTool.className = 'tool-pill done'; activeTool.innerHTML = '◈ '; activeTool.appendChild(document.createTextNode(msg.label)); activeTool = null; scrollBottom(); }
+    if (msg.status === 'running') {
+      if (!activeTool) { activeTool = document.createElement('div'); activeTool.className = 'tool-pill'; }
+      activeTool.innerHTML = '<span class="spin">◈</span> ';
+      activeTool.appendChild(document.createTextNode(msg.label + '…'));
+      messagesEl.appendChild(activeTool);      // re-appending MOVES it: always the live bottom line
+      if (msg.label) toolSteps.push(msg.label);
+      scrollBottom();
+    } else if (activeTool) {
+      activeTool.innerHTML = '◈ ';
+      activeTool.appendChild(document.createTextNode(msg.label));
+    }
+  }
+  function collapseTools() {
+    if (!activeTool) { toolSteps = []; return; }
+    if (!toolSteps.length) { if (activeTool.parentNode) activeTool.parentNode.removeChild(activeTool); }
+    else {
+      var seen = [], i;
+      for (i = 0; i < toolSteps.length; i++) if (seen.indexOf(toolSteps[i]) < 0) seen.push(toolSteps[i]);
+      activeTool.className = 'tool-pill done';
+      activeTool.innerHTML = '◈ ';
+      activeTool.appendChild(document.createTextNode(
+        seen.length === 1 ? seen[0]
+          : toolSteps.length + ' steps · ' + seen.slice(0, 3).join(', ') + (seen.length > 3 ? '…' : '')));
+      // Sit ABOVE the reply so Ace's words are the last thing on screen.
+      var last = messagesEl.lastElementChild;
+      if (last && last !== activeTool && last.classList && last.classList.contains('msg')) {
+        messagesEl.insertBefore(activeTool, last);
+      }
+    }
+    activeTool = null; toolSteps = [];
   }
   function renderConfirm(text) {
     text = String(text == null ? '' : text);

@@ -224,7 +224,7 @@ body {
 .msg .ts { font-family: var(--mono); font-size: 10.5px; color: rgba(234,255,245,.52); margin-top: 6px;
   letter-spacing: .5px; font-variant-numeric: tabular-nums; }
 .msg.user .ts { text-align: right; }
-.msg.hist .ts { opacity: .85; }
+.msg.hist .ts { opacity: .7; }
 .msg .cursor { display: inline-block; width: 7px; background: var(--aurora);
   box-shadow: 0 0 8px var(--aurora-60); animation: blink 1s step-end infinite; margin-left: 2px; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -672,8 +672,12 @@ body.chatting { overflow: hidden; }
 #chat-view #input-bar { flex: none; width: 100%; max-width: 900px; margin: 0 auto; }
 
 /* ---------- Preloaded history in the chat panel ---------- */
-.msg.hist { opacity: .62; }
-.msg.hist .sender { opacity: .8; }
+/* NOT DIMMED (2026-09-06, Brady: "it always dulls the words when I close the app and go
+   back in"). Every message reloaded from history carried .62 opacity, so the entire
+   conversation looked faded on every return — which is most of the time he reads it.
+   History is still distinguishable by its timestamp; it does not need to be hard to read. */
+.msg.hist { opacity: 1; }
+.msg.hist .sender { opacity: .92; }
 .hist-sep { align-self: center; font-family: var(--mono); font-size: 10px; letter-spacing: 3px;
   color: var(--text-faint); margin: 10px 0 6px; opacity: .7; }
 
