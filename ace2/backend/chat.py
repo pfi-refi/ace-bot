@@ -2100,6 +2100,7 @@ async def bucket_pass(limit: int = 60) -> dict:
                 and not i.get("bucket_set")][:limit]
         if not todo:
             return {"classified": 0, "note": "every open action already has a bucket"}
+        from . import db as _db          # chat.py imports db per-function, not at module scope
         listing = "\n".join(f"[{i['id']}] {(i.get('text') or '')[:220]}" for i in todo)
         prompt = (
             "File each of Brady's open actions into ONE lane. The test is WHOSE TIME IT TAKES, "
@@ -2125,7 +2126,7 @@ async def bucket_pass(limit: int = 60) -> dict:
             model=_BUCKET_MODEL, max_tokens=1200,
             messages=[{"role": "user", "content": prompt}])
         out = "".join(getattr(b, "text", "") for b in r.content)
-        valid = set(db.BUCKETS)
+        valid = set(_db.BUCKETS)
         by_id = {i["id"]: i for i in todo}
         applied, skipped = 0, 0
         for line in out.splitlines():
