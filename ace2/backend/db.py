@@ -649,13 +649,25 @@ def _derive_entry(it) -> str:
         return "record"
     if _is_recurring_bill_row(it):            # the register — updated forever, never completed
         return "record"
-    if _WAIT_RE.search(it.get("text") or ""): # parked on someone else = a state, not a to-do
+    _t = it.get("text") or ""
+    if len(_t) <= _WAIT_MAX_CHARS and _WAIT_RE.search(_t):   # parked = a state, not a to-do
         return "record"
     return "action"
 
 
+# A STATUS IS STATED BRIEFLY; A REPORT QUOTES ONE (2026-09-06). The Friday defects row —
+# thousands of characters that QUOTE "submitted, waiting on approval", "just waiting, no push"
+# while describing the missing WAITING state — was itself derived as a waiting record, which
+# parked a work item and protected it from ever closing. Every genuine waiting row on the live
+# board is under 150 characters ("Thiami — everything submitted, waiting on approval"); nothing
+# that long is stating its own status. Same failure this heuristic keeps hitting elsewhere:
+# what a row is ABOUT is not what it MENTIONS.
+_WAIT_MAX_CHARS = 300
+
+
 def _derive_state(it) -> str:
-    if _WAIT_RE.search(it.get("text") or ""):
+    t = it.get("text") or ""
+    if len(t) <= _WAIT_MAX_CHARS and _WAIT_RE.search(t):
         return "waiting"
     return "active"
 
