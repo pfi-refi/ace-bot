@@ -500,6 +500,24 @@ async def daybank_read(all: bool = False):
     return {"items": await asyncio.to_thread(daybank.read_items, not all)}
 
 
+def _canon_category(raw: str) -> tuple:
+    """('Deals', '') for a category the board knows; ('', why) for one it does not.
+
+    Case and the "Job Hunt" alias resolve through db.canon_tags, so a caller needn't match
+    CATEGORIES byte for byte. Anything still unrecognised is REFUSED rather than dropped.
+    The old code read `category not in CATEGORIES` as "leave it alone" and answered ok:true
+    anyway, so a typo was indistinguishable from a save — the third of the silent-write bugs
+    (2026-09-05). An edit Ace cannot apply has to come back as an edit Ace did not apply.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "", ""
+    cat = (db.canon_tags([raw]) or [""])[0]
+    if cat in set(db.CATEGORIES):
+        return cat, ""
+    return "", "unknown category '%s' — use one of: %s" % (raw, ", ".join(db.CATEGORIES))
+
+
 class DaybankUpdateReq(BaseModel):
     id: str = ""
     status: str = ""     # "open" | "done" | "" (no status change)
@@ -517,11 +535,17 @@ class DaybankAddReq(BaseModel):
 async def daybank_add(req: DaybankAddReq):
     """Add a task from the Command panel into Ace's OWN store (deduped against open AND done, so
     no twins and no resurrection). Category rides as a tag for grouping/filtering."""
-    tags = [req.category] if (req.category or "").strip() else None
-    ok, res = await asyncio.to_thread(daybank.add_item, "todo", req.text, None, tags)
+    # Same rule as /daybank/update: this took ANY string as a category and wrote it through
+    # as a tag, so a typo silently created a twelfth column nothing renders.
+    cat, cat_err = _canon_category(req.category)
+    if cat_err:
+        return {"ok": False, "dup": False, "error": cat_err,
+                "items": await asyncio.to_thread(daybank.read_items, True)}
+    ok, res = await asyncio.to_thread(
+        daybank.add_item, "todo", req.text, None, [cat] if cat else None)
     dup = bool(isinstance(res, dict) and res.get("dup"))
     items = await asyncio.to_thread(daybank.read_items, True)
-    return {"ok": ok, "dup": dup, "items": items}
+    return {"ok": ok, "dup": dup, "items": items, "category": cat or None}
 
 
 class MigrateReq(BaseModel):
@@ -698,15 +722,27 @@ async def daybank_update(req: DaybankUpdateReq):
     """Edit a board item from the Command panel: toggle done, rewrite the text, move it
     to another category, or change its due — instant, no chat round-trip. Mutates Ace's
     OWN store only."""
-    status = req.status if req.status in ("open", "done", "dropped") else None
+    # REFUSE WHAT WE CANNOT APPLY (2026-09-05). Both fields below used to fall back to
+    # "ignore" on a value they did not recognise, while the handler still returned ok:true.
+    _CATS = set(db.CATEGORIES)
+    if req.status and req.status not in ("open", "done", "dropped"):
+        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+                "error": "unknown status '%s' — use open, done or dropped" % req.status}
+    cat, cat_err = _canon_category(req.category)
+    if cat_err:
+        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+                "error": cat_err}
+    status = req.status or None
     text = req.text.strip() or None
     tags = None
-    _CATS = set(db.CATEGORIES)
-    if req.category and req.category in _CATS:
+    if cat:
         it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
                    if x.get("id") == req.id), None)
-        keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
-        tags = [req.category] + keep
+        # Canonicalise BEFORE filtering, so a legacy lowercase 'deals' tag is recognised as
+        # the category it is and replaced — not kept alongside the new one as a second column.
+        keep = [t for t in db.canon_tags((it.get("tags") if it else None) or [])
+                if t not in _CATS]
+        tags = [cat] + keep
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
@@ -727,7 +763,7 @@ async def daybank_update(req: DaybankUpdateReq):
         except Exception as e:
             logger.warning("win-logging failed: %s", e)
     items = await asyncio.to_thread(daybank.read_items, True)
-    return {"ok": ok, "items": items}
+    return {"ok": ok, "items": items, "category": cat or None}
 
 
 # ── THE KNOWLEDGE GRAPH — Brady's book of business as a navigable map ───────────

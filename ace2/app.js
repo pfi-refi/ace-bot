@@ -1705,16 +1705,23 @@
       };
       if (!body.text) { ta.style.borderColor = '#ff6b6b'; ta.focus(); return; }   // blank = no-op server-side
       b.textContent = 'SAVING…'; b.disabled = true;
+      // SAY WHY (2026-09-05). The server now REFUSES a status or category it can't apply
+      // instead of ignoring it and answering ok:true, so a refusal carries a reason worth
+      // showing. Only the first clause fits a button; the list of valid values follows the
+      // em dash and would overflow it.
+      var serverWhy = '';
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify(body)})
         .then(function(r){ return r.json(); })
         .then(function(d){
-          if (!d || !d.ok) throw 0;
+          if (!d || !d.ok) { serverWhy = (d && d.error) || ''; throw 0; }
           cmd.editing = null; cmd.draft = null;
           return cmdFetch().then(cmdRender);
         })
         .catch(function(){
           // keep the editor open with the typed values — never eat an edit silently
-          b.textContent = 'RETRY SAVE'; b.disabled = false;
+          var why = serverWhy.split(' — ')[0];
+          b.textContent = why ? ('RETRY — ' + why) : 'RETRY SAVE';
+          b.disabled = false;
         });
     }; });
     var f=v.querySelector('#cmd-add');
@@ -1734,7 +1741,7 @@
         .then(function(r){ return r.ok ? r.json() : null; })
         .then(function(d){
           if (d && d.dup) { addFailed('Already on your board — nothing added'); return; }
-          if (!d || !d.ok) { addFailed('Could not save that — try again'); return; }
+          if (!d || !d.ok) { addFailed((d && d.error) || 'Could not save that — try again'); return; }
           return cmdFetch().then(cmdRender);
         }).catch(function(){ addFailed('Could not save that — try again'); }); };
   }
