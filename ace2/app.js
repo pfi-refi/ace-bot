@@ -1245,6 +1245,42 @@
   // (real STT) and send. Reused stream across a hands-free session; released on stop.
   var micStream = null, micRec = null, sttCtx = null, sttAnalyser = null, vadRAF = null, segmentEmpty = false;
 
+  /* ---------------------------------------------------------- UTTERANCE COALESCING
+     THE FRAGMENT BUG (fixed 2026-09-05). The VAD ends a segment on a 1.2s pause and the
+     transcript went straight to sendMessage, so a breath taken mid-sentence became a whole
+     turn: Brady said "No." … "Wingspan is the payout from GFI" and Ace answered the "No."
+     Lengthening the pause cannot fix this — the VAD runs BEFORE transcription, so it never
+     knows whether a sentence finished. Only the words can tell us, which means the decision
+     has to happen after STT returns.
+
+     So: a transcript that reads as FINISHED still sends immediately (normal turns keep their
+     current speed), while one that reads as UNFINISHED re-opens the mic for a short window
+     and appends whatever follows. Capped at 3 segments / 20s so a runaway can never swallow
+     a conversation. */
+  var utterBuf = [], utterT0 = 0;
+  var CONT_SILENCE_MS = 1600;   // silence in a continuation window that means "he really did stop"
+  var UTTER_MAX_SEGS = 3, UTTER_MAX_MS = 20000;
+
+  // Bare lead-ins: he almost never means these as a complete answer — they precede the point.
+  var UTTER_FILLER = /^(no|yes|yeah|yep|nope|nah|ok|okay|um|uh|hmm|well|wait|hold on|so|and|but|actually|i mean|like|right)$/i;
+  // Words a real sentence essentially cannot END on. Deliberately NARROW — only pure
+  // conjunctions and articles. An earlier list held "is/it/was/to", which wrongly flagged
+  // ordinary sentences like "…tell me what the minimum is." as cut off.
+  var UTTER_TRAIL = /(^|\s)(and|but|or|because|cause|the|a|an|my|our|your|their|his|her|its)$/i;
+
+  function looksIncomplete(t) {
+    var s = (t || '').trim();
+    if (!s) return false;
+    var bare = s.replace(/[.,!?…\-]+$/, '').trim();
+    if (UTTER_FILLER.test(bare)) return true;              // "No." — a lead-in whatever the punctuation
+    if (bare.split(/\s+/).length <= 2) return true;        // 1-2 words: fragment far more often than command
+    if (!/[.!?…]$/.test(s)) return true;                   // STT terminates a sentence it heard finish
+    if (UTTER_TRAIL.test(bare)) return true;               // "…call Ken and." — STT punctuated a pause
+    return false;                                          // terminated and substantial: he's done
+  }
+
+
+
   function ensureStream() {
     if (micStream) return Promise.resolve(micStream);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) return Promise.reject('unsupported');
@@ -1256,12 +1292,14 @@
     for (var i = 0; i < opts.length; i++) { try { if (MediaRecorder.isTypeSupported(opts[i])) return opts[i]; } catch (e) {} }
     return '';
   }
-  function beginSegment() {
-    if (!micStream || !state.micActive || state.busy || ttsPlaying) return;
+  function beginSegment(cont) {
+    // Returns whether recording actually started — the coalescer must not strand a buffered
+    // fragment on a window it could not open.
+    if (!micStream || !state.micActive || state.busy || ttsPlaying) return false;
     setOrbState('listening');
     var mime = pickMime(), chunks = [];
     try { micRec = mime ? new MediaRecorder(micStream, { mimeType: mime }) : new MediaRecorder(micStream); }
-    catch (e) { micRec = null; return; }
+    catch (e) { micRec = null; return false; }
     segmentEmpty = false;
     micRec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
     micRec.onstop = function () {
@@ -1270,10 +1308,11 @@
       micRec = null;
       transcribeAndSend(new Blob(chunks, { type: mt }));
     };
-    try { micRec.start(); } catch (e) { micRec = null; return; }
-    startVAD();
+    try { micRec.start(); } catch (e) { micRec = null; return false; }
+    startVAD(!!cont);
+    return true;
   }
-  function startVAD() {
+  function startVAD(cont) {
     var buf = null;
     try {
       if (!sttCtx) sttCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1293,8 +1332,11 @@
       }
       if (rms > 0.035) { spoke = true; lastVoice = now; orb.setAmplitude(Math.min(1, rms * 6)); }
       else if (spoke) { orb.setAmplitude(0.15); }
-      // end on ~1.2s pause after speech; hard-cap 14s; bail after 9s of pure silence
-      if ((spoke && now - lastVoice > 1200) || (now - t0 > 14000) || (!spoke && now - t0 > 9000)) { endSegment(!spoke); return; }
+      // end on ~1.2s pause after speech; hard-cap 14s; bail on pure silence — fast in a
+      // continuation window (he already finished; we are only checking he meant to), slow
+      // in a fresh one (he may not have started talking yet).
+      var quietBail = cont ? CONT_SILENCE_MS : 9000;
+      if ((spoke && now - lastVoice > 1200) || (now - t0 > 14000) || (!spoke && now - t0 > quietBail)) { endSegment(!spoke); return; }
       vadRAF = requestAnimationFrame(loop);
     })();
   }
@@ -1305,9 +1347,27 @@
   }
   function sttHeaders(type) { var h = { 'Content-Type': type || 'audio/webm' }; if (state.token) h.Authorization = 'Bearer ' + state.token; return h; }
   var sttFails = 0;
+  // Hold a piece; open a continuation window if it reads unfinished, otherwise send.
+  function queueUtterance(text) {
+    utterBuf.push(text);
+    if (!utterT0) utterT0 = performance.now();
+    var capped = utterBuf.length >= UTTER_MAX_SEGS || (performance.now() - utterT0) > UTTER_MAX_MS;
+    if (!capped && looksIncomplete(text) && state.micActive && beginSegment(true)) return;
+    flushUtterance();
+  }
+  function flushUtterance() {
+    var text = utterBuf.join(' ').replace(/\s+/g, ' ').trim();
+    utterBuf = []; utterT0 = 0;
+    if (text) sendMessage(text);                           // mic resumes after his reply
+    else if (state.micActive && state.handsFree) beginSegment();
+  }
+
   function transcribeAndSend(blob) {
     if (segmentEmpty || !blob || blob.size < 1400) {   // nothing worth sending — keep the ear open
-      segmentEmpty = false; if (state.micActive && state.handsFree) beginSegment(); return;
+      segmentEmpty = false;
+      // Silence right after a fragment is the answer: he really had stopped. Send what he said.
+      if (utterBuf.length) { flushUtterance(); return; }
+      if (state.micActive && state.handsFree) beginSegment(); return;
     }
     fetch(API + '/stt', { method: 'POST', headers: sttHeaders(blob.type), body: blob })
       .then(function (r) { return r.ok ? r.json() : Promise.reject('http ' + r.status); })
@@ -1315,11 +1375,13 @@
         if (d && d.error) return Promise.reject(d.error);
         sttFails = 0;
         var text = (d && d.text || '').trim();
-        if (text) sendMessage(text);                         // Ace's turn; mic resumes after his reply
+        if (text) queueUtterance(text);                      // may wait for the rest of the sentence
+        else if (utterBuf.length) flushUtterance();          // nothing more coming — send the buffer
         else if (state.micActive && state.handsFree) beginSegment();
       })
       .catch(function (err) {
         sttFails++;
+        if (utterBuf.length) { flushUtterance(); return; }   // never strand what he already said
         if (sttFails >= 2) {   // transcription is genuinely down — stop the loop, let him type
           addAceMessage('Voice input is having trouble transcribing (' + err + '). I turned the mic off — type to me for now.');
           state.handsFree = false; stopMic();
@@ -1337,6 +1399,10 @@
   }
   function stopMic() {
     state.micActive = false; $('mic-btn').classList.remove('active');
+    // Tapping the mic off already throws away the audio mid-segment; a held fragment goes with
+    // it, so "stop" stays one thing. Only fragments are ever held — a finished sentence has
+    // already been sent — so this cannot lose a real instruction.
+    utterBuf = []; utterT0 = 0;
     if (micRec && micRec.state !== 'inactive') { segmentEmpty = true; try { micRec.stop(); } catch (e) {} }
     stopVAD();
     if (micStream) { try { micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} micStream = null; }

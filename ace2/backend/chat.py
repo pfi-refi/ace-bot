@@ -1987,7 +1987,16 @@ async def _fast_context() -> str:
         "do not speak again, and never respond to background conversation, until he addresses you "
         "directly. (3) SIGN-OFF — when he's clearly done ('goodnight, Ace', 'that's all for "
         "tonight'): one short, warm sign-off line, then call end_call if you have it to hang up. "
-        "Never call end_call in any other situation.)",
+        "Never call end_call in any other situation. (4) UNFINISHED THOUGHT — the platform ends "
+        "your turn on a SHORT SILENCE, so what reaches you is sometimes only half of what Brady "
+        "is saying: it trails off on a conjunction or article ('...so I need to call Ken and'), "
+        "stops just before the number or name it was heading for ('...the balance is'), or is a "
+        "bare lead-in he is about to build on. When the transcript reads as CUT OFF rather than "
+        "finished, call skip_turn with NO words and let him land the sentence — if you don't "
+        "have skip_turn, say only 'Go on.' Never answer half a sentence and never guess the "
+        "missing half. Judge it in context, not by length: a short reply that genuinely ANSWERS "
+        "what you just asked ('No.' right after a yes/no question) is finished — answer it. "
+        "Yield only when the words themselves are incomplete.)",
     ])
 
 
