@@ -87,6 +87,20 @@ def _init_schema():
         # superseded_by=winner) and items can hang under a parent deal — never deleted.
         cur.execute("ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS parent_id TEXT")
         cur.execute("ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS superseded_by TEXT")
+        # RECORDS vs ACTIONS (2026-09-05, Phase 4). The board held one row type, so a thing with a
+        # STATE and a thing with an ENDING shared a shape — which is why completing "drop off her
+        # packet" deleted Feliz the client. An ACTION has a natural end and leaves when done; a
+        # RECORD has a state and is updated forever.
+        #   entry      'action' | 'record'      — nullable; NULL reads as 'action' everywhere.
+        #   state      records only: 'active' | 'waiting' | 'settled'.
+        #   waiting_on free text — WHO it is parked on. A waiting row with no name is how
+        #              "waiting on approval" quietly becomes "forgotten".
+        #   closed_by  'brady' | 'ace' — never recorded before, so there was no way to tell who
+        #              closed the four records that vanished in one update on 5 Sept.
+        # All nullable with no backfill in this statement: an un-migrated row behaves exactly as
+        # it does today, so this migration cannot change behavior on its own.
+        for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT"):
+            cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
         # active | archived; a retired fact is set tier='archived' + invalid_at (kept as dated
@@ -560,12 +574,73 @@ def _done_et(ts) -> str:
         return str(ts)[:10]
 
 
+# ── RECORDS vs ACTIONS — derivation (Phase 4, 2026-09-05) ──────────────────────────
+# Deliberately BIASED TOWARD 'action', which is what every row is today. Calling a record an
+# action just preserves current behavior; calling an action a record risks hiding real work,
+# so a row is only promoted on a strong signal.
+#
+# The waiting signals below are lifted from Brady's ACTUAL open board — "everything submitted,
+# waiting on approval", "just waiting, no push needed", "once signed back it can be issued",
+# "tied up until after Sept 15", "no update expected until October". Seven open rows read like
+# this, and they are precisely the ones that got closed in a single sweep on 5 Sept: a thing
+# parked on somebody else has no natural end, so it is a RECORD with a state, never a to-do.
+_WAIT_RE = _re.compile(
+    r"\b(waiting\s+(?:on|for)|awaiting|still\s+pending|just\s+waiting|no\s+push"
+    # NOT a bare "once he/she/it …": "set the meeting once he responds" is an ACTION that
+    # merely mentions waiting, and promoting it to a record would HIDE the imperative next to
+    # it ("send him the rollover materials"). Only a completed-by-someone-else clause counts.
+    r"|once\s+(?:signed|approved|issued|processed)|tied\s+up\s+until|no\s+update\s+expected"
+    r"|pending\s+(?:approval|signature|processing)|submitted,\s*waiting)\b", _re.I)
+_WAIT_WHO = _re.compile(r"\bwaiting\s+(?:on|for)\s+([A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)?"
+                        r"|approval|signature|processing|[a-z]+(?:\s+[a-z]+){0,2})", _re.I)
+
+
+def _waiting_on(text: str) -> str:
+    m = _WAIT_WHO.search(text or "")
+    return (m.group(1).strip().rstrip(".,;") if m else "")
+
+
+def _derive_entry(it) -> str:
+    """'record' only on a strong signal; everything else stays an action."""
+    tags = it.get("tags") or []
+    if "Goals" in tags:                       # a goal has a state, never an ending
+        return "record"
+    if it.get("kind") == "note":              # notes were already records in all but name
+        return "record"
+    if _is_recurring_bill_row(it):            # the register — updated forever, never completed
+        return "record"
+    if _WAIT_RE.search(it.get("text") or ""): # parked on someone else = a state, not a to-do
+        return "record"
+    return "action"
+
+
+def _derive_state(it) -> str:
+    if _WAIT_RE.search(it.get("text") or ""):
+        return "waiting"
+    return "active"
+
+
+def _is_recurring_bill_row(it) -> bool:
+    """Module-level twin of read_items' _is_recurring_bill, so the derivation can use it too.
+    A real obligation names an amount AND a repeating due day; a one-off chore filed under
+    Bills ('Call the gas company') is an action and must still disappear when done."""
+    if "Bills" not in (it.get("tags") or []):
+        return False
+    t = it.get("text") or ""
+    if "$" not in t:
+        return False
+    return bool(_re.search(r"due\s+(the\s+)?\d{1,2}(st|nd|rd|th)\b", t, _re.I)
+                or _re.search(r"/\s*mo(nth)?\b", t, _re.I)
+                or _re.search(r"\bmonthly\b", t, _re.I))
+
+
 def read_items(active_only: bool = True) -> list:
     ensure_ready()
     try:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
-                        "parent_id, superseded_by FROM daybank_items")
+                        "parent_id, superseded_by, entry, state, waiting_on, closed_by "
+                        "FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
         items = []
@@ -574,7 +649,13 @@ def read_items(active_only: bool = True) -> list:
                 "id": r[0], "ts": r[1].isoformat(), "kind": r[2], "text": r[3], "status": r[4],
                 "tags": r[5] or [], "due": r[6], "done_ts": r[7].isoformat() if r[7] else None,
                 "parent_id": r[8], "superseded_by": r[9],
+                "closed_by": r[13],
             }
+            # A stored classification always wins; otherwise DERIVE, so the model works before any
+            # backfill and stays right for rows written by paths that don't set it yet.
+            it["entry"] = r[10] or _derive_entry(it)
+            it["state"] = r[11] or (_derive_state(it) if it["entry"] == "record" else None)
+            it["waiting_on"] = r[12] or (_waiting_on(it.get("text")) if it["state"] == "waiting" else None)
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None
@@ -1025,7 +1106,8 @@ def remove_push_sub(endpoint: str) -> bool:
 
 def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None, match: str = None,
-                superseded_by: str = None) -> tuple:
+                superseded_by: str = None, closed_by: str = None,
+                entry: str = None, state: str = None, waiting_on: str = None) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
@@ -1061,6 +1143,16 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("due = %s"); args.append(pin_due(due) or None)
             if (superseded_by or "").strip():
                 sets.append("superseded_by = %s"); args.append(superseded_by.strip())
+            # WHO CLOSED IT (2026-09-05). Never recorded, so when four records vanished in one
+            # update there was no way to tell whether Brady did it or a sweep did.
+            if closed_by and status in ("done", "dropped"):
+                sets.append("closed_by = %s"); args.append(closed_by.strip()[:20])
+            if entry in ("action", "record"):
+                sets.append("entry = %s"); args.append(entry)
+            if state in ("active", "waiting", "settled"):
+                sets.append("state = %s"); args.append(state)
+            if waiting_on is not None:
+                sets.append("waiting_on = %s"); args.append((waiting_on.strip() or None))
             if not sets:
                 return False, "nothing to update"
             args.append(item_id)

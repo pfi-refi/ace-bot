@@ -730,7 +730,10 @@ def _do_update_item(id="", match=None, status=None, text=None, category=None, du
                 it = cands[0]
         keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
         tags = [category] + keep
-    ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match)
+    # Ace's own hand. The Command panel stamps 'brady'; the split is what makes "who closed
+    # this?" answerable at all (2026-09-05).
+    ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match,
+                                  closed_by="ace")
     if ok:
         verb = {"done": "Completed", "open": "Reopened", "dropped": "Archived"}.get(status, "Updated")
         moved = f" → [{category}]" if category else ""

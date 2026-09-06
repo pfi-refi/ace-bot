@@ -744,7 +744,7 @@ async def daybank_update(req: DaybankUpdateReq):
                 if t not in _CATS]
         tags = [cat] + keep
     ok, _msg = await asyncio.to_thread(
-        daybank.update_item, req.id, status, text, tags, req.due)
+        daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady")
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":

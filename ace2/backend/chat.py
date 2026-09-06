@@ -993,8 +993,18 @@ async def apply_sweep(h: int, facts_text: str, triage_text: str, reflection_text
                         if _cat:
                             logger.info("sweep: refused to auto-close %s item %s", _cat, iid)
                             continue
+                        # WAITING IS NOT DONE (2026-09-05, Phase 4). A record parked on someone
+                        # else — "everything submitted, waiting on approval", "just waiting, no
+                        # push needed" — has no natural end, and a passing mention of it in
+                        # conversation is not completion. Two of the six waiting rows on the
+                        # live board sit in Opportunities, which the shelf guard above does not
+                        # cover, so category alone was never going to be enough.
+                        if (_it or {}).get("state") == "waiting":
+                            logger.info("sweep: refused to auto-close WAITING record %s", iid)
+                            continue
                         if iid in open_ids:   # only close ids that are really open — never guess
-                            ok2, _r = await asyncio.to_thread(daybank.update_item, iid, "done")
+                            ok2, _r = await asyncio.to_thread(
+                                daybank.update_item, iid, "done", closed_by="ace")
                             if ok2:
                                 closed += 1
                         continue
