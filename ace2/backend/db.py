@@ -600,6 +600,46 @@ def _waiting_on(text: str) -> str:
     return (m.group(1).strip().rstrip(".,;") if m else "")
 
 
+# ── FIVE BUCKETS (Phase 4, 2026-09-05) — METADATA ONLY, NOT A RE-FILING ────────────
+# Brady's framing: file an ACTION by WHOSE TIME IT TAKES, not what it is about — the haircut
+# is Personal even though it is for Groundworks.
+#
+# ⚠ THIS DERIVATION IS A DEFAULT, NOT TRUTH, AND THE BOARD IS NOT REORGANISED BY IT. Measured
+# against the 36 live open actions it got ~10% wrong, and the failures are structural, not
+# tunable: "Ace Ready Mix" (a concrete supplier) read as Ace's own work, and the Morgan row —
+# "how does the offer read against Groundworks + Damon by then" — read as Groundworks when it
+# only COMPARES against it. Keyword matching cannot separate what a row is ABOUT from what it
+# MENTIONS. Ship the field, keep the 11 categories doing their job, and let a judgment pass
+# (the dedup judge pattern) or Brady correct these before anything is grouped by bucket.
+BUCKETS = ("GFI/PFI", "Groundworks", "Side Work", "Personal", "Ace")
+# Personal time wins first: an errand is his own hours whoever the occasion belongs to.
+# "birthday" was here and cost the Morgan row: "sitting on it until his birthday, Oct 21" is a
+# DATE, not an errand. Only unambiguous errand nouns survive.
+_B_ERRAND = _re.compile(r"\b(dress|haircut|gift\s+for|deed|doctor|dentist|groceries)\b", _re.I)
+_B_ACE = _re.compile(r"\b(?!ace\s+ready\s*mix)(ace\b|ace's|defect|upgrade\s+session"
+                     r"|railway|deploy-ready)\b", _re.I)
+_B_PFI = _re.compile(r"\b(pfi|gfi|iul|annuity|carrier|paramed|rollover|fta|zenbusiness"
+                     r"|commission|chris\s+stout|the\s+offer|prospect)\b", _re.I)
+_B_GROUNDWORKS = _re.compile(r"\b(groundworks|tony\b|inspector)\b", _re.I)
+_B_SIDE = _re.compile(r"\b(damon|woody|concrete|pour(?:s|ing)?|ready\s*mix|greenhouse|uncle"
+                      r"|gantz|dns|site\s+build)\b", _re.I)
+
+
+def derive_bucket(text: str, cat: str) -> str:
+    t = text or ""
+    if _B_ERRAND.search(t):                      # his own hours, whoever it is for
+        return "Personal"
+    if cat == "Tech" or (_B_ACE.search(t) and not _re.search(r"ace\s+ready\s*mix", t, _re.I)):
+        return "Ace"
+    if _B_PFI.search(t) or cat in ("Deals", "Agents", "Networking"):
+        return "GFI/PFI"
+    if _B_GROUNDWORKS.search(t):
+        return "Groundworks"
+    if _B_SIDE.search(t):
+        return "Side Work"
+    return "Personal"
+
+
 def _derive_entry(it) -> str:
     """'record' only on a strong signal; everything else stays an action."""
     tags = it.get("tags") or []
@@ -656,6 +696,8 @@ def read_items(active_only: bool = True) -> list:
             it["entry"] = r[10] or _derive_entry(it)
             it["state"] = r[11] or (_derive_state(it) if it["entry"] == "record" else None)
             it["waiting_on"] = r[12] or (_waiting_on(it.get("text")) if it["state"] == "waiting" else None)
+            it["bucket"] = (derive_bucket(it.get("text"), _item_cat(it))
+                            if it["entry"] == "action" else None)
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None
