@@ -1,3 +1,7 @@
 .recovered/
 .venv-test/
 __pycache__/
+
+# Local isolated verification environments
+.venv/
+.venv-runtime/

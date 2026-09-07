@@ -22,6 +22,7 @@ by their header names, so moving a column or inserting a section does not break 
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ logger = logging.getLogger("ace2.bills")
 
 # Brady's "Monthly Bills, Debts, Subscriptions, Income" workbook.
 SHEET_ID = "1jLIskX1IYDnt4T5DuEKUxqD_LjZxqIT3NPuTusGP7nw"
-BILLS_TAB = "A1:F60"          # tab 1 — Bill / Due Day / Monthly Amount / Paid? / Paid From / Notes
+BILLS_TAB = "'1. Bills & Expenses'!A1:L1000"          # tab 1 — Bill / Due Day / Monthly Amount / Paid? / Paid From / Notes
 
 _MONEY = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
 _DAY = re.compile(r"^\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*$", re.I)
@@ -85,8 +86,16 @@ def parse_bills(rows: list, today=None) -> list:
     """
     today = today or datetime.now(EASTERN).date()
     out, section = [], ""
-    for row in rows or []:
-        cells = [(c or "").strip() for c in (list(row) + ["", "", "", "", "", ""])[:6]]
+    columns = None
+    for row_number, row in enumerate(rows or [], 1):
+        raw = [str(c).strip() if c is not None else "" for c in row]
+        if "Bill / Expense" in raw and "Monthly Amount" in raw:
+            columns = {label: i for i, label in enumerate(raw)}
+            continue
+        if columns is None:
+            continue
+        labels = ("Bill / Expense", "Due Day", "Monthly Amount", "Paid?", "Paid From", "Notes")
+        cells = [raw[columns[label]] if label in columns and columns[label] < len(raw) else "" for label in labels]
         name, due_cell, amount_cell, paid_cell, from_cell, notes = cells
         if not name:
             continue
@@ -103,45 +112,41 @@ def parse_bills(rows: list, today=None) -> list:
         if amount is None:
             continue
         day = _day(due_cell)
+        note_due = None
+        if not day:
+            # A date in Notes is evidence to display, never silently discarded.
+            hit = re.search(r"(?:due|by|before)\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(20\d{2}))?", notes, re.I)
+            if hit:
+                month = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"].index(hit[1][:3].lower()) + 1
+                try:
+                    note_due = today.replace(year=int(hit[3] or today.year), month=month, day=int(hit[2]))
+                except ValueError:
+                    pass
         out.append({
+            "source_row": row_number, "date_from_notes": bool(note_due),
             "name": name, "section": section, "amount": amount,
-            "day": day, "due_on": _next_occurrence(day, today) if day else None,
-            "paid": bool(paid_cell), "paid_from": from_cell, "notes": notes,
+            "day": day, "due_on": _next_occurrence(day, today) if day else note_due,
+            "paid": paid_cell.casefold() in ("yes", "paid", "true", "✓", "✔", "✅"), "paid_from": from_cell, "notes": notes,
         })
     return out
 
 
 async def fetch_bills(today=None) -> tuple:
     """(bills, error). Never raises — a money answer must fail loudly, not silently."""
-    from . import mcp_client
-    if not mcp_client.enabled():
-        return [], "the Workspace connector is off, so I can't reach your budget sheet"
-    # The MCP server's parameter spelling is not exposed anywhere we can read (/diag/mcp lists
-    # tool NAMES only), and guessing it wrong would fail silently — the brief would just lose
-    # its money block with no error anyone sees. So try the known conventions and take the
-    # first that answers. Whichever wins is logged, so this can be pinned later.
-    attempts = [
-        {"spreadsheet_id": SHEET_ID, "range_name": BILLS_TAB},
-        {"spreadsheet_id": SHEET_ID, "range": BILLS_TAB},
-        {"spreadsheetId": SHEET_ID, "rangeName": BILLS_TAB},
-        {"spreadsheetId": SHEET_ID, "range": BILLS_TAB},
-    ]
-    raw, last = "", ""
-    for args in attempts:
-        out = await mcp_client.call("mcp_read_sheet_values", args)
-        if out and not out.startswith("⚠️") and "(no content" not in out:
-            logger.info("bills sheet read OK with params %s", sorted(args))
-            raw = out
-            break
-        last = out or ""
-    if not raw:
-        return [], (last or "no answer from the sheet").lstrip("⚠️ ").strip()
-    rows = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        rows.append([c.strip() for c in line.split("\t")] if "\t" in line
-                    else [c.strip() for c in line.split("|")])
+    # Structured Sheets values avoid guessed MCP argument names and parsing prose.
+    # Reuse Ace's existing Google credential flow; missing access fails explicitly.
+    def read():
+        from googleapiclient.discovery import build
+        from .google_client import get_google_creds
+        service = build("sheets", "v4", credentials=get_google_creds(), cache_discovery=False)
+        return service.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID, range=BILLS_TAB,
+            valueRenderOption="FORMATTED_VALUE").execute().get("values", [])
+    try:
+        rows = await asyncio.to_thread(read)
+    except Exception as e:
+        logger.warning("budget sheet read unavailable: %s", type(e).__name__)
+        return [], "I could not verify the budget spreadsheet. Do not substitute board figures."
     bills = parse_bills(rows, today)
     if not bills:
         return [], "I reached the sheet but could not read any bill rows out of it"
@@ -164,7 +169,9 @@ def format_due_soon(bills: list, within_days: int = 10, today=None) -> str:
     for b in soon:
         when = (b["due_on"] - today).days
         label = "TODAY" if when == 0 else "tomorrow" if when == 1 else "in %dd" % when
-        line = "  %s — $%.2f — %s" % (b["name"], b["amount"], label)
+        line = "  %s — $%.2f — %s (sheet row %s)" % (b["name"], b["amount"], label, b.get("source_row", "?"))
+        if b.get("date_from_notes"):
+            line += " [date from Notes; verify year if omitted]"
         if b["notes"]:
             line += "  [%s]" % b["notes"][:90]
         lines.append(line)

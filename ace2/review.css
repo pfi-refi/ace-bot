@@ -1,0 +1,9 @@
+#ace-review { color:#e4f2f3; background:#081519; border:1px solid #43696b; border-radius:16px; width:min(760px,92vw); max-height:85dvh; padding:24px; font:16px/1.5 system-ui; }
+#ace-review::backdrop { background:#000b; }
+#ace-review article { border:1px solid #345053; border-radius:10px; padding:16px; margin:16px 0; }
+#ace-review pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
+#ace-review button { min-height:44px; padding:8px 16px; margin:8px 8px 8px 0; cursor:pointer; color:#e4f2f3; background:#163c42; border:1px solid #668b8e; border-radius:8px; }
+#ace-review button:disabled { opacity:.55; cursor:wait; }
+#ace-review textarea { box-sizing:border-box; width:100%; color:#edfafa; background:#071013; padding:12px; font:inherit; }
+#ace-review strong,#ace-review label { display:block; }
+#ace-review small { color:#b0c9cd; }

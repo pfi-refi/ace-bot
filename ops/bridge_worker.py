@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""ACE MAX BRIDGE — worker half.
+
+Runs on Brady's iMac via launchd (every 15 min). Pulls due background jobs from
+Ace's Railway server (briefs + learning sweeps, with the server's own prompts),
+runs the model calls through Claude Code on Brady's Max plan (subscription usage; verify eligibility and limits), and
+posts results back — the server files them through its normal guarded stores.
+
+Fails SILENT and SAFE at every step: no claude CLI, no key in Railway, server
+unreachable, Mac asleep — the server's own loops cover everything on the API,
+exactly as before the bridge existed. Authentication is preflighted before claiming; server claim recovery still needs repair.
+
+Stop it forever:  launchctl unload ~/Library/LaunchAgents/com.pfi.ace-bridge.plist
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+from datetime import datetime
+
+HOME = os.path.expanduser("~")
+DIR = os.path.join(HOME, "ace-bridge")
+LOG = os.path.join(DIR, "bridge.log")
+CONFIG = os.path.join(DIR, "config.json")
+
+
+def log(msg: str) -> None:
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 262144:  # trim at 256KB
+            os.rename(LOG, LOG + ".1")
+        with open(LOG, "a") as f:
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} {msg}\n")
+    except Exception:
+        pass
+
+
+def find_claude(cfg) -> str:
+    cand = (cfg.get("claude_bin") or "").strip()
+    if cand and os.path.exists(os.path.expanduser(cand)):
+        return os.path.expanduser(cand)
+    hit = shutil.which("claude")
+    if hit:
+        return hit
+    for p in ("~/.local/bin/claude", "/usr/local/bin/claude", "/opt/homebrew/bin/claude",
+              "~/.claude/local/claude"):
+        px = os.path.expanduser(p)
+        if os.path.exists(px):
+            return px
+    return ""
+
+
+def api(cfg, path, body=None):
+    req = urllib.request.Request(
+        cfg["base"] + path,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json", "X-Bridge-Key": cfg["key"]},
+        method="POST" if body is not None else "GET")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def think(claude_bin, model, prompt) -> str:
+    """One model call through Claude Code headless on the Max plan."""
+    r = subprocess.run(
+        [claude_bin, "-p", prompt, "--model", model, "--output-format", "text"],
+        capture_output=True, text=True, timeout=420)
+    if r.returncode != 0:
+        raise RuntimeError(f"claude exited {r.returncode}: {(r.stderr or '')[:200]}")
+    return (r.stdout or "").strip()
+
+
+def main() -> int:
+    try:
+        with open(CONFIG) as config_file:
+            cfg = json.load(config_file)
+    except Exception as e:
+        log(f"no config: {e}")
+        return 0
+    claude_bin = find_claude(cfg)
+    if not claude_bin:
+        log("claude CLI not installed yet — idle (install: https://claude.ai/install.sh)")
+        return 0
+    # Never claim server jobs when the exact configured CLI cannot authenticate.
+    try:
+        status = subprocess.run([claude_bin, "auth", "status"], capture_output=True,
+                                text=True, timeout=15)
+        auth = json.loads(status.stdout or "{}")
+        if status.returncode != 0 or auth.get("loggedIn") is not True:
+            log("authentication unavailable — no jobs claimed; log in with the configured CLI")
+            return 1
+    except Exception:
+        log("authentication preflight failed — no jobs claimed")
+        return 1
+    try:
+        data = api(cfg, "/bridge/jobs")
+    except urllib.error.HTTPError as e:
+        if e.code == 503:
+            log("bridge dormant — ACE2_BRIDGE_KEY not set in Railway yet")
+        elif e.code == 401:
+            log("bridge key MISMATCH — Railway ACE2_BRIDGE_KEY differs from config.json")
+        else:
+            log(f"jobs fetch HTTP {e.code}")
+        return 0
+    except Exception as e:
+        log(f"server unreachable: {e}")
+        return 0
+    jobs = data.get("jobs") or []
+    if not jobs:
+        log("no due jobs")
+        return 0
+    model = cfg.get("model") or "sonnet"
+    for job in jobs:
+        try:
+            if job.get("job") == "brief":
+                text = think(claude_bin, model, job["prompt"])
+                res = api(cfg, "/bridge/complete",
+                          {"job": "brief", "kind": job["kind"], "text": text})
+                log(f"brief:{job['kind']} -> {res}")
+            elif job.get("job") == "sweep":
+                facts = think(claude_bin, model, job["facts_prompt"])
+                triage = think(claude_bin, model, job["triage_prompt"])
+                reflection = think(claude_bin, model, job["reflection_prompt"])
+                res = api(cfg, "/bridge/complete",
+                          {"job": "sweep", "hash": job.get("hash") or 0,
+                           "facts": facts, "triage": triage, "reflection": reflection})
+                log(f"sweep -> {res}")
+        except Exception as e:
+            log(f"job {job.get('job')} failed: {e}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

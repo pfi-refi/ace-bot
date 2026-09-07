@@ -8,8 +8,8 @@
    API data (/bootstrap, /chat, /tts, /history, /memory, …) and the WebSocket are
    never cached — stale calendar data is worse than none in a command center. */
 
-const CACHE_VERSION = 'ace2-shell-v65';   // v65: chat readability + one status line
-const SHELL = ['/', '/styles.css', '/app.js', '/manifest.json',
+const CACHE_VERSION = 'ace2-shell-v65-review1';   // v65: chat readability + one status line
+const SHELL = ['/', '/styles.css', '/app.js', '/review.js', '/review.css', '/manifest.json',
                '/icon-192.png', '/icon-512.png', '/icon-maskable.png', '/icon-180.png'];
 
 self.addEventListener('install', (e) => {

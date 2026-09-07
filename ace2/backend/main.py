@@ -48,8 +48,8 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from .public_assets import PublicAssets
+from pydantic import BaseModel, StrictBool
 
 from . import chat, daybank, db, history, memory_db, voice
 from .brain import (
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.0"
+VERSION = "v2.0.1-review-candidate"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -2044,10 +2044,62 @@ async def bridge_complete(req: BridgeResultReq, request: Request):
     return {"ok": False, "error": "unknown job"}
 
 
+# Explicit authenticated decisions; execute only the stored reviewed payload.
+class ReviewDecision(BaseModel):
+    approve: StrictBool
+
+@app.get("/reviews", dependencies=[Depends(require_auth)])
+async def reviews():
+    from . import review_store
+    try:
+        return {"items": await asyncio.to_thread(review_store.list_approvals)}
+    except Exception:
+        raise HTTPException(503, "Review storage unavailable; nothing executed.")
+
+@app.post("/reviews/{proposal_id}", dependencies=[Depends(require_auth)])
+async def review_decide(proposal_id: str, req: ReviewDecision):
+    from . import review_store, tools
+    from .integrations import mcp_client
+    try:
+        proposal = await asyncio.to_thread(review_store.claim, proposal_id, req.approve)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    if not req.approve:
+        return {"state": "rejected", "result": "Rejected. Nothing executed."}
+    try:
+        name, args = proposal["tool"], proposal["args"]
+        if mcp_client.is_mcp_tool(name):
+            result = await mcp_client.call(name, args)
+        else:
+            result = await asyncio.to_thread(tools.execute, name, args)
+        state = "failed" if str(result).lstrip().startswith("⚠") else "unknown"
+        # Legacy executors return prose, not verified structured outcomes.
+        await asyncio.to_thread(review_store.finish, proposal_id, state, result)
+        return {"state": state, "result": result}
+    except Exception:
+        await asyncio.to_thread(review_store.finish, proposal_id, "unknown", "Interrupted. Verify the destination before trying again.")
+        raise HTTPException(502, "Outcome uncertain. Verify the destination before retrying.")
+
+@app.get("/plan/draft", dependencies=[Depends(require_auth)])
+async def plan_draft():
+    from . import review_store
+    return {"entries": await asyncio.to_thread(review_store.read_plan)}
+
+class PlanDraftReq(BaseModel):
+    text: str
+
+@app.post("/plan/draft", dependencies=[Depends(require_auth)])
+async def save_plan_draft(req: PlanDraftReq):
+    from . import review_store
+    if not req.text.strip() or len(req.text) > 40000:
+        raise HTTPException(400, "Enter a draft between 1 and 40,000 characters.")
+    await asyncio.to_thread(review_store.append_plan, "user", req.text.strip())
+    return {"ok": True, "state": "draft", "message": "Draft saved. No calendar events created."}
+
 # ── Static frontend (mounted last so API routes win) ────────────────────────────
 @app.get("/")
 async def root():
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="static")
+app.mount("/", PublicAssets(directory=str(FRONTEND_DIR), html=False), name="static")

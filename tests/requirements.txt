@@ -1,0 +1,2 @@
+# In addition to ace2/backend/requirements.txt; local disposable integration tests only.
+pgserver==0.1.4

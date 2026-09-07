@@ -888,6 +888,32 @@ def _dup_candidates(text: str, norm: set, items: list, limit: int = 4) -> list:
     return [it for _, it in out[:limit]]
 
 
+def _repeat_result(existing, text, due, parent_id=None):
+    """Only verbatim repeats are silent no-ops. Preserve new details for review."""
+    same_text = " ".join(text.casefold().split()) == " ".join(existing.get("text", "").casefold().split())
+    same_due = not due or pin_due(due) == pin_due(existing.get("due"))
+    same_parent = (parent_id or None) == (existing.get("parent_id") or None)
+    if same_text and same_due and same_parent:
+        return True, {**existing, "dup": True}
+    return False, ("REVIEW EXISTING ITEM [" + existing["id"] + "]: " + existing.get("text", "")
+                   + " — new wording/date was NOT saved. Use update_item on this ID if it is the "
+                   "same obligation; otherwise clarify the distinct person, purpose or occurrence. "
+                   "Original requested text: " + text)
+
+
+def _dedup_eligible(existing, text, due, parent_id):
+    if existing.get("superseded_by") or existing.get("status") == "dropped":
+        return False
+    if _distinguishing(text, existing.get("text", "")):
+        return False
+    if (parent_id or None) != (existing.get("parent_id") or None):
+        return False
+    # A new explicitly dated occurrence is distinct from an earlier completed one.
+    if existing.get("status") == "done" and due and pin_due(due) != pin_due(existing.get("due")):
+        return False
+    return True
+
+
 def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True,
              parent_id: str = None) -> tuple:
     text = (text or "").strip()
@@ -925,6 +951,8 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
             best, best_score = None, 0.0           # best cross-column (different column) match
             best_sc, best_sc_score = None, 0.0     # best SAME-column match
             for it in read_items(active_only=False):
+                if not _dedup_eligible(it, text, due, parent_id):
+                    continue
                 other = _norm_item(it.get("text", ""))
                 if not other:
                     continue
@@ -959,7 +987,7 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                 elif score > best_score:
                     best_score, best = score, it
             if best_sc and best_sc_score >= 0.85:
-                return True, {**best_sc, "dup": True}          # true same-column twin
+                return _repeat_result(best_sc, text, due, parent_id)          # true same-column twin
             # NEAR-IDENTICAL TEXT IS A TWIN, WHATEVER COLUMN IT LANDS IN (2026-08-26). The
             # cross-column allowance below exists to stop a Bills item being swallowed by a
             # differently-worded Money item — real, keep it. But it also let the SAME SENTENCE
@@ -973,7 +1001,7 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
             # (truck payment vs truck arrears, Mission Lane payoff vs minimum, the two Klarna
             # accounts) score 0.06-0.35 — nowhere near the line, so the data-loss fix holds.
             if best and best_score >= 0.90:
-                return True, {**best, "dup": True, "cross_column": True}
+                return _repeat_result(best, text, due, parent_id)
             if best and best_score >= 0.85:                     # only a cross-column match
                 similar = {"id": best["id"], "text": best["text"], "status": best["status"]}
             # Trigram second opinion: catches rewordings token overlap can't (nicknames,
@@ -988,8 +1016,8 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                     if row and row[3] is not None:
                         ex = next((i for i in read_items(active_only=False)
                                    if i["id"] == row[0]), None)
-                        if float(row[3]) >= 0.72 and ex and _same_col(ex):
-                            return True, {**ex, "dup": True}
+                        if float(row[3]) >= 0.72 and ex and _same_col(ex) and _dedup_eligible(ex, text, due, parent_id):
+                            return _repeat_result(ex, text, due, parent_id)
                         if float(row[3]) >= 0.5 and ex and not similar:
                             similar = {"id": row[0], "text": row[1], "status": row[2]}
                 except Exception:
@@ -1002,13 +1030,13 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     if dedup and _DUP_JUDGE is not None:
         try:
             _norm = _norm_item(text)
-            _cands = _dup_candidates(text, _norm, read_items(active_only=False)) if _norm else []
+            _cands = _dup_candidates(text, _norm, [it for it in read_items(active_only=False) if _dedup_eligible(it, text, due, parent_id)]) if _norm else []
             if _cands:
                 _hit = _DUP_JUDGE(text, _cands) or ""
                 _match = next((c for c in _cands if c.get("id") == _hit), None)
                 if _match:
                     logger.info("semantic dedup: %r collapsed into %s", text[:60], _match["id"])
-                    return True, {**_match, "dup": True, "semantic": True}
+                    return _repeat_result(_match, text, due, parent_id)
         except Exception as e:                      # a judge failure must never block a write
             logger.warning("semantic dedup skipped: %s", e)
     item = {
@@ -1256,7 +1284,7 @@ def update_item(item_id: str, status: str = None, text: str = None,
     item_id = (item_id or "").strip()
     if not item_id and (match or "").strip():
         cands = find_items(match, status="open")
-        if len(cands) == 1:
+        if len(cands) == 1 and " ".join((match or "").casefold().split()) == " ".join(cands[0].get("text", "").casefold().split()):
             item_id = cands[0]["id"]
         elif not cands:
             return False, f"no open item matching '{match}'"

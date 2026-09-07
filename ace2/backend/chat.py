@@ -77,25 +77,15 @@ VOICE_MODEL = os.environ.get("ACE2_VOICE_MODEL", "claude-haiku-4-5-20251001")
 # LEAN MODE: ALL background work (sweep, briefs, watchdog, recap, graph) rides this one
 # knob — Haiku 4.5 ($1/$5) does structured triage/recap work fine. Was Sonnet 5.
 LEARN_MODEL = os.environ.get("ACE2_LEARN_MODEL", "claude-haiku-4-5-20251001")
-# On voice Ace gets the FULL toolset — send_email included as of 2026-07-19, because the
-# confirm-before-execute gate below now guards it on every path (Ace asks out loud, Brady
-# says yes, only then does the second call actually send). Built once for cache stability.
+# Voice may PREPARE outward actions. Execution requires the explicit Review tray.
+# Tool schemas remain stable for cache reuse.
 # Source reading is a TYPED-path activity: it returns dozens of lines to reason over, which
 # is the opposite of what a live call needs, and the voice brain is the small fast model.
 # Brady asking "why was the brief off?" out loud still works — Ace answers from context and
 # can read the code properly when he is back at the keyboard.
 _VOICE_TOOL_DENY = {"read_own_code"}
 
-# ---- Confirm-before-execute gate (guardrails, 2026-07-19) ----------------------------
-# Two-phase confirm for outward/destructive tools. A gated tool NEVER executes on its
-# first call: it arms a per-TOOL "permission ticket" and returns CONFIRMATION REQUIRED,
-# so Ace must state exactly what he's about to do and ask Brady. It executes only when
-# (a) the model re-calls with "confirmed": true, (b) a ticket for that tool was armed on
-# an EARLIER turn (so Ace cannot self-approve inside one turn), and (c) the ticket is
-# still fresh. `_turn_seq` is a monotonic counter bumped once per stream_turn call —
-# immune to the 160-message transcript cap that a message-count deadlocks on. On the
-# yes-turn we execute the args the model RE-SENDS (no byte-identical replay), so a fresh
-# email body never livelocks the confirm.
+# ---- Explicit action review: user inspects immutable payload in Review UI. ----
 _CONFIRM_ALWAYS = {
     "send_email", "mcp_send_gmail_message",   # outbound to third parties
     "delete_calendar_event",                  # destroys a meeting
@@ -105,31 +95,10 @@ _CONFIRM_ALWAYS = {
 _DESTRUCTIVE_ACTIONS = {"delete", "remove", "clear", "cancel", "trash"}
 _DESTRUCTIVE_HINTS = ("delete", "remove", "clear", "trash", "cancel")
 _SHARE_UPDATES = {"all", "externalonly", "true", "1"}
-_CONFIRM_TTL_SEC = 300
-_pending_confirm: dict = {}   # tool_name -> {"turn": int, "ts": float}
 _turn_seq = [0]
+_turn_user_text = [""]
 
-_CONFIRM_MSG = (
-    "CONFIRMATION REQUIRED — nothing was executed. Tell Brady in ONE plain sentence exactly "
-    "what this will do (for an email: who it goes to and the subject; for a delete or change: "
-    "which item and what happens to it) and ask him to confirm. Do NOT say it's done — it has "
-    "not happened. Only after he clearly says yes on a LATER turn, call this same tool ONCE more "
-    "with the same details plus \"confirmed\": true — then REPORT THE RESULT YOU GET BACK and "
-    "stop; do not call it a third time. If he wants any change, call it again with the updated "
-    "details (no confirmed) so he can okay the new version. If he says no, drop it."
-)
-# Second+ block of the SAME tool inside one turn: the model is churning (re-calling with
-# confirmed:true in the same breath — approval can only arrive on Brady's NEXT turn). Cut the
-# retry loop dead: a hard STOP that leaves it exactly one legal move.
-_CONFIRM_STOP_MSG = (
-    "STOP — do NOT call this tool (or any tool) again this turn; it will keep coming back "
-    "blocked, because approval can only arrive on Brady's NEXT turn. Right now say ONE short "
-    "sentence telling him exactly what you're about to do and asking him to confirm — then "
-    "end your turn and wait for his answer."
-)
-
-
-def _next_turn_id() -> int:
+def _next_turn_id():
     _turn_seq[0] += 1
     return _turn_seq[0]
 
@@ -160,54 +129,14 @@ def _needs_confirm(name: str, args: dict) -> bool:
     return False
 
 
-# Per-tool sig keys (2026-08-23 scrub C1): the ticket binds the fields that IDENTIFY the action
-# Brady approved — never long free-text the model must REGENERATE on the yes-turn (tool_use args
-# (2026-08-25) The args-signature machinery that used to live here was REMOVED — see the
-# history note inside _confirm_gate. It deadlocked the gate in practice. Deliberately not
-# reinstated; if you want approve-X-execute-X enforcement, test it live over many rounds.
-
-# Plain-language approval. The model is SUPPOSED to re-call with confirmed:true, but that
-# instruction lives in a TOOL RESULT — which is never persisted — so on the next turn it has no
-# memory of being asked and often just re-calls without the flag. That is why Brady confirmed a
-# delete SIX times on 2026-08-25 and nothing executed. Approval is therefore ALSO detected
-# deterministically from HIS words, exactly like Discreet Mode's phrase detection.
-_APPROVE_RE = re.compile(
-    r"\b(y(es|ep|eah|up)|confirm(ed|ing)?|approved?|permission|go ahead|do it|"
-    r"send it|delete it|proceed|that'?s right|sounds right|please do|correct)\b", re.I)
-_turn_user_text = [""]   # this turn's user message; single-user system, set in stream_turn
-
-
 def _confirm_gate(name: str, args: dict, turn_id: int):
-    """Returns (blocked: bool, clean_args: dict). Arms/consumes per-tool tickets.
-    clean_args always has confirm flags stripped so they never reach an executor."""
+    """Gated actions only execute from the authenticated review endpoint."""
     clean = _strip_confirm(args)
     if not _needs_confirm(name, args):
         return False, clean
-    now = time.time()
-    for k in [k for k, v in _pending_confirm.items() if now - v["ts"] > _CONFIRM_TTL_SEC]:
-        _pending_confirm.pop(k, None)
-    ticket = _pending_confirm.get(name)
-    armed_earlier = bool(ticket) and ticket["turn"] < turn_id
-    # TWO ways to approve (2026-08-25). The model is supposed to re-call with confirmed:true, but
-    # that instruction lives in a never-persisted tool result, so it frequently doesn't — Brady
-    # said yes SIX times and nothing ran. So a plain-language approval in HIS message counts too.
-    #
-    # ⚠ HISTORY — do NOT "improve" this again without live multi-round testing:
-    #  • 2026-08-19 added an args-SIGNATURE check (approve X, execute X). In practice the model
-    #    re-states the call each turn and any drift changed the signature → the gate re-armed
-    #    forever → Brady confirmed a delete SIX times and nothing ran.
-    #  • 2026-08-25 then executed the TICKET's stored args instead — which replayed a STALE
-    #    request across exchanges: asked to delete event 2, it deleted event 1. Worse.
-    # Back to the behavior that ran correctly for months: the ticket proves an ask happened on an
-    # EARLIER turn; the CURRENT call's args are what execute. The model re-states the target in
-    # the same breath it executes, and the confirm text Brady sees comes from that same call.
-    approved = armed_earlier and (bool(args.get("confirmed"))
-                                  or bool(_APPROVE_RE.search(_turn_user_text[0] or "")))
-    if approved:
-        _pending_confirm.pop(name, None)   # single-use — a fresh call must re-arm
-        return False, clean
-    _pending_confirm[name] = {"turn": turn_id, "ts": now}
+    # All outward/destructive requests require an explicit decision in Review.
     return True, clean
+
 EFFORT = os.environ.get("ACE2_EFFORT", "low")   # low|medium|high|xhigh|max — LEAN MODE: was medium
 # EFFORT PER ROUTE (Phase 6 step 5, 2026-09-06). Auditing this found it is ALREADY route-
 # scoped: output_config is set on the typed path only, and the background passes (learn
@@ -2415,12 +2344,17 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         await emit("error", {"text": f"⚠️ Couldn't reach your data: {e}"})
         return ""
 
+    try:
+        from . import planning
+        await asyncio.to_thread(planning.capture, "user", user_text)
+        ctx += await asyncio.to_thread(planning.context)
+    except Exception as e:
+        logger.warning("planning notebook unavailable: %s", type(e).__name__)
+
     full_reply = []
     confirmations = []
     handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
     blocked_counts: dict = {}   # per-tool confirm-gate blocks THIS turn (2nd+ gets the STOP message)
-    executed_gated: set = set()  # gated tools that ALREADY RAN this turn — a reflex re-call
-                                 # must be told 'done', never re-gated into a false denial
     passthrough = {t["name"] for t in (extra_tools or [])}
     passthrough_called = False   # an el_tool fired (end_call/skip_turn) — the platform takes over
     # One monotonic id per real user turn — the confirm gate uses it to tell "Brady
@@ -2600,31 +2534,9 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 is_ui = block.name in tools.UI_TOOLS
-                # ALREADY DONE THIS TURN (2026-08-25): _CONFIRM_MSG tells the model to "call this
-                # same tool again with confirmed:true" — so after an APPROVED execution it often
-                # obeys and calls once more. The ticket is single-use and already consumed, so the
-                # second call re-armed the gate and returned "nothing was executed", which the
-                # model then faithfully narrated — Ace telling Brady a delete didn't happen right
-                # after it did. Short-circuit the repeat with the truth instead.
-                # Keyed by tool + ARGS, never tool alone: deleting event A then event B in the
-                # same turn are different actions, and a name-only key made B falsely report as
-                # done without running (caught live 2026-08-25, round 2 of 3).
-                try:
-                    _act_key = block.name + "|" + json.dumps(
-                        _strip_confirm(dict(block.input)), sort_keys=True, default=str)
-                except Exception:
-                    _act_key = block.name + "|" + repr(block.input)
-                if _act_key in executed_gated:
-                    tool_results.append({"type": "tool_result", "tool_use_id": block.id,
-                                         "content": ("ALREADY EXECUTED this turn — it completed "
-                                                     "successfully. Report it as DONE and do not "
-                                                     "call it again for the same target.")})
-                    continue
                 # Gate BEFORE any "running" narration — a blocked action must never be
                 # spoken/painted as if it happened (it's about to be asked, not done).
                 blocked, use_args = _confirm_gate(block.name, dict(block.input), turn_id)
-                if not blocked and block.name in _CONFIRM_ALWAYS:
-                    executed_gated.add(_act_key)
                 if blocked:
                     # No action pill/narration; just a keep-alive token so a voice
                     # turn's confirmation question doesn't stall behind a silent round-trip.
@@ -2633,7 +2545,19 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     # Re-blocked in the SAME turn = the model is retrying with confirmed:true
                     # in the same breath; without a hard STOP it churns silent round-trips
                     # until MAX_TOOL_ITERS while the caller hears only continuers.
-                    result = _CONFIRM_MSG if blocked_counts[block.name] == 1 else _CONFIRM_STOP_MSG
+                    if blocked_counts[block.name] == 1:
+                        from . import review_store
+                        try:
+                            proposal_id = await asyncio.to_thread(review_store.propose, block.name, use_args)
+                            result = ("REVIEW REQUIRED. Nothing executed. Exact details saved in Review, "
+                                      "proposal " + proposal_id + ". Ask Brady to open Review to approve "
+                                      "or reject. Spoken yes and confirmed=true cannot execute it. "
+                                      "Reject an old proposal before preparing changed details.")
+                            await emit("confirmation", {"text": "Action prepared — open Review to inspect it."})
+                        except Exception:
+                            result = "Review storage unavailable. Nothing executed. Tell Brady the action is blocked."
+                    else:
+                        result = "STOP: action is waiting in Review. Do not call it again or claim it ran."
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 label = tools.TOOL_LABELS.get(block.name) or \
@@ -2671,6 +2595,11 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             reply = ("I'm here — say that again for me?" if fast else
                      "I ran out of steps on that one before I could answer. Ask me again and "
                      "I'll take a narrower run at it.")
+        try:
+            from . import planning
+            await asyncio.to_thread(planning.capture, "assistant", reply)
+        except Exception as e:
+            logger.warning("plan draft save failed: %s", type(e).__name__)
         await emit("final", {"text": reply})
 
         # Persist to 2.0's OWN history (best-effort; never blocks the reply). ONLY the real
@@ -2687,6 +2616,18 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
 
         return reply
 
+    except asyncio.CancelledError:
+        partial = "".join(full_reply)
+        tail = "".join(turn_text) if "turn_text" in locals() else ""
+        if tail and not partial.endswith(tail):
+            partial += tail
+        if partial:
+            try:
+                from . import planning
+                await asyncio.shield(asyncio.to_thread(planning.capture, "assistant", "INTERRUPTED DRAFT — not confirmed complete.\n" + partial))
+            except Exception:
+                logger.warning("interrupted draft could not be saved")
+        raise
     except Exception as e:
         logger.error("stream_turn error: %s", e)
         await emit("error", {"text": f"⚠️ {e}"})
