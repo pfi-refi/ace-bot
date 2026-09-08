@@ -517,36 +517,28 @@ async def weather():
     return await get_weather()  # already async (httpx)
 
 
-@app.get("/daybank", dependencies=[Depends(require_auth)])
-async def _board_payload() -> dict:
-    """The board as every view should see it: decorated rows plus lane counts.
+async def board_payload(all_items: bool = True) -> dict:
+    """The board as EVERY caller should see it: decorated rows plus lane counts.
 
-    /daybank/update used to answer with `read_items(True)` — the ACTIVE slice — while the
-    panel had loaded the full set, so one checkbox silently shrank the list and blanked the
-    counts. Both now speak the same shape, which is what makes a save look like a save
-    rather than like a different board.
+    One builder, used by the GET route and by every add/update response. Successful saves
+    used to answer with raw `read_items` rows, so the panel — which renders from `lane`,
+    `completable` and the summary — went blank-laned and zero-counted after every edit until
+    a full reload. `all_items` is explicit rather than inherited so a caller can never
+    silently shrink the visible set (Codex, 2026-09-08).
     """
     from . import classify
-    items = await asyncio.to_thread(daybank.read_items, False)
-    return {"items": [classify.decorate(i) for i in items],
-            "summary": classify.summarise(items)}
-
-
-async def daybank_read(all: bool = False):
-    # all=true also returns done items across days (for the panel's "Done" lens); default is the
-    # active view (open items + anything touched today).
-    #
-    # Every row now carries its LANE, decided once here (2026-09-08). The screen used to derive
-    # its own answer and disagreed with this one: a dated waiting record showed a working
-    # "Mark done" box in the overdue lane while the Parked section disabled the very same box.
-    # Views filter on `lane`; they no longer re-derive it. `summary` carries per-lane counts so
-    # a view can prove what it is not showing instead of silently hiding it.
-    from . import classify
-    items = await asyncio.to_thread(daybank.read_items, not all)
+    items = await asyncio.to_thread(daybank.read_items, not all_items)
     return {"items": [classify.decorate(i) for i in items],
             "summary": classify.summarise(items),
             "lane_order": list(classify.LANE_ORDER),
             "lane_labels": classify.LANE_LABELS}
+
+
+@app.get("/daybank", dependencies=[Depends(require_auth)])
+async def daybank_read(all: bool = False):
+    """all=true also returns done items across days (the Completed lens); default is the
+    active view (open items + anything touched today)."""
+    return await board_payload(all_items=all)
 
 
 def _canon_category(raw: str) -> tuple:
@@ -581,6 +573,16 @@ class DaybankUpdateReq(BaseModel):
     entry: str = ""      # "action" | "record" ("" = leave / keep deriving)
     state: str = ""      # "active" | "waiting" | "settled" (records only)
     waiting_on: str | None = None   # who it is parked on ("" clears; None = leave)
+    # THE NEXT MOVE, explicitly (2026-09-08). Columns were added and read but had no write
+    # path at all, so an undated action could only leave "Needs a decision" by inventing a
+    # due date. "" clears, None leaves alone — same contract as due and waiting_on.
+    next_step: str | None = None    # the one move that advances this, in Brady's words
+    followup: str | None = None     # when BRADY chases it — not the other party's deadline
+    # A waiting row or a reference record is not completable by an ordinary checkbox — the
+    # other person owns the next move, and a record has a lifecycle rather than an ending.
+    # Changing one deliberately is still allowed, but it has to SAY so, so an accidental tap
+    # in some other view cannot do it. (One stray tap is how four records vanished on 5 Sept.)
+    force_close: bool = False
 
 
 class DaybankAddReq(BaseModel):
@@ -597,12 +599,13 @@ async def daybank_add(req: DaybankAddReq):
     cat, cat_err = _canon_category(req.category)
     if cat_err:
         return {"ok": False, "dup": False, "error": cat_err,
-                **(await _board_payload())}
+                **(await board_payload())}
     ok, res = await asyncio.to_thread(
         daybank.add_item, "todo", req.text, None, [cat] if cat else None)
     dup = bool(isinstance(res, dict) and res.get("dup"))
-    items = await asyncio.to_thread(daybank.read_items, True)
-    return {"ok": ok, "dup": dup, "items": items, "category": cat or None}
+    # Same shape and scope as GET /daybank — a successful add must not answer with rows the
+    # panel cannot classify, or the lanes empty out and the counts read zero until reload.
+    return {"ok": ok, "dup": dup, "category": cat or None, **(await board_payload())}
 
 
 class MigrateReq(BaseModel):
@@ -800,26 +803,45 @@ async def daybank_update(req: DaybankUpdateReq):
     # "ignore" on a value they did not recognise, while the handler still returned ok:true.
     _CATS = set(db.CATEGORIES)
     if req.status and req.status not in ("open", "done", "dropped"):
-        return {"ok": False, **(await _board_payload()),
+        return {"ok": False, **(await board_payload()),
                 "error": "unknown status '%s' — use open, done or dropped" % req.status}
     cat, cat_err = _canon_category(req.category)
     if cat_err:
-        return {"ok": False, **(await _board_payload()),
+        return {"ok": False, **(await board_payload()),
                 "error": cat_err}
+    # ENFORCE COMPLETABILITY HERE, not only by disabling a checkbox (Codex, 2026-09-08).
+    # A disabled control protects one screen; the rule has to hold at the boundary or any
+    # other caller — the older overlay, a tool, a stale tab — walks straight past it.
+    if req.status == "done" and not req.force_close:
+        from . import classify
+        _rows = await asyncio.to_thread(daybank.read_items, False)
+        _target = next((x for x in _rows if x.get("id") == req.id), None)
+        if _target:
+            _lane = classify.lane_of(_target)
+            if _lane not in classify.COMPLETABLE:
+                _why = ("it is waiting on %s, who owns the next move"
+                        % (_target.get("waiting_on") or "someone else")) \
+                    if _lane == classify.LANE_WAITING else \
+                    ("it is a record you track, which has a state rather than an ending"
+                     if _lane == classify.LANE_REFERENCE else "it is already closed")
+                return {"ok": False, **(await board_payload()),
+                        "lane": _lane, "blocked": True,
+                        "error": ("Not completed — %s. To close it anyway, change its state "
+                                  "explicitly (settled) or resend with force_close." % _why)}
     # Same refuse-don't-drop rule as category: an unknown value comes back as an error, never
     # as a silent no-op that still answers ok:true.
     if req.entry and req.entry not in ("action", "record"):
-        return {"ok": False, **(await _board_payload()),
+        return {"ok": False, **(await board_payload()),
                 "error": "unknown entry '%s' — use action or record" % req.entry}
     if req.state and req.state not in ("active", "waiting", "settled"):
-        return {"ok": False, **(await _board_payload()),
+        return {"ok": False, **(await board_payload()),
                 "error": "unknown state '%s' — use active, waiting or settled" % req.state}
     if req.bucket and req.bucket not in db.BUCKETS:
-        return {"ok": False, **(await _board_payload()),
+        return {"ok": False, **(await board_payload()),
                 "error": "unknown bucket '%s' — use one of: %s"
                          % (req.bucket, ", ".join(db.BUCKETS))}
     if req.state and req.entry == "action":
-        return {"ok": False, **(await _board_payload()),
+        return {"ok": False, **(await board_payload()),
                 "error": "state applies to records, not actions — set entry='record' too"}
     status = req.status or None
     text = req.text.strip() or None
@@ -834,7 +856,8 @@ async def daybank_update(req: DaybankUpdateReq):
         tags = [cat] + keep
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
-        (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None))
+        (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None),
+        req.next_step, req.followup)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":
@@ -852,10 +875,14 @@ async def daybank_update(req: DaybankUpdateReq):
                     brain.add_memory, [f"{kind}: {it.get('text', '')} — {today}."], "win")
         except Exception as e:
             logger.warning("win-logging failed: %s", e)
-    items = await asyncio.to_thread(daybank.read_items, True)
-    _now = next((x for x in items if x.get("id") == req.id), None) or {}
-    return {"ok": ok, "items": items, "category": cat or None,
-            "entry": _now.get("entry"), "state": _now.get("state")}
+    payload = await board_payload()
+    # READ BACK the row that was just written and report ITS persisted state, so the answer
+    # describes what is in the database rather than what was requested.
+    _now = next((x for x in payload["items"] if x.get("id") == req.id), None) or {}
+    return {"ok": ok, "category": cat or None,
+            "entry": _now.get("entry"), "state": _now.get("state"),
+            "lane": _now.get("lane"), "next_step": _now.get("next_step"),
+            "followup": _now.get("followup"), "saved": _now, **payload}
 
 
 # ── THE KNOWLEDGE GRAPH — Brady's book of business as a navigable map ───────────

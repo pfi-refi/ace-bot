@@ -490,6 +490,15 @@ TOOLS = [
                     "type": "string",
                     "description": "With state='waiting': WHO or WHAT it is parked on ('Tony', 'approval')",
                 },
+                "next_step": {"type": "string", "description":
+                    "The ONE move that advances this, in Brady's words. Set it only when he "
+                    "says what the next move is — never infer it from the task text. Empty "
+                    "string clears it. An action with no next_step and no date is what shows "
+                    "up under Needs a decision, which is the signal he asked for."},
+                "followup": {"type": "string", "description":
+                    "YYYY-MM-DD when BRADY should chase this. Different from `due`, which is "
+                    "the obligation's own deadline, and different from whatever the other "
+                    "party is waiting on. Empty string clears it."},
             },
             "required": [],
         },
@@ -892,7 +901,8 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
 
 
 def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None,
-                    entry=None, state=None, waiting_on=None, **_):
+                    entry=None, state=None, waiting_on=None, next_step=None, followup=None,
+                    **_):
     tags = None
     if category:
         _CATS = {"Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
@@ -909,6 +919,7 @@ def _do_update_item(id="", match=None, status=None, text=None, category=None, du
     # Ace's own hand. The Command panel stamps 'brady'; the split is what makes "who closed
     # this?" answerable at all (2026-09-05).
     ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match,
+                                  next_step=next_step, followup=followup,
                                   closed_by="ace", entry=entry, state=state,
                                   waiting_on=waiting_on)
     if ok:

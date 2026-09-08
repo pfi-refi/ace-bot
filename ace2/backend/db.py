@@ -1299,7 +1299,7 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None, match: str = None,
                 superseded_by: str = None, closed_by: str = None,
                 entry: str = None, state: str = None, waiting_on: str = None,
-                bucket: str = None) -> tuple:
+                bucket: str = None, next_step: str = None, followup: str = None) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
@@ -1345,6 +1345,15 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("state = %s"); args.append(state)
             if waiting_on is not None:
                 sets.append("waiting_on = %s"); args.append((waiting_on.strip() or None))
+            # next_step / followup follow the SAME contract as waiting_on and due:
+            # None = leave alone, "" = clear to NULL, text = set. Nothing is ever inferred
+            # from prose into either of them — they hold only what Brady or an explicit
+            # edit put there. followup is BRADY's date to chase, which is a different thing
+            # from `due` (the obligation's own deadline) and from the other party's timing.
+            if next_step is not None:
+                sets.append("next_step = %s"); args.append((next_step.strip()[:300] or None))
+            if followup is not None:
+                sets.append("followup = %s"); args.append((pin_due(followup) or None))
             if bucket in BUCKETS:
                 sets.append("bucket = %s"); args.append(bucket)
             if not sets:

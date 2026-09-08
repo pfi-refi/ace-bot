@@ -123,3 +123,53 @@ class InstructionsArePresent(unittest.TestCase):
 if __name__ == '__main__':
     import unittest.mock
     unittest.main()
+
+
+class ReflushNeedsToBeTheSameBreath(unittest.TestCase):
+    """Adjacent stored user turns can be from different sessions. An expansion hours later
+    is a separate intention, not a transcript re-flush."""
+
+    def test_turns_seconds_apart_collapse(self):
+        out = chat._collapse_reflushes([
+            t('user', 'call Ken', minutes_ago=10),
+            t('user', 'call Ken about the filing', minutes_ago=10),
+        ])
+        self.assertEqual(len(out), 1)
+
+    def test_turns_an_hour_apart_do_not_collapse(self):
+        out = chat._collapse_reflushes([
+            t('user', 'call Ken', minutes_ago=120),
+            t('user', 'call Ken about the filing', minutes_ago=5),
+        ])
+        self.assertEqual(len(out), 2, 'a later, fuller request is a new intention')
+
+    def test_a_turn_with_no_timestamp_is_never_collapsed(self):
+        out = chat._collapse_reflushes([
+            {'role': 'user', 'content': 'call Ken', 'ts': None},
+            {'role': 'user', 'content': 'call Ken about the filing', 'ts': None},
+        ])
+        self.assertEqual(len(out), 2)
+
+
+class VoiceContextBudget(unittest.TestCase):
+    """The widened window has to reach the voice path; it was cut back to 24 turns."""
+
+    def test_budget_keeps_the_newest_turns(self):
+        turns = [t('user', 'x' * 100, minutes_ago=i) for i in range(50, 0, -1)]
+        got = chat._budget_turns(turns, 1000)
+        self.assertLess(len(got), len(turns))
+        self.assertEqual(got[-1]['content'], turns[-1]['content'], 'the newest must survive')
+
+    def test_budget_always_returns_at_least_one_turn(self):
+        got = chat._budget_turns([t('user', 'y' * 5000)], 100)
+        self.assertEqual(len(got), 1)
+
+    def test_a_long_structured_answer_is_not_cut_to_280_chars(self):
+        """The 7 Sept week plan is one 2,522-char turn; at 280 only its opening survived."""
+        plan = 'Monday do A. ' * 60 + 'Thursday do B.'
+        out = chat._format_thread([t('assistant', plan)], per_turn=chat._VOICE_TURN_CHARS)
+        self.assertIn('Thursday', out)
+        self.assertNotIn('Thursday', chat._format_thread([t('assistant', plan)]))
+
+    def test_default_per_turn_cap_is_unchanged_for_other_callers(self):
+        self.assertIn('per_turn: int = 280', (ROOT / 'ace2' / 'backend' / 'chat.py').read_text())

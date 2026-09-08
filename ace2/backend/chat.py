@@ -568,18 +568,36 @@ def _format_daybank(items: list) -> str:
         # sees it — still rendered a flat category list. So he treated a record parked on
         # someone else exactly like a to-do Brady owes, which is the whole failure the split
         # exists to prevent. The tags are short on purpose; they cost a few tokens a row.
-        mark = ""
-        if it.get("state") == "waiting":
+        # ONE INTERPRETATION (2026-09-08). This block used to decide waiting/settled/record
+        # for itself, in a different order from the screen and from backend/classify.py —
+        # a third opinion about the same row. It now asks classify, so what Ace reads and
+        # what Brady sees can never drift apart again.
+        from . import classify
+        lane = classify.lane_of(it)
+        if lane == classify.LANE_WAITING:
             who = it.get("waiting_on")
             # The legend above says what these MEAN — repeating it on every row cost ~475
             # tokens a turn for no added information. The tag carries only the data.
             mark = f" [PARKED · {who}]" if who else " [PARKED]"
-        elif it.get("state") == "settled":
+        elif lane == classify.LANE_SETTLED:
             mark = " [SETTLED]"
-        elif it.get("entry") == "record":
+        elif lane == classify.LANE_REFERENCE:
             mark = " [RECORD]"
+        elif lane == classify.LANE_UNDECIDED:
+            # No date and no next step: the one thing Ace should ASK about rather than
+            # invent an answer for.
+            mark = " [NEEDS A DECISION]"
         elif it.get("bucket"):
             mark = f" [{it['bucket']}]"
+        else:
+            mark = ""
+        # The next move and Brady's own follow-up date, when he has actually recorded them.
+        nxt = (it.get("next_step") or "").strip()
+        if nxt:
+            mark += f" [NEXT: {nxt[:80]}]"
+        fup = (it.get("followup") or "").strip()
+        if fup:
+            mark += f" [FOLLOW UP {fup}]"
         return f"- [{it.get('id','?')}] {body}{_due_tag(it)}{mark}"
 
     def _due_key(it):
@@ -608,6 +626,9 @@ def _format_daybank(items: list) -> str:
               "or push him on it. The [Lane] tag says whose time an action takes.")
     if parked_n:
         legend += f" {parked_n} row(s) are parked right now."
+    legend += (" [NEEDS A DECISION] means it has no date and no next step — ask what the next "
+               "move is rather than inventing one. [NEXT: …] is the move Brady already chose; "
+               "[FOLLOW UP date] is when HE chases it, which is not the same as a due date.")
     out = [legend, "", "PRIORITY (money & life — act on these first):"] + lines + [""] + back
     if done_today:
         out += ["", f"DONE TODAY ({len(done_today)}): " + " · ".join(
@@ -658,6 +679,23 @@ _THREAD_MINUTES = int(os.environ.get("ACE2_THREAD_MINUTES", "90"))
 _THREAD_MAX = int(os.environ.get("ACE2_THREAD_MAX", "80"))
 
 
+# A re-flush arrives within seconds. Two stored user turns can otherwise be MINUTES or DAYS
+# apart — a request Brady made this morning and an expanded version of it tonight are two
+# separate intentions, and merging them would silently drop the first (Codex, 2026-09-08).
+_REFLUSH_WINDOW_SEC = int(os.environ.get("ACE2_REFLUSH_WINDOW", "60"))
+
+
+def _seconds_apart(a: dict, b: dict) -> float:
+    """Gap between two stored turns. An unparseable stamp returns infinity, so a turn whose
+    time is unknown is never collapsed into another."""
+    try:
+        ta = datetime.fromisoformat(str(a.get("ts")))
+        tb = datetime.fromisoformat(str(b.get("ts")))
+        return abs((tb - ta).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 def _collapse_reflushes(turns: list) -> list:
     """Drop transcript re-flushes: ElevenLabs re-sends a growing user turn as it decides the
     sentence is finished, so one spoken sentence lands as 2-3 rows. On 7 September 15 of 59
@@ -670,7 +708,8 @@ def _collapse_reflushes(turns: list) -> list:
         prev = out[-1].get("content", "") if out else ""
         cur = t.get("content", "")
         if (out and t.get("role") == "user" and out[-1].get("role") == "user"
-                and len(cur) > len(prev) and cur.startswith(prev)):
+                and len(cur) > len(prev) and cur.startswith(prev)
+                and _seconds_apart(out[-1], t) <= _REFLUSH_WINDOW_SEC):
             out[-1] = t          # same sentence, more of it
             continue
         # An EXACT repeat is left alone: saying "yes" twice is two answers, not a re-flush.
@@ -709,8 +748,39 @@ def _unified_thread(limit: int = None) -> list:
     return recent[-(limit or _THREAD_MAX):]
 
 
-def _format_thread(turns: list) -> str:
-    """Render the recent thread for the context block. Lines are stamped with the DAY
+# ~4 chars per token: 6,000 characters is roughly 1,500 tokens of conversation, against a
+# voice context that already runs several thousand. Measured cost is in the report.
+_VOICE_THREAD_CHARS = int(os.environ.get("ACE2_VOICE_THREAD_CHARS", "9000"))
+# Big enough for a day-by-day plan to survive intact. The TOTAL budget above bounds cost.
+_VOICE_TURN_CHARS = int(os.environ.get("ACE2_VOICE_TURN_CHARS", "900"))
+
+
+def _budget_turns(turns: list, max_chars: int) -> list:
+    """The most recent turns that fit in `max_chars`, oldest-first, never fewer than one.
+
+    Newest-first accumulation, then reversed: the END of the conversation is what a live
+    turn needs most, and dropping the oldest is the only safe direction — a correction Brady
+    just made must never be the thing that falls out.
+    """
+    out, used = [], 0
+    for t in reversed(turns or []):
+        n = len(t.get("content") or "") + 20        # + role/date framing
+        if out and used + n > max_chars:
+            break
+        out.append(t)
+        used += n
+    return list(reversed(out))
+
+
+def _format_thread(turns: list, per_turn: int = 280) -> str:
+    """PER-TURN CAP (2026-09-08, Codex). Every turn was cut to 280 characters. That is fine
+    for conversational back-and-forth and destroys a structured answer: the 7 September week
+    plan is a single 2,522-character assistant turn, so Ace could only ever see its opening
+    sentence — the days themselves were never in his context, whatever the window size.
+    Callers with a total budget can afford a bigger per-turn cap; the default is unchanged
+    so no other caller shifts.
+
+    """ + """Render the recent thread for the context block. Lines are stamped with the DAY
     ONLY (never a clock time) — day-stamps stop the 'it's Saturday' drift, while
     omitting the time stops Ace from echoing a past turn's timestamp as 'now' (the
     9:24-vs-10:12 bug). The one authority for the current time is the CURRENT TIME
@@ -726,7 +796,7 @@ def _format_thread(turns: list) -> str:
                 stamp = f"[{dt.strftime('%a')}] "
             except Exception:
                 stamp = ""
-        lines.append(f"{stamp}{m['role']}: {m['content'][:280]}")
+        lines.append(f"{stamp}{m['role']}: {m['content'][:per_turn]}")
     return "\n".join(lines)
 
 
@@ -2171,7 +2241,14 @@ async def _fast_context() -> str:
     wx = _CTX["wx"]
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
     # today's typed turns too — not just its own call and not the stale Telegram window.
-    convo_str = _format_thread(_CTX["convo"][-24:])   # voice: wider memory window (was 12)
+    # THE WINDOW HAS TO REACH VOICE (2026-09-08, Codex). _unified_thread was widened to hold
+    # a whole conversation, and this line then cut it back to 24 turns — so on the path that
+    # actually needed it nothing changed. Bounded by CHARACTERS now, not by a turn count:
+    # turn lengths vary hugely (a 6-second "no, don't" against a 1,600-character brain dump),
+    # so a fixed count is both wasteful and unpredictable. The budget is what protects the
+    # prompt; the turn cap in _unified_thread is the outer guard.
+    convo_str = _format_thread(_budget_turns(_CTX["convo"], _VOICE_THREAD_CHARS),
+                               per_turn=_VOICE_TURN_CHARS)
     # HARD DATE ANCHOR (Brady: voice "keeps forgetting what day it is"). The voice brain is
     # the fast/small model — it HAS the date but a passive line let it drift on live calls.
     # State it as ground truth + an explicit instruction so it can never guess or ask.

@@ -1168,14 +1168,48 @@
                  : ('in ' + it.due_days + 'd');
           meta.appendChild(tag(it.due_days < 0 ? 'db-late' : 'db-due', dl));
         }
-        if (it.lane === 'undecided') {
-          var add = document.createElement('button');
-          add.className = 'db-add'; add.textContent = 'Set next step';
-          add.title = 'Decide the one move that advances this';
-          // cmdOpen() is the existing editor; no new surface is introduced for this.
-          add.addEventListener('click', function (ev) { ev.stopPropagation(); cmdOpen(); });
-          meta.appendChild(add);
-        }
+        // Setting the next step is the ONE edit this view needs, so it happens here rather
+        // than by sending him to another panel. It writes through /daybank/update and the
+        // row re-renders from the server's answer — no optimistic local state.
+        var addLbl = it.next_step ? 'Edit next step' : 'Set next step';
+        var add = document.createElement('button');
+        add.className = 'db-add'; add.textContent = addLbl;
+        add.title = 'The one move that advances this';
+        add.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          if (meta.querySelector('.db-nsedit')) return;
+          var wrap = document.createElement('span'); wrap.className = 'db-nsedit';
+          var inp = document.createElement('input');
+          inp.type = 'text'; inp.className = 'db-nsinput';
+          inp.placeholder = 'the next move…'; inp.value = it.next_step || '';
+          var ok = document.createElement('button'); ok.className = 'db-add'; ok.textContent = 'Save';
+          var clr = document.createElement('button'); clr.className = 'db-add'; clr.textContent = 'Clear';
+          function send(value) {
+            fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
+              body: JSON.stringify({ id: it.id, next_step: value }) })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (d) {
+                if (!d) return;
+                if (d.ok === false) { boardNotice(d.error || 'Could not save that.'); return; }
+                // Report the PERSISTED value, not the typed one.
+                materializeCard('daybank', { items: d.items, summary: d.summary || null });
+                boardNotice(d.next_step ? ('Saved — next step: ' + d.next_step)
+                                        : 'Next step cleared.');
+                if (typeof cmdSync === 'function') cmdSync();
+              })
+              .catch(function () { boardNotice('Could not reach the board.'); });
+          }
+          ok.addEventListener('click', function (e) { e.stopPropagation(); send(inp.value.trim()); });
+          clr.addEventListener('click', function (e) { e.stopPropagation(); send(''); });
+          inp.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); send(inp.value.trim()); }
+            if (e.key === 'Escape') wrap.remove();
+          });
+          wrap.appendChild(inp); wrap.appendChild(ok);
+          if (it.next_step) wrap.appendChild(clr);
+          meta.appendChild(wrap); inp.focus();
+        });
+        meta.appendChild(add);
         mid.appendChild(txt); mid.appendChild(meta);
         row.appendChild(box); row.appendChild(mid);
         listWrap.appendChild(row);
@@ -1330,12 +1364,35 @@
     ];
   }
 
+  // A refusal has to be VISIBLE. There was no notice surface at all in this app, so a
+  // rejected save simply looked like nothing happened — the same silent-failure class the
+  // 2026-09-05 audit found three of. Minimal on purpose: one line, in the card it concerns.
+  function boardNotice(msg) {
+    var host = document.querySelector('.bv-list') ||
+               document.querySelector('#card-daybank .card-body');
+    if (!host) { console.warn('board notice:', msg); return; }
+    var old = host.querySelector('.bv-notice'); if (old) old.remove();
+    var n = document.createElement('div');
+    n.className = 'bv-notice'; n.setAttribute('role', 'status'); n.textContent = msg;
+    host.insertBefore(n, host.firstChild);
+    setTimeout(function () { if (n.parentNode) n.remove(); }, 9000);
+  }
+  window.__notice = boardNotice;   // one notice surface, reachable from every board path
+
   function toggleBankItem(id, status) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
-        if (d && d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
-                                                       reviews_pending: d.reviews_pending || 0 });
+        if (!d) return;
+        // The SERVER decides completability now, so any caller — this panel, the older
+        // overlay, a stale tab — gets the same answer. A refusal must be SEEN: silently
+        // doing nothing is how the old disabled checkbox failed everywhere it wasn't.
+        // Re-render FIRST, then post the notice: materializeCard rebuilds the card, so a
+        // notice written before it is wiped by it — which is exactly how the refusal ended
+        // up invisible in the first prototype run.
+        if (d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                                  reviews_pending: d.reviews_pending || 0 });
+        if (d.ok === false) { boardNotice(d.error || 'That one is not yours to close.'); }
         // Keep an open Command board in step — same store, one truth (2026-07-31).
         if (typeof cmdSync === 'function') cmdSync();
       })
@@ -1922,8 +1979,16 @@
       var ns=it.status==='done'?'open':'done'; it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:ns})})
         .then(function(r){ if(r.status===401){ toLogin(); throw 0; } return r.json(); })
-        .then(function(d){ if(!d||!d.ok) throw 0; })
-        .catch(function(){ it.status=prev; it.done_ts=prevTs; cmdRender(); });
+        .then(function(d){
+          // A REFUSAL IS NOT A NETWORK BLIP. The revert was already correct, but silent —
+          // the tick flicked back with no reason given. The server now says WHY (waiting on
+          // someone, or a record with a lifecycle), so show that instead of nothing.
+          if(!d||!d.ok){ var why = d && d.error; throw (why || 0); }
+        })
+        .catch(function(why){
+          it.status=prev; it.done_ts=prevTs; cmdRender();
+          if (typeof why === 'string' && why) boardNotice(why);
+        });
     }; });
     // FULL EDITING (Brady): ✎ opens the inline editor — rewrite text, move category, set due.
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-pencil'), function(b){ b.onclick=function(){

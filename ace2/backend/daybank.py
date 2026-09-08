@@ -148,7 +148,7 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None, match: str = None,
                 superseded_by: str = None, closed_by: str = None,
                 entry: str = None, state: str = None, waiting_on: str = None,
-                bucket: str = None) -> tuple:
+                bucket: str = None, next_step: str = None, followup: str = None) -> tuple:
     """Complete/reopen/drop or edit an item by id — or by `match` text when the caller
     doesn't have the id (fuzzy-resolved server-side). Postgres when enabled, else Drive
     (Drive path supports status/text by exact id only)."""
@@ -156,9 +156,11 @@ def update_item(item_id: str, status: str = None, text: str = None,
         return db.update_item(item_id, status, text, tags=tags, due=due,
                               match=match, superseded_by=superseded_by,
                               closed_by=closed_by, entry=entry, state=state,
-                              waiting_on=waiting_on, bucket=bucket)
-    if tags is not None or due is not None or match or superseded_by:
-        return False, "category/due/match edits require the Postgres store"
+                              waiting_on=waiting_on, bucket=bucket,
+                              next_step=next_step, followup=followup)
+    if (tags is not None or due is not None or match or superseded_by
+            or next_step is not None or followup is not None):
+        return False, "category/due/match/next-step edits require the Postgres store"
     return _drive_update_item(item_id, status, text)
 
 

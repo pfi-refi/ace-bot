@@ -1028,3 +1028,13 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 .db-add:hover { background: rgba(69,255,166,.10); }
 /* A row that cannot be completed from here must not look like it can. */
 .db-box.parked-box { opacity: .32; cursor: not-allowed; }
+/* A refused save must be seen, not silently ignored (2026-09-08). */
+.bv-notice { font-family: var(--mono); font-size: 11px; line-height: 1.5;
+             color: #ffb020; background: rgba(255,176,32,.08);
+             border: 1px solid rgba(255,176,32,.35); border-radius: 6px;
+             padding: 8px 10px; margin: 0 0 10px; }
+.db-nsedit { display: inline-flex; gap: 6px; align-items: center; margin-left: 4px; }
+.db-nsinput { font-family: var(--mono); font-size: 11px; min-width: 230px;
+              padding: 3px 7px; border-radius: 5px; color: #dbe7ef;
+              background: rgba(255,255,255,.05); border: 1px solid rgba(69,255,166,.35); }
+.db-nsinput:focus { outline: none; border-color: var(--aurora); }
