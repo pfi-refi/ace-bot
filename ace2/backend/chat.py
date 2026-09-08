@@ -1639,14 +1639,15 @@ async def _brief_loop() -> None:
                 if verdict != "execute":
                     continue   # the bridge holds it, already delivered it, or it is unclear
                 _brief_sent[kind] = today
-                if not await asyncio.to_thread(db.add_summary, today, f"brief_{kind}"):
-                    await asyncio.to_thread(_ops.settle, attempt,
-                                            _ops.FAILED_BEFORE_DISPATCH, "marker write failed")
-                    continue   # db write failed: keep the local claim, try again tomorrow
+                # The durable claim provides exclusion. A delivery marker must only be
+                # written by deliver_brief after generation actually produces a result.
                 try:
-                    await generate_brief(kind)   # deliver_brief handles thread + push + HUD
-                    await asyncio.to_thread(_ops.settle, attempt, _ops.COMPLETED,
-                                            f"brief {kind} delivered by the in-server loop")
+                    delivered = await generate_brief(kind)
+                    await asyncio.to_thread(
+                        _ops.settle, attempt,
+                        _ops.COMPLETED if delivered else _ops.UNKNOWN,
+                        f"brief {kind} delivered by the in-server loop" if delivered else
+                        f"brief {kind} returned no delivery receipt; verify before retrying")
                 except Exception:
                     await asyncio.to_thread(_ops.settle, attempt, _ops.UNKNOWN,
                                             f"brief {kind} delivery interrupted")
