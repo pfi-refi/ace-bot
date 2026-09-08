@@ -1628,11 +1628,29 @@ async def _brief_loop() -> None:
                 if (last.get("text") or "") == today:
                     _brief_sent[kind] = today
                     continue   # already sent (other container / before restart)
-                # CLAIM FIRST — before the LLM call — so a deploy-overlap twin can't double-send.
+                # ONE CLAIM, SHARED WITH THE BRIDGE (2026-09-08). The loop and the bridge
+                # worker used separate guards — a process-local flag here, a journal row
+                # there — so a lease that lapsed mid-flight could have both of them deliver
+                # the same brief. They now compete for the SAME durable claim, and exactly
+                # one wins it.
+                from . import ops as _ops
+                verdict, attempt, _prior = await asyncio.to_thread(
+                    _ops.begin, "bridge_deliver", _ops.brief_claim(kind, today), 86400)
+                if verdict != "execute":
+                    continue   # the bridge holds it, already delivered it, or it is unclear
                 _brief_sent[kind] = today
                 if not await asyncio.to_thread(db.add_summary, today, f"brief_{kind}"):
+                    await asyncio.to_thread(_ops.settle, attempt,
+                                            _ops.FAILED_BEFORE_DISPATCH, "marker write failed")
                     continue   # db write failed: keep the local claim, try again tomorrow
-                await generate_brief(kind)   # deliver_brief handles thread + push + HUD
+                try:
+                    await generate_brief(kind)   # deliver_brief handles thread + push + HUD
+                    await asyncio.to_thread(_ops.settle, attempt, _ops.COMPLETED,
+                                            f"brief {kind} delivered by the in-server loop")
+                except Exception:
+                    await asyncio.to_thread(_ops.settle, attempt, _ops.UNKNOWN,
+                                            f"brief {kind} delivery interrupted")
+                    raise
         except asyncio.CancelledError:
             break
         except Exception:

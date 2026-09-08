@@ -116,8 +116,76 @@ with tempfile.TemporaryDirectory(prefix='ace-bridge-pg-') as temp:
             assert len(delivered2) == 0, (
                 'the day marker from scenario 1 must still block re-delivery: %r' % delivered2)
 
+            # 8. TWO OVERLAPPING COMPLETIONS, no day marker yet, journal WORKING.
+            #    The previous outage test pre-populated the marker, which only proved the
+            #    post-delivery case. This is the real race (Codex rev2).
+            with db._conn() as c, c.cursor() as cur:
+                cur.execute("DELETE FROM summaries WHERE kind='brief_morning'")
+                cur.execute("DELETE FROM ace_write_ops WHERE tool='bridge_deliver'")
+            race_delivered = []
+            gate = asyncio.Event()
+
+            async def slow_deliver(kind, text):
+                race_delivered.append(text)
+                if len(race_delivered) >= 2:
+                    gate.set()
+                try:
+                    await asyncio.wait_for(gate.wait(), 1.5)
+                except asyncio.TimeoutError:
+                    pass
+                return True
+
+            async def both():
+                body = srv.BridgeResultReq(job='brief', kind='morning', text='race',
+                                           job_id=f'brief:morning:{today}', job_date=today)
+                return await asyncio.gather(srv.bridge_complete(body, FakeReq()),
+                                            srv.bridge_complete(body, FakeReq()))
+
+            with patch.object(srv, '_bridge_check', lambda r: None), \
+                 patch.object(chat, 'deliver_brief', slow_deliver):
+                out = run(both())
+            assert len(race_delivered) == 1, (
+                'overlapping completions must deliver once, got %d: %r'
+                % (len(race_delivered), out))
+            assert sum(1 for r in out if r.get('ok')) >= 1, out
+
+            # 9. FALLBACK RACES COMPLETION: the in-server loop takes the shared claim first;
+            #    a bridge completion arriving afterwards must not deliver a second copy.
+            with db._conn() as c, c.cursor() as cur:
+                cur.execute("DELETE FROM ace_write_ops WHERE tool='bridge_deliver'")
+                cur.execute("DELETE FROM summaries WHERE kind='brief_eod'")
+            loop_verdict, loop_attempt, _ = ops.begin('bridge_deliver',
+                                                      ops.brief_claim('eod', today), 86400)
+            assert loop_verdict == 'execute', loop_verdict
+            ops.settle(loop_attempt, ops.COMPLETED, 'brief eod delivered by the in-server loop')
+            after = []
+
+            async def never(kind, text):
+                after.append(text)
+                return True
+
+            with patch.object(srv, '_bridge_check', lambda r: None), \
+                 patch.object(chat, 'deliver_brief', never):
+                body = srv.BridgeResultReq(job='brief', kind='eod', text='late',
+                                           job_id=f'brief:eod:{today}', job_date=today)
+                res = run(srv.bridge_complete(body, FakeReq()))
+            assert res.get('idempotent') is True, res
+            assert after == [], 'the loop already delivered; the worker must not repeat it'
+
+            # 10. REPLACED LEASE: a result carrying a token from a superseded lease is refused.
+            chat.bridge_lease_take('brief:morning')       # a new lease, new token
+            with patch.object(srv, '_bridge_check', lambda r: None), \
+                 patch.object(chat, 'deliver_brief', never):
+                body = srv.BridgeResultReq(job='brief', kind='morning', text='stale owner',
+                                           job_id=f'brief:morning:{today}', job_date=today,
+                                           lease_token='an-old-token')
+                res = run(srv.bridge_complete(body, FakeReq()))
+            assert res.get('stale') is True, res
+            assert after == [], after
+            chat.bridge_lease_release('brief:morning')
+
             print('PASS: lost-response retry is idempotent, stale period rejected, late result '
                   'discarded, unsaved capture never reads as done, repeat of an unsaved capture '
-                  'converges, attempt history is append-only, journal outage still blocked by the day marker.')
+                  'converges, attempt history is append-only, journal outage defers instead of double-delivering, overlapping completions deliver once, fallback wins the shared claim, replaced lease refused.')
     finally:
         server.cleanup()

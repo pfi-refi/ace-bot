@@ -411,7 +411,15 @@ def parse_time_flexible(time_str: str) -> str:
 def create_calendar_event(title: str, date_str: str, time_str: str = None,
                           duration_minutes: int = 60, description: str = "",
                           calendar_id: str = PFI_CALENDAR_ID) -> tuple:
-    """Create a Google Calendar event. Returns (success, event_id_or_error)."""
+    """Create a Google Calendar event.
+
+    Returns (success, event_id_or_message, state) where state is one of the ADAPTER_*
+    constants. The third element exists because "it returned a warning sentence" cannot
+    tell a validation error apart from a request that reached Google and then lost its
+    response — and treating the second as a safe-to-retry failure is how an event gets
+    created twice.
+    """
+    dispatched = [False]     # has an insert actually left this process?
     try:
         creds = get_google_creds()
         service = build("calendar", "v3", credentials=creds)
@@ -458,10 +466,13 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
                         if event_body["start"].get("dateTime")
                         else s.get("date") == event_body["start"].get("date"))
                 if same:
-                    logger.info("calendar: '%s' already exists at that time — skipping duplicate insert", title)
-                    return True, e.get("id", "already-exists")
-        except Exception as e:
-            logger.warning("calendar dup-probe failed (%s) — creating anyway", e)
+                    # Same title at the same minute is NOT proof it is the same event: the
+                    # end time and the description can both have changed. Compare before
+                    # claiming anything (Codex, 2026-09-08 — this returned success for an
+                    # unsaved change, and it short-circuited the 409 comparison below).
+                    return _converge(event_body, e, e.get("id", ""), title)
+        except Exception as probe_err:
+            logger.warning("calendar dup-probe failed (%s) — creating anyway", probe_err)
 
         # PROVIDER-SIDE IDEMPOTENCY (2026-09-08). The probe above is a read-then-write:
         # two turns racing (a superseded voice turn whose thread kept running, plus its
@@ -473,9 +484,10 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
         # hitting (Grandpa coffee ×2, Ken ×4); a genuinely different event differs in one
         # of those. Charset is base32hex: a-v and 0-9.
         event_body["id"] = _deterministic_event_id(title, event_body["start"])
+        dispatched[0] = True
         try:
             result = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-            return True, result.get("id", "created")
+            return True, result.get("id", "created"), ADAPTER_COMPLETED
         except Exception as insert_err:
             if not _is_duplicate_id_error(insert_err):
                 raise
@@ -493,7 +505,8 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
                                "read (%s) — outcome unverified", title, read_err)
                 return False, ("UNVERIFIED: an event with this identity already exists but "
                                "could not be read back, so I cannot tell whether it matches "
-                               "what you asked for. Check the calendar before retrying.")
+                               "what you asked for. Check the calendar before retrying."), \
+                    ADAPTER_UNKNOWN
             if existing.get("status") == "cancelled":
                 # A previously deleted event keeps its id; Google will not let us re-insert
                 # it, so recreate by updating the tombstone back to confirmed.
@@ -502,24 +515,20 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
                         calendarId=calendar_id, eventId=event_body["id"],
                         body={**event_body, "status": "confirmed"}).execute()
                     logger.info("calendar: recreated previously removed '%s'", title)
-                    return True, revived.get("id", event_body["id"])
+                    return True, revived.get("id", event_body["id"]), ADAPTER_COMPLETED
                 except Exception as revive_err:
-                    return False, f"could not recreate a previously removed event: {revive_err}"
-            diffs = _event_differences(event_body, existing)
-            if not diffs:
-                logger.info("calendar: '%s' already created identically — retry converged", title)
-                return True, event_body["id"]
-            logger.info("calendar: '%s' exists with different details %s — not overwritten",
-                        title, list(diffs))
-            return False, ("ALREADY EXISTS WITH DIFFERENT DETAILS — nothing was changed. "
-                           "The calendar has an event with this title at this time, but "
-                           + "; ".join(f"{k}: calendar has {v[1]!r}, you asked for {v[0]!r}"
-                                       for k, v in diffs.items())
-                           + f". Event id {event_body['id']}. Tell Brady and ask whether to "
-                             "update the existing event or leave it.")
+                    return (False, f"could not recreate a previously removed event: {revive_err}",
+                            ADAPTER_UNKNOWN)
+            return _converge(event_body, existing, event_body["id"], title)
     except Exception as e:
         logger.error("Calendar create error: %s", e)
-        return False, str(e)
+        if dispatched[0]:
+            # The insert request left this process. Google may have created the event before
+            # the response was lost, so this is NOT a failure that is safe to retry.
+            return (False, f"UNVERIFIED: the request was sent but the outcome was lost ({e}). "
+                           "The event may exist. Check the calendar before trying again.",
+                    ADAPTER_UNKNOWN)
+        return False, str(e), ADAPTER_FAILED_BEFORE_DISPATCH
 
 
 def _deterministic_event_id(title: str, start: dict) -> str:
@@ -530,6 +539,37 @@ def _deterministic_event_id(title: str, start: dict) -> str:
     raw = " ".join((title or "").split()).casefold() + "|" + stamp[:16]
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()   # 0-9a-f, all legal base32hex
     return "ace" + digest[:29]
+
+
+# Adapter outcome states. Plain strings so this integration keeps no dependency on the
+# backend core; tools.py maps them onto ops.Outcome.
+ADAPTER_COMPLETED = "completed"
+ADAPTER_NEEDS_REVIEW = "needs_review"
+ADAPTER_UNKNOWN = "unknown"
+ADAPTER_FAILED_BEFORE_DISPATCH = "failed_before_dispatch"
+
+
+def _converge(wanted: dict, existing: dict, event_id: str, title: str) -> tuple:
+    """The ONE answer to "an event like this already exists".
+
+    Both convergence points — the pre-insert list probe and the 409 on insert — go through
+    here. They did not before: the probe returned success on a title/start match alone, so
+    a request that changed the end time or the description was answered with a success
+    receipt while nothing was saved, and the 409 comparison was never even reached because
+    the probe returned first.
+    """
+    diffs = _event_differences(wanted, existing)
+    if not diffs:
+        logger.info("calendar: '%s' already exists identically — converged", title)
+        return True, (event_id or existing.get("id") or "already-exists"), ADAPTER_COMPLETED
+    logger.info("calendar: '%s' exists with different details %s — not overwritten",
+                title, list(diffs))
+    return False, ("ALREADY EXISTS WITH DIFFERENT DETAILS — nothing was changed. The calendar "
+                   "has an event with this title at this time, but "
+                   + "; ".join(f"{k}: calendar has {v[1]!r}, you asked for {v[0]!r}"
+                               for k, v in diffs.items())
+                   + f". Event id {event_id or existing.get('id')}. Tell Brady and ask whether "
+                     "to update the existing event or leave it."), ADAPTER_NEEDS_REVIEW
 
 
 def _norm_stamp(block: dict) -> str:

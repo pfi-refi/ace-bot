@@ -648,17 +648,28 @@ def _do_create_calendar_event(title, start_datetime, end_datetime="", descriptio
                 # TypeError guards a mixed aware/naive start/end — just fall back
                 # to the 60-min default instead of failing the whole event.
                 pass
-        ok, info = create_calendar_event(
+        ok, info, state = create_calendar_event(
             title=title, date_str=date_str, time_str=time_str,
             duration_minutes=duration, description=description or "",
         )
         if ok:
             when = date_str if all_day else f"{date_str} {time_str}"
-            return f"📅 Added to calendar: {title} — {when}"
-        return f"⚠️ Could not create event: {info}"
+            return ops.Outcome(ops.COMPLETED, f"📅 Added to calendar: {title} — {when}",
+                               record_id=str(info))
+        # A warning sentence proves nothing about WHEN it failed. The adapter says whether
+        # the request ever left the process; an outcome lost after dispatch is UNKNOWN and
+        # must be reconciled, never quietly retried into a second event.
+        state = {
+            "needs_review": ops.NEEDS_REVIEW,
+            "unknown": ops.UNKNOWN,
+            "failed_before_dispatch": ops.FAILED_BEFORE_DISPATCH,
+        }.get(state, ops.UNKNOWN)
+        prefix = "◆" if state == ops.NEEDS_REVIEW else "⚠️"
+        return ops.Outcome(state, f"{prefix} {info}")
     except Exception as e:
         logger.error("create_calendar_event: %s", e)
-        return f"⚠️ Calendar create failed: {e}"
+        # This path is reached only before the adapter returned, i.e. argument parsing.
+        return ops.Outcome(ops.FAILED_BEFORE_DISPATCH, f"⚠️ Calendar create failed: {e}")
 
 
 def _do_delete_calendar_event(event_title, event_date, **_):

@@ -2007,6 +2007,8 @@ async def bridge_jobs(request: Request):
             continue   # only within the 2h window — same rule as _brief_loop
         if chat._brief_sent.get(kind) == today:
             continue
+        if chat.bridge_lease_active(f"brief:{kind}"):
+            continue   # a worker already holds this one; do not hand out a second copy
         last = await asyncio.to_thread(_db.latest_summary, f"brief_{kind}")
         if (last.get("text") or "") == today:
             chat._brief_sent[kind] = today
@@ -2066,14 +2068,31 @@ async def bridge_complete(req: BridgeResultReq, request: Request):
     # A brief is delivered ONCE for its period. The worker retries the completion POST when
     # its response is lost (that lost-response case happened 10 times), so without a durable
     # job identity the retry pushed the same brief to Brady's phone again.
-    job_id = req.job_id or (f"brief:{req.kind}:{today2}" if req.job == "brief"
-                            else f"sweep:{req.hash}")
+    # Identity is DERIVED from the job, never trusted from the request body: an arbitrary
+    # job_id could otherwise represent a different brief and slip past the claim.
+    job_id = (f"brief:{req.kind}:{today2}" if req.job == "brief" else f"sweep:{req.hash}")
+    if req.job_id and req.job_id != job_id and req.job == "sweep":
+        return {"ok": False, "retry": False, "stale": True,
+                "reason": f"result identity {req.job_id} does not match {job_id}"}
     if req.job == "brief" and req.job_date and req.job_date != today2:
         # Yesterday's parked result must never consume today's slot.
         return {"ok": False, "stale": True, "reason": f"issued for {req.job_date}, today is {today2}"}
 
+    # Whoever holds the lease is the only worker allowed to complete it. A token from a
+    # replaced lease means this result belongs to a claim that has already moved on.
+    if req.job == "brief":
+        held = chat.bridge_lease_token(f"brief:{req.kind}")
+        if held and req.lease_token and req.lease_token != held:
+            return {"ok": False, "retry": False, "stale": True,
+                    "reason": "this result belongs to a lease that has been replaced"}
+
     verdict, attempt, prior = await asyncio.to_thread(
         _ops.begin, "bridge_deliver", {"job_id": job_id}, 86400)
+    if verdict == "unavailable":
+        # DEFER. Without an atomic claim two overlapping completions would both read an
+        # empty day marker and both deliver. The worker keeps the result and retries.
+        return {"ok": False, "retry": True,
+                "reason": "delivery ownership could not be established; nothing was sent"}
     if verdict == "duplicate":
         return {"ok": True, "idempotent": True, "result": prior, "job_id": job_id}
     if verdict == "in_flight":

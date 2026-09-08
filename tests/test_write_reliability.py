@@ -530,3 +530,121 @@ class WriteCoverageBoundary(unittest.TestCase):
 
     def test_journalled_local_tools_are_not_gaps(self):
         self.assertEqual(ops.uncovered_mcp_writes(['create_calendar_event'], self.GATED), [])
+
+
+class CalendarCreatorThroughTheRealFunction(unittest.TestCase):
+    """Through create_calendar_event with a mocked Google service — not the helpers.
+    Helper-only fixtures missed the pre-insert probe twice."""
+    EXISTING = {'id': 'fixture-event', 'summary': 'Fixture meeting',
+                'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+                'end': {'dateTime': '2026-09-09T16:00:00-04:00'},
+                'description': 'old details'}
+
+    def service(self, items):
+        from unittest.mock import Mock
+        svc = Mock()
+        svc.events.return_value.list.return_value.execute.return_value = {'items': items}
+        svc.events.return_value.insert.return_value.execute.return_value = {'id': 'new-event'}
+        return svc
+
+    def create(self, items, **kw):
+        from unittest.mock import Mock
+        svc = self.service(items)
+        args = dict(title='Fixture meeting', date_str='2026-09-09', time_str='15:00',
+                    duration_minutes=60, description='old details')
+        args.update(kw)
+        with patch.object(calendar_api, 'get_google_creds'), \
+             patch.object(calendar_api, 'build', return_value=svc):
+            return calendar_api.create_calendar_event(**args), svc
+
+    def test_changed_duration_is_not_reported_as_success(self):
+        (ok, msg, state), svc = self.create([self.EXISTING], duration_minutes=120)
+        self.assertFalse(ok)
+        self.assertEqual(state, calendar_api.ADAPTER_NEEDS_REVIEW)
+        self.assertIn('end', msg)
+        self.assertFalse(svc.events.return_value.insert.called, 'nothing may be written')
+
+    def test_changed_description_is_not_reported_as_success(self):
+        (ok, msg, state), _ = self.create([self.EXISTING], description='changed details')
+        self.assertFalse(ok)
+        self.assertEqual(state, calendar_api.ADAPTER_NEEDS_REVIEW)
+        self.assertIn('description', msg)
+
+    def test_identical_request_converges_without_inserting(self):
+        (ok, ident, state), svc = self.create([self.EXISTING])
+        self.assertTrue(ok)
+        self.assertEqual(state, calendar_api.ADAPTER_COMPLETED)
+        self.assertEqual(ident, 'fixture-event')
+        self.assertFalse(svc.events.return_value.insert.called)
+
+    def test_empty_calendar_inserts_once(self):
+        (ok, ident, state), svc = self.create([])
+        self.assertTrue(ok)
+        self.assertEqual(state, calendar_api.ADAPTER_COMPLETED)
+        self.assertTrue(svc.events.return_value.insert.called)
+
+    def test_error_after_dispatch_is_unknown_not_retryable(self):
+        from unittest.mock import Mock
+        svc = self.service([])
+        svc.events.return_value.insert.return_value.execute.side_effect = \
+            TimeoutError('response lost')
+        with patch.object(calendar_api, 'get_google_creds'), \
+             patch.object(calendar_api, 'build', return_value=svc):
+            ok, msg, state = calendar_api.create_calendar_event(
+                title='Fixture meeting', date_str='2026-09-09', time_str='15:00')
+        self.assertFalse(ok)
+        self.assertEqual(state, calendar_api.ADAPTER_UNKNOWN)
+        self.assertIn('may exist', msg)
+
+    def test_error_before_dispatch_is_safe_to_retry(self):
+        with patch.object(calendar_api, 'get_google_creds', side_effect=RuntimeError('no creds')):
+            ok, msg, state = calendar_api.create_calendar_event(
+                title='Fixture meeting', date_str='2026-09-09', time_str='15:00')
+        self.assertFalse(ok)
+        self.assertEqual(state, calendar_api.ADAPTER_FAILED_BEFORE_DISPATCH)
+
+
+class CalendarExecutorBoundary(unittest.TestCase):
+    """The executor/dispatcher boundary: adapters that RETURN errors, not raise them."""
+    def run_executor(self, adapter_return):
+        with patch.object(tools, 'create_calendar_event', return_value=adapter_return):
+            return tools._do_create_calendar_event('Fixture', '2026-09-09T15:00:00-04:00')
+
+    def test_post_dispatch_uncertainty_is_unknown(self):
+        out = self.run_executor((False, 'UNVERIFIED: response lost after dispatch', 'unknown'))
+        self.assertEqual(ops.classify(out)[0], ops.UNKNOWN)
+
+    def test_conflict_is_needs_review(self):
+        out = self.run_executor((False, 'ALREADY EXISTS WITH DIFFERENT DETAILS', 'needs_review'))
+        self.assertEqual(ops.classify(out)[0], ops.NEEDS_REVIEW)
+
+    def test_pre_dispatch_failure_stays_retryable(self):
+        out = self.run_executor((False, 'bad credentials', 'failed_before_dispatch'))
+        self.assertEqual(ops.classify(out)[0], ops.FAILED_BEFORE_DISPATCH)
+
+    def test_success_carries_the_provider_id(self):
+        out = self.run_executor((True, 'evt_123', 'completed'))
+        state, _text, record = ops.classify(out)
+        self.assertEqual(state, ops.COMPLETED)
+        self.assertEqual(record, 'evt_123')
+
+    def test_unrecognised_adapter_state_defaults_to_unknown(self):
+        """An adapter that has not been converted must not be assumed safe."""
+        out = self.run_executor((False, 'something happened', 'not-a-state'))
+        self.assertEqual(ops.classify(out)[0], ops.UNKNOWN)
+
+
+class DeliveryOwnership(unittest.TestCase):
+    def test_brief_delivery_requires_the_journal(self):
+        """A check-then-act day-marker read is not an atomic claim, so delivery must not
+        proceed without durable ownership."""
+        self.assertIn('bridge_deliver', ops.REQUIRE_JOURNAL)
+        self.assertEqual(ops.begin('bridge_deliver', {'job_id': 'brief:morning:2026-09-08'})[0],
+                         'unavailable')
+
+    def test_both_paths_use_the_same_claim_key(self):
+        from backend import chat
+        key_loop = ops.brief_claim('morning', '2026-09-08')
+        self.assertEqual(ops.op_key('bridge_deliver', key_loop),
+                         ops.op_key('bridge_deliver', {'job_id': 'brief:morning:2026-09-08'}))
+        self.assertTrue(hasattr(chat, 'bridge_lease_token'))

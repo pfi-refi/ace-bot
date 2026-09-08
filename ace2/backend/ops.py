@@ -57,7 +57,16 @@ JOURNALLED = frozenset({
 # we cannot tell a redelivery from a new request, and the failure mode is a silent double
 # booking. Local writes are excluded so a Postgres outage still falls back to Drive.
 EXTERNAL = frozenset({"create_calendar_event", "add_task", "complete_task", "draft_email"})
-REQUIRE_JOURNAL = EXTERNAL
+# Brief delivery joins this set (2026-09-08, Codex rev2). A check-then-act read of the
+# day marker is not atomic: two overlapping completions during a journal outage both read
+# "not delivered" and both push. Requiring the journal means an outage DEFERS delivery
+# instead of risking a duplicate — and since the journal and the brief marker share the
+# same database, an outage that hides the journal would have broken delivery anyway.
+REQUIRE_JOURNAL = EXTERNAL | {"bridge_deliver"}
+
+# The one claim key both the bridge and the in-server fallback compete for.
+def brief_claim(kind: str, day: str) -> dict:
+    return {"job_id": f"brief:{kind}:{day}"}
 
 # Writable paths that do NOT pass through this journal, stated rather than implied:
 #   • MCP tools (mcp_client.call). Outward/destructive ones are already durable and
