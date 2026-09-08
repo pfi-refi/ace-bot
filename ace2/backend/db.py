@@ -99,8 +99,13 @@ def _init_schema():
         #              closed the four records that vanished in one update on 5 Sept.
         # All nullable with no backfill in this statement: an un-migrated row behaves exactly as
         # it does today, so this migration cannot change behavior on its own.
+        # next_step (2026-09-08): the ONE move that advances this row, in Brady's words.
+        # Additive and nullable — nothing is derived from prose into it, and no existing row
+        # is rewritten. An empty next_step on an undated action is exactly what puts a row in
+        # the "Needs a decision" lane, which is the signal Brady asked for rather than a
+        # backlog of invented dates.
         for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT",
-                     "bucket TEXT"):
+                     "bucket TEXT", "next_step TEXT", "followup TEXT"):
             cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
@@ -693,7 +698,7 @@ def read_items(active_only: bool = True) -> list:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
                         "parent_id, superseded_by, entry, state, waiting_on, closed_by, "
-                        "bucket FROM daybank_items")
+                        "bucket, next_step, followup FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
         items = []
@@ -712,11 +717,20 @@ def read_items(active_only: bool = True) -> list:
             # A STORED bucket always wins: it is either the judgment pass or Brady's own
             # correction, and the keyword default exists only so an unclassified row still
             # lands somewhere sane.
-            it["bucket"] = (r[14] or derive_bucket(it.get("text"), _item_cat(it))
-                            if it["entry"] == "action" else None)
+            # A STORED bucket wins for EVERY row (2026-09-08). The old expression read
+            # `... if entry == "action" else None`, which threw a stored bucket away on a
+            # record — so Brady could set the area on a record and it silently reverted,
+            # exactly what the comment above promises cannot happen. Derivation is still
+            # limited to actions here, so Ace's context is unchanged; the presentation-layer
+            # fallback in classify.area_of covers records without touching stored data.
+            it["bucket"] = r[14] or (derive_bucket(it.get("text"), _item_cat(it))
+                                     if it["entry"] == "action" else None)
             # Callers need to tell a JUDGED/corrected bucket from the keyword default — the
             # classification pass fills only empties, so it must never overwrite Brady.
             it["bucket_set"] = bool(r[14])
+            # Recorded by Brady or by an explicit edit only — never inferred from the text.
+            it["next_step"] = r[15]
+            it["followup"] = r[16]
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None

@@ -1050,134 +1050,187 @@
       // is why a test row and a DNS task sat side by side. Now it answers the only question he
       // opens it for: what's late, what's due, and what is waiting on my OK. 'Data Bank' is
       // reserved for the curated records layer (people/deals/goals/bills), not the task list.
-      var all6 = (data.items || []).filter(function (x) { return x.status === 'open'; });
-      var appr = all6.filter(function (x) { return x.kind === 'approval'; });
-      var rest = all6.filter(function (x) { return x.kind !== 'approval'; });
-      // SETTLED = nothing pending. It drops out of every action lane (including the dated
-      // ones, unlike an active record) but stays on the board and in the store — the plan's
-      // Feliz case: closed and paid is settled, not deleted.
-      rest = rest.filter(function (x) { return x.state !== 'settled'; });
-      var late = rest.filter(function (x) { return x.due_days != null && x.due_days < 0; })
-                     .sort(function (a, b) { return a.due_days - b.due_days; });
-      var now6 = rest.filter(function (x) { return x.due_days === 0; });
-      var soon = rest.filter(function (x) { return x.due_days === 1; });
-      // NEEDS A DATE (2026-09-05). 44 of 72 open items had no due date at all, so they could
-      // never appear here, never go overdue, and were invisible from the day they were written
-      // — seven of them for 39 days. Goals are EXCLUDED: "In bed by 11", "get closer with god"
-      // are aspirations Brady never wanted dated, and Bills carry their own cycle. Show only
-      // the oldest few so this nudges instead of dumping the backlog into his action list.
-      var NODATE_SHOW = 6;
-      // RECORDS ARE NOT TO-DOS (2026-09-05, Phase 4). A record has a STATE, not an ending —
-      // "Jordan's license result status unknown", "Gabby got turned down from the job" are
-      // things Brady tracks, not things he does, and they were sitting in his action list.
-      // DATED records stay in the dated lanes below on purpose: a bill due today genuinely
-      // needs him, and hiding it would repeat the bug this phase exists to fix. Only the
-      // UNDATED reference noise comes out.
-      var undated = rest.filter(function (x) {
-        if (x.due_days != null) return false;
-        if (x.entry === 'record') return false;
-        var c = cmdCatOf(x);
-        return c !== 'Goals' && c !== 'Bills';
-      }).sort(function (a, b) { return (a.ts || '') < (b.ts || '') ? -1 : 1; });
-      // PARKED — records waiting on someone else. This lane is the whole point of the WAITING
-      // state: six live rows ("everything submitted, waiting on approval", "just waiting, no
-      // push needed") had nowhere to be, so they either cluttered the action list or got
-      // closed. They must be VISIBLE and must not read as work.
-      var parked = all6.filter(function (x) { return x.state === 'waiting'; })
-                       .sort(function (a, b) { return (a.ts || '') < (b.ts || '') ? -1 : 1; });
-      var undatedMore = Math.max(0, undated.length - NODATE_SHOW);
-      undated = undated.slice(0, NODATE_SHOW);
-      var body6 = cardShell('DUE TODAY', slot);
-      if (!late.length && !now6.length && !soon.length && !appr.length && !undated.length
-          && !parked.length) {
-        return empty(body6, 'Nothing due and nothing waiting on you. Clear.');
+      // ONE CLASSIFIER, ON THE SERVER (2026-09-08). This block used to decide for itself what
+      // was late, waiting, undated or approvable, and it disagreed with the rules Ace reads:
+      // it dropped SETTLED rows from the dated lanes but not WAITING ones, so a dated waiting
+      // record could show a working "Mark done" box here while the Parked section below
+      // deliberately disabled the very same box. Rows now arrive carrying `lane`,
+      // `completable` and `area` from backend/classify.py, and this view only filters and
+      // draws. If a rule needs changing it changes in one place, for both the screen and Ace.
+      var rows = (data.items || []).map(function (x) { return x; });
+      var sum = data.summary || { counts: {}, areas: {}, needs_you: 0, open: 0 };
+      var C = sum.counts || {};
+      function inLane() {
+        var want = Array.prototype.slice.call(arguments);
+        return rows.filter(function (x) { return want.indexOf(x.lane) >= 0; });
       }
+
+      // Remembered view + area, so opening the panel returns to where he was.
+      var view = 'needs', area = 'all';
+      try { view = localStorage.getItem('ace2_board_view') || 'needs'; } catch (e) {}
+      try { area = localStorage.getItem('ace2_board_area') || 'all'; } catch (e) {}
+
+      var body6 = cardShell('COMMAND CENTER', slot);
+      body6.parentNode.classList.add('card-wide');
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
-      function sect(label, rows, cls) {
-        if (!rows.length) return;
-        var h = document.createElement('div'); h.className = 'db-sect ' + cls;
-        h.textContent = label + ' · ' + rows.length; body6.appendChild(h);
-        rows.forEach(function (it) {
-          var row = document.createElement('div'); row.className = 'db-item ' + cls;
-          var box = document.createElement('button'); box.className = 'db-box';
-          // A parked record is not completable from here — it finishes when the other person
-          // acts, and one stray tap is how four records vanished on 5 Sept.
-          if (cls === 'parked') {
-            box.className = 'db-box parked-box'; box.disabled = true;
-            box.title = it.waiting_on ? ('Waiting on ' + it.waiting_on) : 'Waiting on someone else';
-          } else {
-            box.title = (cls === 'appr') ? 'Approve — Ace executes this' : 'Mark done';
-            box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
-          }
-          var mid = document.createElement('div'); mid.className = 'db-mid';
-          var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
-          var meta = document.createElement('div'); meta.className = 'db-meta';
-          var c = cmdCatOf(it);
-          if (c) { var ct = tag('db-cat', c); ct.style.color = CMD_CATS[c] || '#8aa';
-                   ct.style.borderColor = (CMD_CATS[c] || '#8aa') + '55'; meta.appendChild(ct); }
-          if (cls === 'appr') meta.appendChild(tag('db-appr', 'TAP TO APPROVE'));
-          else if (cls === 'nodate') {
-            var add = document.createElement('button');
-            add.className = 'db-due db-due-btn'; add.title = 'Give this a date';
-            add.textContent = 'no date ▾';
-            add.addEventListener('click', function (ev) {
-              ev.stopPropagation();
-              var open = meta.querySelector('.db-pick');
-              if (open) { open.remove(); return; }
-              var pick = document.createElement('span'); pick.className = 'db-pick';
-              dueChoices().forEach(function (c) {
-                if (c.due === '') return;            // "Clear" is meaningless here
-                var b = document.createElement('button');
-                b.className = 'db-pick-b'; b.textContent = c.label;
-                b.addEventListener('click', function (e2) { e2.stopPropagation(); setBankDue(it.id, c.due); });
-                pick.appendChild(b);
-              });
-              meta.appendChild(pick);
-            });
-            meta.appendChild(add);
-          }
-          else if (it.due_days != null) {
-            var d = it.due_days;
-            var chip = document.createElement('button');
-            chip.className = 'db-due db-due-btn';
-            chip.title = 'Tap to reschedule';
-            chip.textContent = (d < 0 ? (Math.abs(d) + 'd overdue')
-                                      : d === 0 ? 'due today' : 'due tomorrow') + ' ▾';
-            chip.addEventListener('click', function (ev) {
-              ev.stopPropagation();
-              var open = meta.querySelector('.db-pick');
-              if (open) { open.remove(); return; }          // tap again to close
-              var pick = document.createElement('span'); pick.className = 'db-pick';
-              dueChoices().forEach(function (c) {
-                var b = document.createElement('button');
-                b.className = 'db-pick-b' + (c.due === '' ? ' db-pick-clear' : '');
-                b.textContent = c.label;
-                b.addEventListener('click', function (e2) { e2.stopPropagation(); setBankDue(it.id, c.due); });
-                pick.appendChild(b);
-              });
-              meta.appendChild(pick);
-            });
-            meta.appendChild(chip);
-          }
-          if (cls === 'parked' && it.waiting_on) {
-            var w = document.createElement('span'); w.className = 'db-wait';
-            w.textContent = 'waiting on ' + it.waiting_on; meta.appendChild(w);
-          }
-          mid.appendChild(txt); mid.appendChild(meta);
-          row.appendChild(box); row.appendChild(mid); body6.appendChild(row);
+
+      // ── view tabs ───────────────────────────────────────────────────────────────
+      // Every tab shows its count, so a view can prove what it is NOT showing. The old
+      // panel capped undated work at six rows with no total; 17 of Brady's 23 undated items
+      // were invisible from the day they were written.
+      var VIEWS = [
+        ['needs',  'Needs me',         (C.overdue||0)+(C.today||0)+(C.upcoming||0)+(C.undecided||0)+(C.anytime||0)],
+        ['today',  'Today',            (C.overdue||0)+(C.today||0)],
+        ['upcoming','Upcoming',        C.upcoming||0],
+        ['waiting','Waiting',          C.waiting||0],
+        ['decide', 'Needs a decision', C.undecided||0],
+        ['records','Records',          C.reference||0],
+        ['all',    'All items',        sum.open||0],
+        ['done',   'Completed',        (C.done||0)+(C.settled||0)]
+      ];
+      var vbar = document.createElement('div'); vbar.className = 'bv-tabs';
+      VIEWS.forEach(function (v) {
+        var b = document.createElement('button');
+        b.className = 'bv-tab' + (v[0] === view ? ' on' : '');
+        b.textContent = v[1] + ' ' + v[2];
+        b.addEventListener('click', function () {
+          try { localStorage.setItem('ace2_board_view', v[0]); } catch (e) {}
+          paintBoard(v[0], area);
         });
+        vbar.appendChild(b);
+      });
+      body6.appendChild(vbar);
+
+      // ── area filter ─────────────────────────────────────────────────────────────
+      // Areas are Brady's five life/work lanes. Bills and Goals stay TAGS that cross areas —
+      // a bill is one row in one area that also answers to Bills; nothing is cloned to appear
+      // in two places.
+      var abar = document.createElement('div'); abar.className = 'bv-areas';
+      var areaNames = Object.keys(sum.areas || {}).sort(function (a, b) {
+        return (sum.areas[b] || 0) - (sum.areas[a] || 0);
+      });
+      [['all', 'All areas', sum.open || 0]].concat(areaNames.map(function (a) {
+        return [a, a, sum.areas[a]];
+      })).forEach(function (a) {
+        var b = document.createElement('button');
+        b.className = 'bv-area' + (a[0] === area ? ' on' : '');
+        b.textContent = a[1] + ' ' + a[2];
+        b.addEventListener('click', function () {
+          try { localStorage.setItem('ace2_board_area', a[0]); } catch (e) {}
+          paintBoard(view, a[0]);
+        });
+        abar.appendChild(b);
+      });
+      body6.appendChild(abar);
+
+      var listWrap = document.createElement('div'); listWrap.className = 'bv-list';
+      body6.appendChild(listWrap);
+
+      function sect(label, list, cls) {
+        if (!list.length) return;
+        var h = document.createElement('div'); h.className = 'db-sect ' + cls;
+        h.textContent = label + ' · ' + list.length; listWrap.appendChild(h);
+        list.forEach(function (it) { drawRow(it, cls); });
       }
-      sect('WAITING ON YOUR OK', appr, 'appr');
-      sect('OVERDUE', late, 'late');
-      sect('DUE TODAY', now6, 'now');
-      sect('TOMORROW', soon, 'soon');
-      sect('NEEDS A DATE', undated, 'nodate');
-      sect('PARKED — WAITING ON SOMEONE ELSE', parked, 'parked');
-      if (undatedMore) {
-        var more = document.createElement('div'); more.className = 'db-sect nodate-more';
-        more.textContent = '+' + undatedMore + ' more with no date — open Command to work through them';
-        body6.appendChild(more);
+
+      function drawRow(it, cls) {
+        var row = document.createElement('div'); row.className = 'db-item ' + cls;
+        var box = document.createElement('button'); box.className = 'db-box';
+        // COMPLETABLE COMES FROM THE SERVER. A waiting row finishes when the other person
+        // acts and a reference record has a lifecycle, not an ending — neither gets a
+        // checkbox, in THIS view or any other. One stray tap is how four records vanished
+        // on 5 September.
+        if (!it.completable) {
+          box.className = 'db-box parked-box'; box.disabled = true;
+          box.title = it.lane === 'waiting'
+            ? ('Waiting on ' + (it.waiting_on || 'someone else') + ' — they own the next move')
+            : (it.lane === 'reference' ? 'A record you track, not a task' : 'Already closed');
+        } else {
+          box.title = 'Mark done';
+          box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
+        }
+        var mid = document.createElement('div'); mid.className = 'db-mid';
+        var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
+        var meta = document.createElement('div'); meta.className = 'db-meta';
+        if (it.area) meta.appendChild(tag('db-area', it.area));
+        (it.shelves || []).forEach(function (sh) { meta.appendChild(tag('db-shelf', sh)); });
+        var c = cmdCatOf(it);
+        if (c) { var ct = tag('db-cat', c); ct.style.color = CMD_CATS[c] || '#8aa';
+                 ct.style.borderColor = (CMD_CATS[c] || '#8aa') + '55'; meta.appendChild(ct); }
+        // The next move, shown as its own thing rather than buried in the text.
+        if (it.lane === 'waiting' && it.waiting_on) meta.appendChild(tag('db-wait', '→ ' + it.waiting_on));
+        if (it.next_step) meta.appendChild(tag('db-next', 'next: ' + it.next_step));
+        if (it.followup) meta.appendChild(tag('db-follow', 'follow up ' + it.followup));
+        // An OVERDUE deadline is not the same as work chosen for today, and is labelled so.
+        if (it.due_days != null) {
+          var dl = it.due_days < 0 ? (Math.abs(it.due_days) + 'd overdue')
+                 : it.due_days === 0 ? 'due today'
+                 : ('in ' + it.due_days + 'd');
+          meta.appendChild(tag(it.due_days < 0 ? 'db-late' : 'db-due', dl));
+        }
+        if (it.lane === 'undecided') {
+          var add = document.createElement('button');
+          add.className = 'db-add'; add.textContent = 'Set next step';
+          add.title = 'Decide the one move that advances this';
+          // cmdOpen() is the existing editor; no new surface is introduced for this.
+          add.addEventListener('click', function (ev) { ev.stopPropagation(); cmdOpen(); });
+          meta.appendChild(add);
+        }
+        mid.appendChild(txt); mid.appendChild(meta);
+        row.appendChild(box); row.appendChild(mid);
+        listWrap.appendChild(row);
       }
+
+      function paintBoard(v, a) {
+        view = v; area = a;
+        Array.prototype.forEach.call(vbar.children, function (c, i) {
+          c.classList.toggle('on', VIEWS[i][0] === v);
+        });
+        Array.prototype.forEach.call(abar.children, function (c) {
+          c.classList.toggle('on', c.textContent.indexOf(a === 'all' ? 'All areas' : a) === 0);
+        });
+        listWrap.textContent = '';
+        function f(list) {
+          return a === 'all' ? list : list.filter(function (x) { return x.area === a; });
+        }
+        if (v === 'needs' || v === 'all') {
+          sect('OVERDUE', f(inLane('overdue')), 'late');
+          sect('DUE TODAY', f(inLane('today')), 'now');
+          sect('UPCOMING', f(inLane('upcoming')), 'soon');
+          sect('NEEDS A DECISION — no date, no next step', f(inLane('undecided')), 'nodate');
+          sect('ANYTIME — next step recorded', f(inLane('anytime')), 'nodate');
+          if (v === 'all') {
+            sect('WAITING ON SOMEONE ELSE', f(inLane('waiting')), 'parked');
+            sect('RECORDS & REFERENCE', f(inLane('reference')), 'parked');
+          }
+        } else if (v === 'today') {
+          sect('OVERDUE', f(inLane('overdue')), 'late');
+          sect('DUE TODAY', f(inLane('today')), 'now');
+        } else if (v === 'upcoming') {
+          sect('UPCOMING', f(inLane('upcoming')), 'soon');
+        } else if (v === 'waiting') {
+          sect('WAITING ON SOMEONE ELSE', f(inLane('waiting')), 'parked');
+        } else if (v === 'decide') {
+          sect('NEEDS A DECISION', f(inLane('undecided')), 'nodate');
+        } else if (v === 'records') {
+          sect('RECORDS & REFERENCE', f(inLane('reference')), 'parked');
+        } else if (v === 'done') {
+          sect('SETTLED — finished, kept', f(inLane('settled')), 'parked');
+          sect('COMPLETED', f(inLane('done')).slice(0, 60), 'parked');
+        }
+        if (!listWrap.children.length) {
+          var e = document.createElement('div'); e.className = 'db-sect';
+          e.textContent = 'Nothing here' + (a === 'all' ? '' : ' in ' + a) + '.';
+          listWrap.appendChild(e);
+        }
+        // Approval authority lives in Review, never on a task checkbox.
+        if ((C.done || 0) >= 0 && v === 'needs' && data.reviews_pending) {
+          var rv = document.createElement('div'); rv.className = 'db-sect appr';
+          rv.textContent = data.reviews_pending + ' action(s) waiting in Review — open Review to approve';
+          listWrap.appendChild(rv);
+        }
+      }
+      paintBoard(view, area);
     } else if (panel === 'inbox') {
       // TWO LANES (2026-08-25): business + personal, clearly separated, each row tappable
       // straight into the right Gmail account. Falls back to the legacy single list if the
@@ -1257,7 +1310,8 @@
                                      body: JSON.stringify({ id: id, due: due }) })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
-        if (d && d.items) materializeCard('daybank', { items: d.items });
+        if (d && d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                                       reviews_pending: d.reviews_pending || 0 });
         if (typeof cmdSync === 'function') cmdSync();
       })
       .catch(function () {});
@@ -1280,7 +1334,8 @@
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
-        if (d && d.items) materializeCard('daybank', { items: d.items });
+        if (d && d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                                       reviews_pending: d.reviews_pending || 0 });
         // Keep an open Command board in step — same store, one truth (2026-07-31).
         if (typeof cmdSync === 'function') cmdSync();
       })
@@ -2548,7 +2603,12 @@
     // REHYDRATE knew the route, but DOCK did not — so the click handler hit `if (!cfg) return`
     // and the button did NOTHING unless the card happened to be pinned from a previous session.
     // Two config tables, one of them updated. The guard below stops that shipping again.
-    daybank:  { title: 'DUE TODAY',      url: '/daybank',         shape: function (d) { return { items: d.items || [] }; } }
+    // all=true so the COMPLETED and ALL ITEMS views have something to show and the counts
+    // describe the whole retained set, not just today's slice. The shape now carries the
+    // server's summary through: dropping it here is why every tab read 0 on first paint.
+    daybank:  { title: 'COMMAND CENTER', url: '/daybank?all=true',
+                shape: function (d) { return { items: d.items || [], summary: d.summary || null,
+                                               reviews_pending: d.reviews_pending || 0 }; } }
   };
   // Every dock button must have a DOCK entry, or it is silently dead on click.
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-panel]'), function (b) {

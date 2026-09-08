@@ -1,0 +1,9 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "ace-board-prototype",
+      "runtimeExecutable": "/Users/brady/Documents/Codex/2026-09-06/install-github-cli-gh-on-this/work/ace-repair/.venv-runtime/bin/python",
+      "runtimeArgs": ["/private/tmp/claude-501/-Users-brady/8447005f-a5d2-418b-9c33-cbb847fa8dce/scratchpad/seed_and_serve.py"],
+      "port": 8807 }
+  ]
+}

@@ -994,3 +994,37 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 .cmd-link { font-family: var(--mono); font-size: 9px; letter-spacing: .6px; text-transform: uppercase;
   color: #7f8c99; border: 1px solid #7f8c9933; background: #7f8c9912; border-radius: 3px;
   padding: 1px 5px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Command centre views (2026-09-08) ──────────────────────────────────────────
+   Tabs and area chips carry their own counts, so a view states what it is not
+   showing. The old panel capped undated work at six rows with no total, which is
+   how 17 of 23 undated items stayed invisible. */
+.bv-tabs, .bv-areas { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.bv-areas { margin-bottom: 12px; }
+.bv-tab, .bv-area {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .6px; text-transform: uppercase;
+  padding: 5px 10px; border-radius: 999px; cursor: pointer;
+  background: rgba(255,255,255,.03); color: #8fa0b4;
+  border: 1px solid rgba(255,255,255,.10);
+}
+.bv-tab:hover, .bv-area:hover { background: rgba(69,255,166,.07); color: #cfe6d8; }
+.bv-tab.on { background: rgba(69,255,166,.14); color: var(--aurora);
+             border-color: rgba(69,255,166,.45); }
+.bv-area.on { background: rgba(83,231,255,.13); color: #53e7ff;
+              border-color: rgba(83,231,255,.42); }
+.bv-list { display: block; }
+.db-area  { color: #9fb3c8; border-color: rgba(159,179,200,.35); }
+.db-shelf { color: #ffb020; border-color: rgba(255,176,32,.40); }
+.db-wait  { color: #ffb020; border-color: rgba(255,176,32,.40); }
+.db-next  { color: var(--aurora); border-color: rgba(69,255,166,.40); }
+.db-follow{ color: #53e7ff; border-color: rgba(83,231,255,.40); }
+/* An overdue deadline reads differently from work merely chosen for today. */
+.db-late  { color: #ff5a68; border-color: rgba(255,90,104,.45); font-weight: 600; }
+.db-due   { color: #8fa0b4; border-color: rgba(143,160,180,.32); }
+.db-add   { font-family: var(--mono); font-size: 9px; letter-spacing: .8px;
+            text-transform: uppercase; padding: 2px 7px; border-radius: 4px; cursor: pointer;
+            background: transparent; color: var(--aurora);
+            border: 1px dashed rgba(69,255,166,.45); }
+.db-add:hover { background: rgba(69,255,166,.10); }
+/* A row that cannot be completed from here must not look like it can. */
+.db-box.parked-box { opacity: .32; cursor: not-allowed; }

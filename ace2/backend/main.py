@@ -518,10 +518,35 @@ async def weather():
 
 
 @app.get("/daybank", dependencies=[Depends(require_auth)])
+async def _board_payload() -> dict:
+    """The board as every view should see it: decorated rows plus lane counts.
+
+    /daybank/update used to answer with `read_items(True)` — the ACTIVE slice — while the
+    panel had loaded the full set, so one checkbox silently shrank the list and blanked the
+    counts. Both now speak the same shape, which is what makes a save look like a save
+    rather than like a different board.
+    """
+    from . import classify
+    items = await asyncio.to_thread(daybank.read_items, False)
+    return {"items": [classify.decorate(i) for i in items],
+            "summary": classify.summarise(items)}
+
+
 async def daybank_read(all: bool = False):
     # all=true also returns done items across days (for the panel's "Done" lens); default is the
     # active view (open items + anything touched today).
-    return {"items": await asyncio.to_thread(daybank.read_items, not all)}
+    #
+    # Every row now carries its LANE, decided once here (2026-09-08). The screen used to derive
+    # its own answer and disagreed with this one: a dated waiting record showed a working
+    # "Mark done" box in the overdue lane while the Parked section disabled the very same box.
+    # Views filter on `lane`; they no longer re-derive it. `summary` carries per-lane counts so
+    # a view can prove what it is not showing instead of silently hiding it.
+    from . import classify
+    items = await asyncio.to_thread(daybank.read_items, not all)
+    return {"items": [classify.decorate(i) for i in items],
+            "summary": classify.summarise(items),
+            "lane_order": list(classify.LANE_ORDER),
+            "lane_labels": classify.LANE_LABELS}
 
 
 def _canon_category(raw: str) -> tuple:
@@ -572,7 +597,7 @@ async def daybank_add(req: DaybankAddReq):
     cat, cat_err = _canon_category(req.category)
     if cat_err:
         return {"ok": False, "dup": False, "error": cat_err,
-                "items": await asyncio.to_thread(daybank.read_items, True)}
+                **(await _board_payload())}
     ok, res = await asyncio.to_thread(
         daybank.add_item, "todo", req.text, None, [cat] if cat else None)
     dup = bool(isinstance(res, dict) and res.get("dup"))
@@ -775,26 +800,26 @@ async def daybank_update(req: DaybankUpdateReq):
     # "ignore" on a value they did not recognise, while the handler still returned ok:true.
     _CATS = set(db.CATEGORIES)
     if req.status and req.status not in ("open", "done", "dropped"):
-        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+        return {"ok": False, **(await _board_payload()),
                 "error": "unknown status '%s' — use open, done or dropped" % req.status}
     cat, cat_err = _canon_category(req.category)
     if cat_err:
-        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+        return {"ok": False, **(await _board_payload()),
                 "error": cat_err}
     # Same refuse-don't-drop rule as category: an unknown value comes back as an error, never
     # as a silent no-op that still answers ok:true.
     if req.entry and req.entry not in ("action", "record"):
-        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+        return {"ok": False, **(await _board_payload()),
                 "error": "unknown entry '%s' — use action or record" % req.entry}
     if req.state and req.state not in ("active", "waiting", "settled"):
-        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+        return {"ok": False, **(await _board_payload()),
                 "error": "unknown state '%s' — use active, waiting or settled" % req.state}
     if req.bucket and req.bucket not in db.BUCKETS:
-        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+        return {"ok": False, **(await _board_payload()),
                 "error": "unknown bucket '%s' — use one of: %s"
                          % (req.bucket, ", ".join(db.BUCKETS))}
     if req.state and req.entry == "action":
-        return {"ok": False, "items": await asyncio.to_thread(daybank.read_items, True),
+        return {"ok": False, **(await _board_payload()),
                 "error": "state applies to records, not actions — set entry='record' too"}
     status = req.status or None
     text = req.text.strip() or None
