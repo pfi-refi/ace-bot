@@ -528,8 +528,13 @@ async def board_payload(all_items: bool = True) -> dict:
     """
     from . import classify
     items = await asyncio.to_thread(daybank.read_items, not all_items)
+    today = chat.datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
     return {"items": [classify.decorate(i) for i in items],
             "summary": classify.summarise(items),
+            "today": today,
+            # Computed here so Due Today and the Command Center cannot disagree about what
+            # counts as a deadline, a choice, or a suggestion.
+            "due_today": classify.due_today_sections(items, today),
             "lane_order": list(classify.LANE_ORDER),
             "lane_labels": classify.LANE_LABELS}
 
@@ -578,6 +583,9 @@ class DaybankUpdateReq(BaseModel):
     # due date. "" clears, None leaves alone — same contract as due and waiting_on.
     next_step: str | None = None    # the one move that advances this, in Brady's words
     followup: str | None = None     # when BRADY chases it — not the other party's deadline
+    # "I'm doing this today" — Brady's choice, never a deadline. Accepting one of Ace's
+    # suggestions writes THIS, so a suggestion can never silently create a due date.
+    chosen_on: str | None = None
     # A waiting row or a reference record is not completable by an ordinary checkbox — the
     # other person owns the next move, and a record has a lifecycle rather than an ending.
     # Changing one deliberately is still allowed, but it has to SAY so, so an accidental tap
@@ -857,7 +865,7 @@ async def daybank_update(req: DaybankUpdateReq):
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
         (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None),
-        req.next_step, req.followup)
+        req.next_step, req.followup, req.chosen_on)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":
@@ -882,7 +890,8 @@ async def daybank_update(req: DaybankUpdateReq):
     return {"ok": ok, "category": cat or None,
             "entry": _now.get("entry"), "state": _now.get("state"),
             "lane": _now.get("lane"), "next_step": _now.get("next_step"),
-            "followup": _now.get("followup"), "saved": _now, **payload}
+            "followup": _now.get("followup"), "chosen_on": _now.get("chosen_on"),
+            "saved": _now, **payload}
 
 
 # ── THE KNOWLEDGE GRAPH — Brady's book of business as a navigable map ───────────

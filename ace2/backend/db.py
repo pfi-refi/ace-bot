@@ -105,7 +105,8 @@ def _init_schema():
         # the "Needs a decision" lane, which is the signal Brady asked for rather than a
         # backlog of invented dates.
         for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT",
-                     "bucket TEXT", "next_step TEXT", "followup TEXT"):
+                     "bucket TEXT", "next_step TEXT", "followup TEXT",
+                     "chosen_on TEXT"):
             cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
@@ -698,7 +699,7 @@ def read_items(active_only: bool = True) -> list:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
                         "parent_id, superseded_by, entry, state, waiting_on, closed_by, "
-                        "bucket, next_step, followup FROM daybank_items")
+                        "bucket, next_step, followup, chosen_on FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
         items = []
@@ -731,6 +732,10 @@ def read_items(active_only: bool = True) -> list:
             # Recorded by Brady or by an explicit edit only — never inferred from the text.
             it["next_step"] = r[15]
             it["followup"] = r[16]
+            # CHOSEN FOR TODAY (2026-09-08) — the date Brady picked this up, which is NOT a
+            # deadline. Accepting one of Ace's suggestions must never invent a due date; the
+            # obligation's own timing is `due` and belongs to the world, this belongs to him.
+            it["chosen_on"] = r[17]
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None
@@ -1299,7 +1304,8 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None, match: str = None,
                 superseded_by: str = None, closed_by: str = None,
                 entry: str = None, state: str = None, waiting_on: str = None,
-                bucket: str = None, next_step: str = None, followup: str = None) -> tuple:
+                bucket: str = None, next_step: str = None, followup: str = None,
+                chosen_on: str = None) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
@@ -1354,6 +1360,8 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("next_step = %s"); args.append((next_step.strip()[:300] or None))
             if followup is not None:
                 sets.append("followup = %s"); args.append((pin_due(followup) or None))
+            if chosen_on is not None:
+                sets.append("chosen_on = %s"); args.append((pin_due(chosen_on) or None))
             if bucket in BUCKETS:
                 sets.append("bucket = %s"); args.append(bucket)
             if not sets:

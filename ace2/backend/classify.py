@@ -146,3 +146,43 @@ def summarise(items: list) -> dict:
         "open": sum(c for lane, c in counts.items() if lane != LANE_DONE),
         "needs_you": sum(counts[lane] for lane in ACTIONABLE),
     }
+
+
+# ── DUE TODAY vs THE COMMAND CENTER ────────────────────────────────────────────
+# Two surfaces, one set of records. The Command Center is the full board and stays that
+# way. Due Today answers a narrower question and must never grow into a second board:
+#
+#   DEADLINES  — the world's timing. Overdue and due-today rows.
+#   CHOSEN     — Brady's timing. Rows he picked up today (`chosen_on`), which is a
+#                DIFFERENT column from `due` precisely so that choosing something cannot
+#                invent a deadline for it.
+#   SUGGESTED  — Ace's opinion, clearly labelled as such. Never written anywhere until
+#                Brady accepts it, and accepting it sets `chosen_on`, never `due`.
+
+
+def chosen_today(item: dict, today: str) -> bool:
+    return (item.get("chosen_on") or "")[:10] == today
+
+
+def due_today_sections(items: list, today: str, suggest: int = 5) -> dict:
+    """The three compact groups Due Today shows. Pure — it writes nothing and proposes
+    nothing that is not already on the board."""
+    rows = [decorate(i) for i in (items or [])]
+    live = [r for r in rows if r["lane"] != LANE_DONE]
+    deadlines = [r for r in live if r["lane"] in (LANE_OVERDUE, LANE_TODAY)]
+    picked = [r for r in live if chosen_today(r, today)
+              and r not in deadlines and r["actionable"]]
+    taken = {r["id"] for r in deadlines} | {r["id"] for r in picked}
+    # A suggestion is real work Brady could reasonably finish: actionable, not already
+    # here, not waiting on anyone, not a record. Oldest first — the things quietly rotting.
+    pool = [r for r in live
+            if r["actionable"] and r["id"] not in taken and r["lane"] != LANE_UPCOMING]
+    pool.sort(key=lambda r: (r.get("ts") or ""))
+    return {
+        "deadlines": sorted(deadlines, key=lambda r: (r.get("due_days") is None,
+                                                      r.get("due_days", 0))),
+        "chosen": picked,
+        "suggested": pool[:suggest],
+        "suggested_total": len(pool),
+        "waiting": [r for r in live if r["lane"] == LANE_WAITING],
+    }

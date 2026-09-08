@@ -142,3 +142,69 @@ class StoredAreaSurvivesOnRecords(unittest.TestCase):
         derived = classify.area_of(row(entry='record', bucket=None, text='pour the driveway'))
         self.assertTrue(derived)
         self.assertNotEqual(derived, 'Unassigned')
+
+
+class TwoSurfacesOneRecord(unittest.TestCase):
+    """Due Today is compact and narrow; the Command Center is the full board. They read the
+    same rows by the same rules, and a suggestion never becomes a schedule."""
+    TODAY = '2026-09-08'
+
+    def rows(self):
+        return [
+            row(id='late', due_days=-2),
+            row(id='now', due_days=0),
+            row(id='soon', due_days=4),
+            row(id='picked', chosen_on=self.TODAY),
+            row(id='old1', ts='2026-08-01'),
+            row(id='old2', ts='2026-08-02'),
+            row(id='parked', state='waiting', waiting_on='the county'),
+            row(id='rec', entry='record'),
+            row(id='shut', status='done'),
+        ]
+
+    def sections(self):
+        return classify.due_today_sections(self.rows(), self.TODAY)
+
+    def test_deadlines_are_only_real_deadlines(self):
+        ids = [r['id'] for r in self.sections()['deadlines']]
+        self.assertEqual(sorted(ids), ['late', 'now'])
+        self.assertNotIn('soon', ids, 'a future date is not a deadline for today')
+
+    def test_chosen_is_bradys_own_pick_not_a_due_date(self):
+        picked = self.sections()['chosen']
+        self.assertEqual([r['id'] for r in picked], ['picked'])
+        self.assertIsNone(picked[0].get('due_days'), 'choosing must not create a deadline')
+
+    def test_suggestions_exclude_everything_already_shown(self):
+        s = self.sections()
+        shown = {r['id'] for r in s['deadlines']} | {r['id'] for r in s['chosen']}
+        for r in s['suggested']:
+            self.assertNotIn(r['id'], shown, 'a row must not appear twice on one card')
+
+    def test_suggestions_never_include_waiting_or_records(self):
+        for r in self.sections()['suggested']:
+            self.assertNotEqual(r['lane'], classify.LANE_WAITING)
+            self.assertNotEqual(r['lane'], classify.LANE_REFERENCE)
+
+    def test_suggestions_are_capped_but_the_total_is_reported(self):
+        many = [row(id='n%d' % i, ts='2026-08-%02d' % (i + 1)) for i in range(12)]
+        s = classify.due_today_sections(many, self.TODAY, suggest=5)
+        self.assertEqual(len(s['suggested']), 5)
+        self.assertEqual(s['suggested_total'], 12, 'the card must say what it is not showing')
+
+    def test_the_card_never_shows_completed_work(self):
+        s = self.sections()
+        every = s['deadlines'] + s['chosen'] + s['suggested'] + s['waiting']
+        self.assertNotIn('shut', [r['id'] for r in every])
+
+    def test_chosen_on_a_different_day_is_not_today(self):
+        s = classify.due_today_sections([row(id='x', chosen_on='2026-09-01')], self.TODAY)
+        self.assertEqual(s['chosen'], [])
+
+    def test_both_surfaces_agree_on_every_row(self):
+        """The Command Center filters on `lane`; Due Today groups from the same decoration."""
+        s = self.sections()
+        for group in ('deadlines', 'chosen', 'suggested', 'waiting'):
+            for r in s[group]:
+                self.assertEqual(r['lane'], classify.lane_of(r),
+                                 'a card group must not relabel the row it came from')

@@ -1038,3 +1038,37 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
               padding: 3px 7px; border-radius: 5px; color: #dbe7ef;
               background: rgba(255,255,255,.05); border: 1px solid rgba(69,255,166,.35); }
 .db-nsinput:focus { outline: none; border-color: var(--aurora); }
+
+/* Due Today: compact again (2026-09-08). Suggestions must LOOK like suggestions. */
+.db-suggest-note { font-size: 11px; color: #8fa0b4; margin: -2px 0 6px; font-style: italic; }
+.db-openall { display: block; width: 100%; margin: 12px 0 0; padding: 8px;
+              font-family: var(--mono); font-size: 10px; letter-spacing: 1.2px;
+              text-transform: uppercase; cursor: pointer; border-radius: 6px;
+              color: var(--aurora); background: rgba(69,255,166,.06);
+              border: 1px solid rgba(69,255,166,.28); }
+.db-openall:hover { background: rgba(69,255,166,.12); }
+
+/* Command Center rows: the next move, in the existing tag style (2026-09-08). */
+.cmd-next    { color: #45ffa6; border: 1px solid rgba(69,255,166,.38); background: rgba(69,255,166,.08); }
+.cmd-follow  { color: #53e7ff; border: 1px solid rgba(83,231,255,.38); background: rgba(83,231,255,.08); }
+.cmd-decide  { color: #ffb020; border: 1px solid rgba(255,176,32,.38); background: rgba(255,176,32,.08); }
+.cmd-waitfor { color: #ffb020; border: 1px solid rgba(255,176,32,.30); background: transparent; }
+.cmd-today   { color: #0b1a12; border: 1px solid rgba(69,255,166,.7); background: rgba(69,255,166,.72); font-weight: 700; }
+.cmd-next, .cmd-follow, .cmd-decide, .cmd-waitfor, .cmd-today {
+  font-family: var(--mono); font-size: 9px; letter-spacing: .6px; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 4px; margin-left: 4px; white-space: nowrap;
+}
+/* Lens counts sit quietly inside the button. */
+.cmd-lens button b { font-weight: 700; opacity: .8; margin-left: 2px; }
+
+/* Rows carry more tags now (next step, follow-up, doing today), so the meta line wraps
+   instead of pushing the row wide, and the list clears the sticky add form. */
+.cmd-m { flex-wrap: wrap; row-gap: 4px; }
+.cmd-list { padding-bottom: 132px; }
+/* Phone: the lens row scrolls sideways rather than squeezing six labels to nothing. */
+@media (max-width: 560px) {
+  .cmd-lens { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .cmd-lens button { flex: 0 0 auto; padding-left: 14px; padding-right: 14px; }
+  .cmd-chips { overflow-x: auto; }
+  .db-meta { flex-wrap: wrap; row-gap: 4px; }
+}

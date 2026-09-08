@@ -1050,101 +1050,30 @@
       // is why a test row and a DNS task sat side by side. Now it answers the only question he
       // opens it for: what's late, what's due, and what is waiting on my OK. 'Data Bank' is
       // reserved for the curated records layer (people/deals/goals/bills), not the task list.
-      // ONE CLASSIFIER, ON THE SERVER (2026-09-08). This block used to decide for itself what
-      // was late, waiting, undated or approvable, and it disagreed with the rules Ace reads:
-      // it dropped SETTLED rows from the dated lanes but not WAITING ones, so a dated waiting
-      // record could show a working "Mark done" box here while the Parked section below
-      // deliberately disabled the very same box. Rows now arrive carrying `lane`,
-      // `completable` and `area` from backend/classify.py, and this view only filters and
-      // draws. If a rule needs changing it changes in one place, for both the screen and Ace.
-      var rows = (data.items || []).map(function (x) { return x; });
-      var sum = data.summary || { counts: {}, areas: {}, needs_you: 0, open: 0 };
-      var C = sum.counts || {};
-      function inLane() {
-        var want = Array.prototype.slice.call(arguments);
-        return rows.filter(function (x) { return want.indexOf(x.lane) >= 0; });
-      }
-
-      // Remembered view + area, so opening the panel returns to where he was.
-      var view = 'needs', area = 'all';
-      try { view = localStorage.getItem('ace2_board_view') || 'needs'; } catch (e) {}
-      try { area = localStorage.getItem('ace2_board_area') || 'all'; } catch (e) {}
-
-      var body6 = cardShell('COMMAND CENTER', slot);
-      body6.parentNode.classList.add('card-wide');
+      // DUE TODAY STAYS DUE TODAY (2026-09-08, Brady). An earlier pass grew this popup into
+      // a second full board with tabs and areas; that was the wrong call. The full board is
+      // the Command Center and remains so. This card answers one narrow question — what has
+      // a real deadline, what did Brady choose for today, and what could Ace reasonably
+      // suggest — and the grouping is computed SERVER-SIDE (backend/classify.py) so the two
+      // surfaces can never disagree about the same row.
+      var dt = data.due_today || { deadlines: [], chosen: [], suggested: [],
+                                   suggested_total: 0, waiting: [] };
+      var body6 = cardShell('DUE TODAY', slot);
       function tag(cls, t) { var s = document.createElement('span'); s.className = cls; s.textContent = t; return s; }
 
-      // ── view tabs ───────────────────────────────────────────────────────────────
-      // Every tab shows its count, so a view can prove what it is NOT showing. The old
-      // panel capped undated work at six rows with no total; 17 of Brady's 23 undated items
-      // were invisible from the day they were written.
-      var VIEWS = [
-        ['needs',  'Needs me',         (C.overdue||0)+(C.today||0)+(C.upcoming||0)+(C.undecided||0)+(C.anytime||0)],
-        ['today',  'Today',            (C.overdue||0)+(C.today||0)],
-        ['upcoming','Upcoming',        C.upcoming||0],
-        ['waiting','Waiting',          C.waiting||0],
-        ['decide', 'Needs a decision', C.undecided||0],
-        ['records','Records',          C.reference||0],
-        ['all',    'All items',        sum.open||0],
-        ['done',   'Completed',        (C.done||0)+(C.settled||0)]
-      ];
-      var vbar = document.createElement('div'); vbar.className = 'bv-tabs';
-      VIEWS.forEach(function (v) {
-        var b = document.createElement('button');
-        b.className = 'bv-tab' + (v[0] === view ? ' on' : '');
-        b.textContent = v[1] + ' ' + v[2];
-        b.addEventListener('click', function () {
-          try { localStorage.setItem('ace2_board_view', v[0]); } catch (e) {}
-          paintBoard(v[0], area);
-        });
-        vbar.appendChild(b);
-      });
-      body6.appendChild(vbar);
-
-      // ── area filter ─────────────────────────────────────────────────────────────
-      // Areas are Brady's five life/work lanes. Bills and Goals stay TAGS that cross areas —
-      // a bill is one row in one area that also answers to Bills; nothing is cloned to appear
-      // in two places.
-      var abar = document.createElement('div'); abar.className = 'bv-areas';
-      var areaNames = Object.keys(sum.areas || {}).sort(function (a, b) {
-        return (sum.areas[b] || 0) - (sum.areas[a] || 0);
-      });
-      [['all', 'All areas', sum.open || 0]].concat(areaNames.map(function (a) {
-        return [a, a, sum.areas[a]];
-      })).forEach(function (a) {
-        var b = document.createElement('button');
-        b.className = 'bv-area' + (a[0] === area ? ' on' : '');
-        b.textContent = a[1] + ' ' + a[2];
-        b.addEventListener('click', function () {
-          try { localStorage.setItem('ace2_board_area', a[0]); } catch (e) {}
-          paintBoard(view, a[0]);
-        });
-        abar.appendChild(b);
-      });
-      body6.appendChild(abar);
-
-      var listWrap = document.createElement('div'); listWrap.className = 'bv-list';
-      body6.appendChild(listWrap);
-
-      function sect(label, list, cls) {
-        if (!list.length) return;
-        var h = document.createElement('div'); h.className = 'db-sect ' + cls;
-        h.textContent = label + ' · ' + list.length; listWrap.appendChild(h);
-        list.forEach(function (it) { drawRow(it, cls); });
+      if (!dt.deadlines.length && !dt.chosen.length && !dt.suggested.length && !dt.waiting.length) {
+        return empty(body6, 'Nothing due and nothing waiting on you. Clear.');
       }
 
-      function drawRow(it, cls) {
-        var row = document.createElement('div'); row.className = 'db-item ' + cls;
+      function row(it, cls, opts) {
+        opts = opts || {};
+        var r = document.createElement('div'); r.className = 'db-item ' + cls;
         var box = document.createElement('button'); box.className = 'db-box';
-        // COMPLETABLE COMES FROM THE SERVER. A waiting row finishes when the other person
-        // acts and a reference record has a lifecycle, not an ending — neither gets a
-        // checkbox, in THIS view or any other. One stray tap is how four records vanished
-        // on 5 September.
+        // completable comes from the server; a waiting row or a record has no checkbox here
+        // OR anywhere else, and the API refuses it too.
         if (!it.completable) {
           box.className = 'db-box parked-box'; box.disabled = true;
-          box.title = it.lane === 'waiting'
-            ? ('Waiting on ' + (it.waiting_on || 'someone else') + ' — they own the next move')
-            : (it.lane === 'reference' ? 'A record you track, not a task' : 'Already closed');
+          box.title = it.waiting_on ? ('Waiting on ' + it.waiting_on) : 'Not yours to close';
         } else {
           box.title = 'Mark done';
           box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
@@ -1152,119 +1081,90 @@
         var mid = document.createElement('div'); mid.className = 'db-mid';
         var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
         var meta = document.createElement('div'); meta.className = 'db-meta';
-        if (it.area) meta.appendChild(tag('db-area', it.area));
-        (it.shelves || []).forEach(function (sh) { meta.appendChild(tag('db-shelf', sh)); });
         var c = cmdCatOf(it);
         if (c) { var ct = tag('db-cat', c); ct.style.color = CMD_CATS[c] || '#8aa';
                  ct.style.borderColor = (CMD_CATS[c] || '#8aa') + '55'; meta.appendChild(ct); }
-        // The next move, shown as its own thing rather than buried in the text.
-        if (it.lane === 'waiting' && it.waiting_on) meta.appendChild(tag('db-wait', '→ ' + it.waiting_on));
-        if (it.next_step) meta.appendChild(tag('db-next', 'next: ' + it.next_step));
-        if (it.followup) meta.appendChild(tag('db-follow', 'follow up ' + it.followup));
-        // An OVERDUE deadline is not the same as work chosen for today, and is labelled so.
         if (it.due_days != null) {
-          var dl = it.due_days < 0 ? (Math.abs(it.due_days) + 'd overdue')
-                 : it.due_days === 0 ? 'due today'
-                 : ('in ' + it.due_days + 'd');
-          meta.appendChild(tag(it.due_days < 0 ? 'db-late' : 'db-due', dl));
+          meta.appendChild(tag(it.due_days < 0 ? 'db-late' : 'db-due',
+            it.due_days < 0 ? (Math.abs(it.due_days) + 'd overdue') : 'due today'));
         }
-        // Setting the next step is the ONE edit this view needs, so it happens here rather
-        // than by sending him to another panel. It writes through /daybank/update and the
-        // row re-renders from the server's answer — no optimistic local state.
-        var addLbl = it.next_step ? 'Edit next step' : 'Set next step';
-        var add = document.createElement('button');
-        add.className = 'db-add'; add.textContent = addLbl;
-        add.title = 'The one move that advances this';
-        add.addEventListener('click', function (ev) {
-          ev.stopPropagation();
-          if (meta.querySelector('.db-nsedit')) return;
-          var wrap = document.createElement('span'); wrap.className = 'db-nsedit';
-          var inp = document.createElement('input');
-          inp.type = 'text'; inp.className = 'db-nsinput';
-          inp.placeholder = 'the next move…'; inp.value = it.next_step || '';
-          var ok = document.createElement('button'); ok.className = 'db-add'; ok.textContent = 'Save';
-          var clr = document.createElement('button'); clr.className = 'db-add'; clr.textContent = 'Clear';
-          function send(value) {
+        if (it.next_step) meta.appendChild(tag('db-next', 'next: ' + it.next_step));
+        if (it.waiting_on) meta.appendChild(tag('db-wait', '→ ' + it.waiting_on));
+        if (opts.suggest) {
+          // A SUGGESTION IS NOT A SCHEDULE. Accepting it records that Brady picked it up
+          // today; it never writes a due date, and declining writes nothing at all.
+          var yes = document.createElement('button');
+          yes.className = 'db-add'; yes.textContent = 'Do today';
+          yes.title = 'Adds it to today’s list — does NOT set a due date';
+          yes.addEventListener('click', function (ev) {
+            ev.stopPropagation();
             fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
-              body: JSON.stringify({ id: it.id, next_step: value }) })
+              body: JSON.stringify({ id: it.id, chosen_on: data.today }) })
               .then(function (r) { return r.ok ? r.json() : null; })
               .then(function (d) {
                 if (!d) return;
-                if (d.ok === false) { boardNotice(d.error || 'Could not save that.'); return; }
-                // Report the PERSISTED value, not the typed one.
-                materializeCard('daybank', { items: d.items, summary: d.summary || null });
-                boardNotice(d.next_step ? ('Saved — next step: ' + d.next_step)
-                                        : 'Next step cleared.');
+                if (d.ok === false) { boardNotice(d.error || 'Could not add that.'); return; }
+                materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                             due_today: d.due_today, today: d.today });
+                boardNotice('Added to today. No due date was set.');
                 if (typeof cmdSync === 'function') cmdSync();
               })
               .catch(function () { boardNotice('Could not reach the board.'); });
-          }
-          ok.addEventListener('click', function (e) { e.stopPropagation(); send(inp.value.trim()); });
-          clr.addEventListener('click', function (e) { e.stopPropagation(); send(''); });
-          inp.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') { e.preventDefault(); send(inp.value.trim()); }
-            if (e.key === 'Escape') wrap.remove();
           });
-          wrap.appendChild(inp); wrap.appendChild(ok);
-          if (it.next_step) wrap.appendChild(clr);
-          meta.appendChild(wrap); inp.focus();
-        });
-        meta.appendChild(add);
+          meta.appendChild(yes);
+        }
+        if (opts.chosen) {
+          var undo = document.createElement('button');
+          undo.className = 'db-add'; undo.textContent = 'Not today';
+          undo.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
+              body: JSON.stringify({ id: it.id, chosen_on: '' }) })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (d) {
+                if (!d || d.ok === false) return;
+                materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                             due_today: d.due_today, today: d.today });
+                boardNotice('Taken off today. Nothing else changed.');
+                if (typeof cmdSync === 'function') cmdSync();
+              })
+              .catch(function () {});
+          });
+          meta.appendChild(undo);
+        }
         mid.appendChild(txt); mid.appendChild(meta);
-        row.appendChild(box); row.appendChild(mid);
-        listWrap.appendChild(row);
+        r.appendChild(box); r.appendChild(mid);
+        body6.appendChild(r);
       }
 
-      function paintBoard(v, a) {
-        view = v; area = a;
-        Array.prototype.forEach.call(vbar.children, function (c, i) {
-          c.classList.toggle('on', VIEWS[i][0] === v);
-        });
-        Array.prototype.forEach.call(abar.children, function (c) {
-          c.classList.toggle('on', c.textContent.indexOf(a === 'all' ? 'All areas' : a) === 0);
-        });
-        listWrap.textContent = '';
-        function f(list) {
-          return a === 'all' ? list : list.filter(function (x) { return x.area === a; });
-        }
-        if (v === 'needs' || v === 'all') {
-          sect('OVERDUE', f(inLane('overdue')), 'late');
-          sect('DUE TODAY', f(inLane('today')), 'now');
-          sect('UPCOMING', f(inLane('upcoming')), 'soon');
-          sect('NEEDS A DECISION — no date, no next step', f(inLane('undecided')), 'nodate');
-          sect('ANYTIME — next step recorded', f(inLane('anytime')), 'nodate');
-          if (v === 'all') {
-            sect('WAITING ON SOMEONE ELSE', f(inLane('waiting')), 'parked');
-            sect('RECORDS & REFERENCE', f(inLane('reference')), 'parked');
-          }
-        } else if (v === 'today') {
-          sect('OVERDUE', f(inLane('overdue')), 'late');
-          sect('DUE TODAY', f(inLane('today')), 'now');
-        } else if (v === 'upcoming') {
-          sect('UPCOMING', f(inLane('upcoming')), 'soon');
-        } else if (v === 'waiting') {
-          sect('WAITING ON SOMEONE ELSE', f(inLane('waiting')), 'parked');
-        } else if (v === 'decide') {
-          sect('NEEDS A DECISION', f(inLane('undecided')), 'nodate');
-        } else if (v === 'records') {
-          sect('RECORDS & REFERENCE', f(inLane('reference')), 'parked');
-        } else if (v === 'done') {
-          sect('SETTLED — finished, kept', f(inLane('settled')), 'parked');
-          sect('COMPLETED', f(inLane('done')).slice(0, 60), 'parked');
-        }
-        if (!listWrap.children.length) {
-          var e = document.createElement('div'); e.className = 'db-sect';
-          e.textContent = 'Nothing here' + (a === 'all' ? '' : ' in ' + a) + '.';
-          listWrap.appendChild(e);
-        }
-        // Approval authority lives in Review, never on a task checkbox.
-        if ((C.done || 0) >= 0 && v === 'needs' && data.reviews_pending) {
-          var rv = document.createElement('div'); rv.className = 'db-sect appr';
-          rv.textContent = data.reviews_pending + ' action(s) waiting in Review — open Review to approve';
-          listWrap.appendChild(rv);
-        }
+      function sect(label, rows, cls, opts) {
+        if (!rows || !rows.length) return;
+        var h = document.createElement('div'); h.className = 'db-sect ' + cls;
+        h.textContent = label + ' · ' + rows.length; body6.appendChild(h);
+        rows.forEach(function (it) { row(it, cls, opts); });
       }
-      paintBoard(view, area);
+
+      sect('DEADLINES', dt.deadlines, 'late');
+      sect('DOING TODAY', dt.chosen, 'now', { chosen: true });
+      if (dt.suggested && dt.suggested.length) {
+        var sh = document.createElement('div'); sh.className = 'db-sect nodate';
+        sh.textContent = 'ACE SUGGESTS · ' + dt.suggested.length
+                       + (dt.suggested_total > dt.suggested.length
+                          ? ' of ' + dt.suggested_total + ' open' : '');
+        body6.appendChild(sh);
+        var note = document.createElement('div'); note.className = 'db-suggest-note';
+        note.textContent = 'Not scheduled and not due — things you could reasonably finish today.';
+        body6.appendChild(note);
+        dt.suggested.forEach(function (it) { row(it, 'nodate', { suggest: true }); });
+      }
+      sect('WAITING ON SOMEONE ELSE', dt.waiting, 'parked');
+
+      // The full board is the Command Center; this card never becomes one.
+      var openAll = document.createElement('button');
+      openAll.className = 'db-openall';
+      openAll.textContent = 'Open the Command Center →';
+      openAll.addEventListener('click', function () { if (typeof cmdOpen === 'function') cmdOpen(); });
+      body6.appendChild(openAll);
     } else if (panel === 'inbox') {
       // TWO LANES (2026-08-25): business + personal, clearly separated, each row tappable
       // straight into the right Gmail account. Falls back to the legacy single list if the
@@ -1345,6 +1245,7 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         if (d && d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                                       due_today: d.due_today, today: d.today,
                                                        reviews_pending: d.reviews_pending || 0 });
         if (typeof cmdSync === 'function') cmdSync();
       })
@@ -1391,6 +1292,7 @@
         // notice written before it is wiped by it — which is exactly how the refusal ended
         // up invisible in the first prototype run.
         if (d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                                  due_today: d.due_today, today: d.today,
                                                   reviews_pending: d.reviews_pending || 0 });
         if (d.ok === false) { boardNotice(d.error || 'That one is not yours to close.'); }
         // Keep an open Command board in step — same store, one truth (2026-07-31).
@@ -1793,13 +1695,13 @@
   var CMD_LANES = ['GFI/PFI','Groundworks','Side Work','Personal','Ace'];
   var LANE_COLORS = { 'GFI/PFI':'#38bdf8', 'Groundworks':'#ff8c1a', 'Side Work':'#2fd36b',
                       'Personal':'#ff4757', 'Ace':'#8091a8' };
-  var cmd = { open:false, min:false, lens:'pipeline', cat:'All', items:[], editing:null };
+  var cmd = { open:false, min:false, lens:'areas', cat:'All', items:[], editing:null, today:'' };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
   function cmdFetch(){
     return fetch(API+'/daybank?all=true',{headers:headers()})
       .then(function(r){ if(r.status===401){toLogin();throw 0;} return r.json(); })
-      .then(function(d){ cmd.items=(d.items||[]); });
+      .then(function(d){ cmd.items=(d.items||[]); cmd.today=d.today||''; });
   }
   function cmdOpen(){
     cmd.open=true; cmd.min=false;
@@ -1886,6 +1788,14 @@
       +'<span class="cmd-d" style="background:'+col+'"></span>'+c+'</span>'
       +(paid?'<span class="cmd-paid">PAID THIS MONTH</span>':'')
       +(it.due?'<span class="cmd-due">'+cmdEsc(it.due)+'</span>':'')
+      // THE NEXT MOVE, on the row (2026-09-08). These are stored fields, never inferred:
+      // `next_step` is what Brady said advances it, `followup` is when HE chases it, and
+      // `chosen_on` records that he picked it up today — none of them is a deadline.
+      +(it.next_step?'<span class="cmd-next">next: '+cmdEsc(it.next_step)+'</span>':'')
+      +(it.followup?'<span class="cmd-follow">follow up '+cmdEsc(it.followup)+'</span>':'')
+      +(it.lane==='undecided'?'<span class="cmd-decide">needs a decision</span>':'')
+      +(it.lane==='waiting'&&it.waiting_on?'<span class="cmd-waitfor">→ '+cmdEsc(it.waiting_on)+'</span>':'')
+      +((it.chosen_on&&cmd.today&&it.chosen_on.slice(0,10)===cmd.today)?'<span class="cmd-today">doing today</span>':'')
       // THE LINK, BOTH WAYS (2026-09-06). An action spawned from a record shows where it came
       // from; a record shows how many open actions hang off it. Without this the two row types
       // just coexist — the split only pays off when you can see that completing the action
@@ -1924,8 +1834,20 @@
       var dot=c==='All'?'':'<span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>';
       return '<button class="cmd-chip '+(c===cmd.cat?'on':'')+'" data-cat="'+c+'">'+dot+c+'</button>';
     }).join('');
-    var LN={due:'Due',pipeline:'Pipeline',lanes:'Lanes',all:'All',done:'Done'};
-    var lenses=['due','pipeline','lanes','all','done'].map(function(l){ return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'+LN[l]+'</button>'; }).join('');
+    // SIMPLER LENSES (2026-09-08). 'Pipeline' grouped by CATEGORY — exactly what the chips
+    // row below already does — and Brady reads the word as "deals going in", not "all my
+    // work". It is gone, and the two states that had nowhere to live here (waiting on
+    // someone else, and undated work with no next step) now have their own lens. Every
+    // lens reads the SAME server-computed `lane` the Due Today card reads.
+    var LN={due:'Due',waiting:'Waiting',decide:'Decide',areas:'Areas',all:'All',done:'Done'};
+    var LENS_ORDER=['due','waiting','decide','areas','all','done'];
+    if (LENS_ORDER.indexOf(cmd.lens)<0) cmd.lens='areas';   // migrate 'pipeline'/'lanes'
+    var nWait=cmd.items.filter(function(x){return x.lane==='waiting';}).length;
+    var nDec=cmd.items.filter(function(x){return x.lane==='undecided';}).length;
+    var LC={waiting:nWait,decide:nDec};
+    var lenses=LENS_ORDER.map(function(l){
+      var n=LC[l]; return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'
+        +LN[l]+(n?' <b>'+n+'</b>':'')+'</button>'; }).join('');
     var items=cmd.items.filter(function(x){ return cmd.cat==='All'||cmdCatOf(x)===cmd.cat; });
     // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
     // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
@@ -1945,7 +1867,19 @@
     }
     else if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
     else if(cmd.lens==='all'){ body=items.slice().sort(byAge).filter(function(x){return x.status!=='dropped';}).map(cmdRow).join(''); }
-    else if(cmd.lens==='lanes'){
+    else if(cmd.lens==='waiting'){
+      // Parked on someone else. Visible, never completable — the same rule the API enforces.
+      var w=items.filter(function(x){ return x.lane==='waiting'; }).sort(byAge);
+      body = w.length ? w.map(cmdRow).join('')
+                      : '<div class="cmd-empty">Nothing parked on anyone else.</div>';
+    }
+    else if(cmd.lens==='decide'){
+      // Undated work with no next step recorded — the one thing to decide, not to schedule.
+      var u=items.filter(function(x){ return x.lane==='undecided'; }).sort(byAge);
+      body = u.length ? u.map(cmdRow).join('')
+                      : '<div class="cmd-empty">Everything open has a date or a next step.</div>';
+    }
+    else if(cmd.lens==='areas'){
       // ACTIONS only: a lane answers "whose time does this take", and a record has no ending
       // to spend time on. Records stay visible under the pipeline lens.
       var acts=items.filter(function(x){ return x.status==='open' && x.entry!=='record'; });
@@ -2668,11 +2602,11 @@
     // REHYDRATE knew the route, but DOCK did not — so the click handler hit `if (!cfg) return`
     // and the button did NOTHING unless the card happened to be pinned from a previous session.
     // Two config tables, one of them updated. The guard below stops that shipping again.
-    // all=true so the COMPLETED and ALL ITEMS views have something to show and the counts
-    // describe the whole retained set, not just today's slice. The shape now carries the
-    // server's summary through: dropping it here is why every tab read 0 on first paint.
-    daybank:  { title: 'COMMAND CENTER', url: '/daybank?all=true',
+    // DUE TODAY keeps its name and its narrow job. The server computes the grouping, so
+    // this card and the Command Center read the same records by the same rules.
+    daybank:  { title: 'DUE TODAY', url: '/daybank',
                 shape: function (d) { return { items: d.items || [], summary: d.summary || null,
+                                               due_today: d.due_today || null, today: d.today || '',
                                                reviews_pending: d.reviews_pending || 0 }; } }
   };
   // Every dock button must have a DOCK entry, or it is silently dead on click.

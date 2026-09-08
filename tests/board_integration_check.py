@@ -120,7 +120,37 @@ try:
     for k, v in direct.items():
         assert api.get(k) == v, f'view disagreement on {k}: api={api.get(k)} direct={v}'
 
-    print('PASS: contract survives add/update, all= is a real route parameter, next_step '
+    # 10. ACCEPTING A SUGGESTION MUST NOT CREATE A DEADLINE (2026-09-08, Brady).
+    sug = c.get('/daybank').json()['due_today']['suggested']
+    assert sug, 'expected at least one suggestion in the fixture'
+    s_id = sug[0]['id']
+    before = next(x for x in c.get('/daybank?all=true').json()['items'] if x['id'] == s_id)
+    today = c.get('/daybank').json()['today']
+    r = c.post('/daybank/update', json={'id': s_id, 'chosen_on': today}).json()
+    assert r['ok'] is True, r
+    after = next(x for x in r['items'] if x['id'] == s_id)
+    assert after.get('chosen_on', '')[:10] == today, after
+    assert after.get('due') == before.get('due'), 'accepting a suggestion changed the due date'
+    assert after.get('due_days') == before.get('due_days'), 'a suggestion silently scheduled itself'
+    # it now shows under CHOSEN, not under SUGGESTED
+    dt = c.get('/daybank').json()['due_today']
+    assert s_id in [x['id'] for x in dt['chosen']], 'accepted work must move to today'
+    assert s_id not in [x['id'] for x in dt['suggested']], 'and must leave the suggestion list'
+    # declining puts it back and still writes no date
+    r = c.post('/daybank/update', json={'id': s_id, 'chosen_on': ''}).json()
+    back = next(x for x in r['items'] if x['id'] == s_id)
+    assert not back.get('chosen_on'), back
+    assert back.get('due') == before.get('due'), 'declining changed the due date'
+
+    # 11. The Command Center and Due Today never disagree about the same row.
+    full = {x['id']: x['lane'] for x in c.get('/daybank?all=true').json()['items']}
+    dt = c.get('/daybank').json()['due_today']
+    for grp in ('deadlines', 'chosen', 'suggested', 'waiting'):
+        for x in dt[grp]:
+            assert full[x['id']] == x['lane'], f'surface disagreement on {x["id"]}'
+
+    print('PASS: accepting a suggestion sets chosen_on and NEVER a due date, both surfaces '
+          'agree row for row, and: contract survives add/update, all= is a real route parameter, next_step '
           'creates/corrects/clears, follow-up is not a due date, completion is enforced at '
           'the boundary with an explicit override, child completion preserves its parent, '
           'and Ace reads the same lanes the screen does.')
