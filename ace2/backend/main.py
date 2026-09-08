@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.2-reliability-candidate"
+VERSION = "v2.0.2"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 

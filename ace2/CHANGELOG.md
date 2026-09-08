@@ -11,6 +11,28 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-08 — Reliability release 2.0.2
+
+Gated actions such as sending email and deleting calendar events now require Brady to
+approve the exact proposal in More → Review. Spoken approval alone cannot execute them.
+Backend source files are no longer served as public web assets.
+
+Week-plan drafts and corrections can persist across interrupted sessions. The action
+record separates confirmed results, unverified reports, unsaved changes needing review,
+and unknown outcomes. Do not claim a drafted plan was placed on the calendar. Calendar
+creation records provider results and flags conflicting details rather than silently
+claiming they were saved. Similar board captures with changed details request review;
+different amounts and due dates must not be silently combined.
+
+Money reads the budget sheet directly and fails explicitly when it cannot be verified.
+Server-side bridge delivery now uses a shared durable claim; a missing delivery receipt
+must not be called completed. The updated Mac worker still requires separate installation
+and verified CLI authentication. Do not claim the bridge is fully repaired on the Mac.
+
+Offline regression checks passed. Live voice acceptance has not yet been performed.
+Duplicate voice/model turns, the heuristic retry window, and unjournalled MCP writes remain
+limitations. Do not claim all actions are verified or that measured costs have fallen.
+
 ## 2026-09-06 — He can see the board's structure
 
 Rows in his context now carry `[RECORD]`, `[PARKED · who]`, `[SETTLED]` and their lane. He had
