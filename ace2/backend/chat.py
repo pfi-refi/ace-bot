@@ -648,10 +648,42 @@ async def _load_messages(user_text: str, prior=None) -> list:
 # individual — the bot going dark can't take Ace's memory with it. Durable state
 # lives in ACE MEMORY (facts) + the DATA BANK (commitments/deals); this raw thread
 # is only the last handful of turns for immediate continuity.
-def _unified_thread(limit: int = 30) -> list:
-    """Recent conversation across voice + chat, from Ace's OWN history only. Widened 12→30
-    (Brady: "I always want him to remember — that's building context"); recall covers anything
-    older than this window."""
+# A fixed TURN count is the wrong unit for voice (measured 2026-09-08). Brady's median gap
+# between turns on a live call is SIX SECONDS, so the old 30-turn window held about three
+# minutes. In the 22-minute call on 7 September the week plan he kept referring to was still
+# in context when he first pushed back at 09:11 (25 turns back) and had fallen out by 09:17
+# (44 turns) — which is exactly when "you've already given it to me twice" starts. The window
+# is now measured in MINUTES with a hard turn cap, so one conversation stays one conversation.
+_THREAD_MINUTES = int(os.environ.get("ACE2_THREAD_MINUTES", "90"))
+_THREAD_MAX = int(os.environ.get("ACE2_THREAD_MAX", "80"))
+
+
+def _collapse_reflushes(turns: list) -> list:
+    """Drop transcript re-flushes: ElevenLabs re-sends a growing user turn as it decides the
+    sentence is finished, so one spoken sentence lands as 2-3 rows. On 7 September 15 of 59
+    consecutive user pairs were continuations of the previous one, a quarter of the window
+    spent on text already present. Only a STRICT extension of the immediately preceding user
+    turn is collapsed, and the longest form is what survives — a genuine short correction
+    ("No, don't.") is not an extension of anything and is never touched."""
+    out = []
+    for t in turns:
+        prev = out[-1].get("content", "") if out else ""
+        cur = t.get("content", "")
+        if (out and t.get("role") == "user" and out[-1].get("role") == "user"
+                and len(cur) > len(prev) and cur.startswith(prev)):
+            out[-1] = t          # same sentence, more of it
+            continue
+        # An EXACT repeat is left alone: saying "yes" twice is two answers, not a re-flush.
+        out.append(t)
+    return out
+
+
+def _unified_thread(limit: int = None) -> list:
+    """Recent conversation across voice + chat, from Ace's OWN history only.
+
+    Held by TIME rather than turn count (see above), de-duplicated for transcript re-flushes,
+    and capped so a very long session cannot grow the prompt without bound. `recall` still
+    covers anything older."""
     try:
         entries = history.read_recent(2)
     except Exception:
@@ -661,7 +693,20 @@ def _unified_thread(limit: int = 30) -> list:
         for e in entries
         if e.get("role") in ("user", "assistant") and (e.get("content") or "").strip()
     ]
-    return turns[-limit:]
+    turns = _collapse_reflushes(turns)
+    cutoff = datetime.now(EASTERN) - timedelta(minutes=_THREAD_MINUTES)
+    recent = []
+    for t in turns:
+        ts = t.get("ts")
+        try:
+            if ts and datetime.fromisoformat(str(ts)).astimezone(EASTERN) >= cutoff:
+                recent.append(t)
+        except Exception:
+            recent.append(t)          # unparseable stamp: keep it rather than lose the turn
+    # Never return less than the old behaviour, never more than the cap.
+    if len(recent) < 30:
+        recent = turns[-30:]
+    return recent[-(limit or _THREAD_MAX):]
 
 
 def _format_thread(turns: list) -> str:
