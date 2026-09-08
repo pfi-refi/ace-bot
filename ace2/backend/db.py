@@ -1300,12 +1300,43 @@ def remove_push_sub(endpoint: str) -> bool:
         return False
 
 
+def _completion_blocked(item_id: str) -> tuple:
+    """(blocked, reason) for closing this row with an ordinary completion.
+
+    Reads the SAME classification the screens and Ace's context read, so there is one
+    answer to "may this be completed" rather than one per caller. Fails OPEN on an error:
+    a lookup problem must not make the board unusable, and the row is left as it was.
+    """
+    try:
+        from . import classify
+        it = next((x for x in read_items(active_only=False) if x.get("id") == item_id), None)
+        if not it:
+            return False, ""
+        lane = classify.lane_of(it)
+        if lane in classify.COMPLETABLE:
+            return False, ""
+        if lane == classify.LANE_WAITING:
+            who = (it.get("waiting_on") or "").strip() or "someone else"
+            return True, ("NOT COMPLETED — this is waiting on %s, who owns the next move. "
+                          "Nothing on Brady's side finishes it. If it really is finished, "
+                          "set state='settled'; only pass force_close if Brady says to close "
+                          "it anyway. Do NOT tell him it is done." % who)
+        if lane == classify.LANE_REFERENCE:
+            return True, ("NOT COMPLETED — this is a RECORD Brady tracks, which has a state "
+                          "rather than an ending. Update it, or set state='settled' when it "
+                          "is genuinely finished. Do NOT tell him it is done.")
+        return True, ("NOT COMPLETED — this row is already closed (%s)." % lane)
+    except Exception as e:                       # never block the board on a lookup failure
+        logger.warning("completion check skipped for %s: %s", item_id, type(e).__name__)
+        return False, ""
+
+
 def update_item(item_id: str, status: str = None, text: str = None,
                 tags: list = None, due: str = None, match: str = None,
                 superseded_by: str = None, closed_by: str = None,
                 entry: str = None, state: str = None, waiting_on: str = None,
                 bucket: str = None, next_step: str = None, followup: str = None,
-                chosen_on: str = None) -> tuple:
+                chosen_on: str = None, force_close: bool = False) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
@@ -1323,6 +1354,18 @@ def update_item(item_id: str, status: str = None, text: str = None,
     if not item_id:
         return False, "no id"
     ensure_ready()
+    # ── THE COMPLETION RULE LIVES HERE ─────────────────────────────────────────────
+    # It was in the HTTP route, which protected the panel and nothing else: Ace's own
+    # update_item tool calls straight through to this function, so he could close a record
+    # that is parked on somebody else and report "◆ Completed" for work nobody had done.
+    # Every path — panel, overlay, tool, sweep — passes through here, so the rule does too.
+    # A waiting row finishes when the OTHER person acts; a reference record has a lifecycle,
+    # not an ending. Changing one deliberately is still possible, but the caller has to say
+    # force_close and mean it.
+    if status == "done" and not force_close:
+        blocked, why = _completion_blocked(item_id)
+        if blocked:
+            return False, why
     try:
         import json
         with _conn() as c, c.cursor() as cur:

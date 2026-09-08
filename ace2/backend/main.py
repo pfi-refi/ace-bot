@@ -817,25 +817,9 @@ async def daybank_update(req: DaybankUpdateReq):
     if cat_err:
         return {"ok": False, **(await board_payload()),
                 "error": cat_err}
-    # ENFORCE COMPLETABILITY HERE, not only by disabling a checkbox (Codex, 2026-09-08).
-    # A disabled control protects one screen; the rule has to hold at the boundary or any
-    # other caller — the older overlay, a tool, a stale tab — walks straight past it.
-    if req.status == "done" and not req.force_close:
-        from . import classify
-        _rows = await asyncio.to_thread(daybank.read_items, False)
-        _target = next((x for x in _rows if x.get("id") == req.id), None)
-        if _target:
-            _lane = classify.lane_of(_target)
-            if _lane not in classify.COMPLETABLE:
-                _why = ("it is waiting on %s, who owns the next move"
-                        % (_target.get("waiting_on") or "someone else")) \
-                    if _lane == classify.LANE_WAITING else \
-                    ("it is a record you track, which has a state rather than an ending"
-                     if _lane == classify.LANE_REFERENCE else "it is already closed")
-                return {"ok": False, **(await board_payload()),
-                        "lane": _lane, "blocked": True,
-                        "error": ("Not completed — %s. To close it anyway, change its state "
-                                  "explicitly (settled) or resend with force_close." % _why)}
+    # The completion rule is enforced in db.update_item, which every path goes through —
+    # this route, the older overlay, and Ace's own update_item tool. It used to live here,
+    # where it protected the panel and nothing else.
     # Same refuse-don't-drop rule as category: an unknown value comes back as an error, never
     # as a silent no-op that still answers ok:true.
     if req.entry and req.entry not in ("action", "record"):
@@ -865,7 +849,7 @@ async def daybank_update(req: DaybankUpdateReq):
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
         (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None),
-        req.next_step, req.followup, req.chosen_on)
+        req.next_step, req.followup, req.chosen_on, req.force_close)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":
@@ -883,6 +867,9 @@ async def daybank_update(req: DaybankUpdateReq):
                     brain.add_memory, [f"{kind}: {it.get('text', '')} — {today}."], "win")
         except Exception as e:
             logger.warning("win-logging failed: %s", e)
+    if not ok and str(_msg).startswith("NOT COMPLETED"):
+        # A refusal, not a failure: say so in the shape the panel already renders.
+        return {"ok": False, "blocked": True, "error": str(_msg), **(await board_payload())}
     payload = await board_payload()
     # READ BACK the row that was just written and report ITS persisted state, so the answer
     # describes what is in the database rather than what was requested.

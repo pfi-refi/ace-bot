@@ -149,7 +149,43 @@ try:
         for x in dt[grp]:
             assert full[x['id']] == x['lane'], f'surface disagreement on {x["id"]}'
 
-    print('PASS: accepting a suggestion sets chosen_on and NEVER a due date, both surfaces '
+    # 12. THE COMPLETION RULE HOLDS AT THE SHARED BOUNDARY, not just on the HTTP route.
+    #     Ace's update_item tool calls daybank/db directly and bypassed the route guard
+    #     entirely — he closed a record parked on someone else and said "◆ Completed".
+    from ace2.backend import tools                       # noqa: E402
+    w2 = ids['waiting on the county for the permit']
+    out = tools._do_update_item(id=w2, status='done')
+    assert 'NOT COMPLETED' in str(out), f'the tool still closed a waiting record: {out!r}'
+    assert 'the county' in str(out), out
+    assert 'do not tell him it is done' in str(out).lower(), 'the tool must not report success'
+    after = next(x for x in daybank.read_items(False) if x['id'] == w2)
+    assert after['status'] == 'open', 'the waiting record was modified'
+
+    # a reference record is refused the same way, through the same path
+    rec = ids['a record that is settled']
+    out = tools._do_update_item(id=rec, status='done')
+    assert 'NOT COMPLETED' in str(out), out
+
+    # resolving by TEXT rather than id must not slip past it either
+    out = tools._do_update_item(match='waiting on the county for the permit', status='done')
+    assert 'NOT COMPLETED' in str(out), f'match-resolution bypassed the rule: {out!r}'
+    assert next(x for x in daybank.read_items(False) if x['id'] == w2)['status'] == 'open'
+
+    # an ordinary action still completes normally through the tool
+    act = c.post('/daybank/add', json={'text': 'an ordinary action to finish'}).json()
+    act_id = next(x for x in act['items'] if x['text'] == 'an ordinary action to finish')['id']
+    out = tools._do_update_item(id=act_id, status='done')
+    assert 'NOT COMPLETED' not in str(out), out
+    assert next(x for x in daybank.read_items(False) if x['id'] == act_id)['status'] == 'done'
+
+    # and a deliberate close is still possible at the same boundary
+    ok2, msg2 = daybank.update_item(w2, status='done', force_close=True)
+    assert ok2 is True, msg2
+    daybank.update_item(w2, status='open')
+
+    print('PASS: Ace.s tool cannot close a waiting record or a reference record, by id or by '
+          'match; ordinary actions still complete; force_close still works; and: '
+          'accepting a suggestion sets chosen_on and NEVER a due date, both surfaces '
           'agree row for row, and: contract survives add/update, all= is a real route parameter, next_step '
           'creates/corrects/clears, follow-up is not a due date, completion is enforced at '
           'the boundary with an explicit override, child completion preserves its parent, '
