@@ -477,10 +477,46 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
             result = service.events().insert(calendarId=calendar_id, body=event_body).execute()
             return True, result.get("id", "created")
         except Exception as insert_err:
-            if _is_duplicate_id_error(insert_err):
-                logger.info("calendar: '%s' already created with the same id — retry converged", title)
+            if not _is_duplicate_id_error(insert_err):
+                raise
+            # A 409 says an event with this id EXISTS — it does not say it is the event we
+            # were asked to create. The id covers title and start only, so a request that
+            # changed the end time or the description collides with the old event and would
+            # be reported as success while the changed detail was never saved. Read it back
+            # and compare before claiming convergence.
+            existing = None
+            try:
+                existing = service.events().get(calendarId=calendar_id,
+                                                eventId=event_body["id"]).execute()
+            except Exception as read_err:
+                logger.warning("calendar: 409 on '%s' but the existing event could not be "
+                               "read (%s) — outcome unverified", title, read_err)
+                return False, ("UNVERIFIED: an event with this identity already exists but "
+                               "could not be read back, so I cannot tell whether it matches "
+                               "what you asked for. Check the calendar before retrying.")
+            if existing.get("status") == "cancelled":
+                # A previously deleted event keeps its id; Google will not let us re-insert
+                # it, so recreate by updating the tombstone back to confirmed.
+                try:
+                    revived = service.events().update(
+                        calendarId=calendar_id, eventId=event_body["id"],
+                        body={**event_body, "status": "confirmed"}).execute()
+                    logger.info("calendar: recreated previously removed '%s'", title)
+                    return True, revived.get("id", event_body["id"])
+                except Exception as revive_err:
+                    return False, f"could not recreate a previously removed event: {revive_err}"
+            diffs = _event_differences(event_body, existing)
+            if not diffs:
+                logger.info("calendar: '%s' already created identically — retry converged", title)
                 return True, event_body["id"]
-            raise
+            logger.info("calendar: '%s' exists with different details %s — not overwritten",
+                        title, list(diffs))
+            return False, ("ALREADY EXISTS WITH DIFFERENT DETAILS — nothing was changed. "
+                           "The calendar has an event with this title at this time, but "
+                           + "; ".join(f"{k}: calendar has {v[1]!r}, you asked for {v[0]!r}"
+                                       for k, v in diffs.items())
+                           + f". Event id {event_body['id']}. Tell Brady and ask whether to "
+                             "update the existing event or leave it.")
     except Exception as e:
         logger.error("Calendar create error: %s", e)
         return False, str(e)
@@ -494,6 +530,44 @@ def _deterministic_event_id(title: str, start: dict) -> str:
     raw = " ".join((title or "").split()).casefold() + "|" + stamp[:16]
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()   # 0-9a-f, all legal base32hex
     return "ace" + digest[:29]
+
+
+def _norm_stamp(block: dict) -> str:
+    """Compare instants, not spellings. '2026-09-09T15:00:00-04:00' and the same moment
+    written in UTC are the same start; a naive string compare would call them different."""
+    raw = (block or {}).get("dateTime") or (block or {}).get("date") or ""
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        parsed = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.isoformat()          # all-day dates carry no zone
+        return parsed.astimezone(_tz.utc).isoformat()
+    except Exception:
+        return raw
+
+
+def _event_differences(wanted: dict, existing: dict) -> dict:
+    """{field: (wanted, existing)} for the fields a caller can meaningfully change.
+
+    Only fields we actually send are compared — Google decorates an event with plenty we
+    never set, and treating those as differences would make every retry look like a
+    conflict.
+    """
+    out = {}
+    if (wanted.get("summary") or "").strip() != (existing.get("summary") or "").strip():
+        out["title"] = (wanted.get("summary"), existing.get("summary"))
+    for field in ("start", "end"):
+        w, e = _norm_stamp(wanted.get(field)), _norm_stamp(existing.get(field))
+        if w and e and w != e:
+            out[field] = (w, e)
+    if "description" in wanted:
+        w = (wanted.get("description") or "").strip()
+        e = (existing.get("description") or "").strip()
+        if w != e:
+            out["description"] = (w, e)
+    return out
 
 
 def _is_duplicate_id_error(err) -> bool:

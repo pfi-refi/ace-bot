@@ -29,17 +29,17 @@ with tempfile.TemporaryDirectory(prefix='ace-ops-pg-') as temp:
             # 1. A retry of the same logical request produces ONE write.
             v, k, _ = ops.begin(CAL, ARGS)
             assert v == 'execute', v
-            ops.settle(k, 'completed', '◆ Added: Ken Weinberg Wed 3:00 PM', external_id='evt_1')
+            ops.settle(k, ops.COMPLETED, '◆ Added: Ken Weinberg Wed 3:00 PM', external_id='evt_1')
             v2, k2, prior = ops.begin(CAL, ARGS)
             assert v2 == 'duplicate', v2
-            assert k2 == k, 'the same logical request must map to the same op'
+            assert k2 == ops.op_key(CAL, ARGS), 'a duplicate reports the logical op key'
             assert 'Ken Weinberg' in prior, prior
 
             # 2. An intentional second request is still possible once the retry window
             #    has passed — same words, new intention.
             with db._conn() as c, c.cursor() as cur:
-                cur.execute("UPDATE ace_ops SET created_at=now()-make_interval(secs=>%s) "
-                            "WHERE op_key=%s", (ops.RETRY_WINDOW_SEC + 60, k))
+                cur.execute("UPDATE ace_write_ops SET created_at=now()-make_interval(secs=>%s) "
+                            "WHERE attempt_id=%s", (ops.RETRY_WINDOW_SEC + 60, k))
             v3, _, _ = ops.begin(CAL, ARGS)
             assert v3 == 'execute', f'an intentional repeat must not be swallowed: {v3}'
 
@@ -57,8 +57,8 @@ with tempfile.TemporaryDirectory(prefix='ace-ops-pg-') as temp:
             v4, k4, _ = ops.begin(CAL, interrupted)
             assert v4 == 'execute'
             with db._conn() as c, c.cursor() as cur:
-                cur.execute("UPDATE ace_ops SET created_at=now()-make_interval(secs=>%s) "
-                            "WHERE op_key=%s", (ops.STALE_SEC + 30, k4))
+                cur.execute("UPDATE ace_write_ops SET created_at=now()-make_interval(secs=>%s) "
+                            "WHERE attempt_id=%s", (ops.STALE_SEC + 30, k4))
             v5, _, note = ops.begin(CAL, interrupted)
             assert v5 == 'unknown', v5
             assert 'may or may not' in note, note
@@ -70,16 +70,17 @@ with tempfile.TemporaryDirectory(prefix='ace-ops-pg-') as temp:
             crashed = {'title': 'Rebecca packet', 'date': '2026-09-10'}
             _, k7, _ = ops.begin(CAL, crashed)
             with db._conn() as c, c.cursor() as cur:
-                cur.execute("UPDATE ace_ops SET created_at=now()-make_interval(secs=>%s) "
-                            "WHERE op_key=%s", (ops.STALE_SEC + 5, k7))
+                cur.execute("UPDATE ace_write_ops SET created_at=now()-make_interval(secs=>%s) "
+                            "WHERE attempt_id=%s", (ops.STALE_SEC + 5, k7))
             promoted = ops.sweep_stale()
             assert promoted >= 1, promoted
             queue = ops.pending()
-            assert any(p['op_key'] == k7 and p['state'] == 'unknown' for p in queue), queue
+            assert any(p['attempt_id'] == k7 and p['state'] == ops.UNKNOWN for p in queue), queue
 
             # 6. A write that succeeded externally but timed out locally reconciles
             #    without a duplicate: settling it completed makes the retry converge.
-            ops.settle(k4, 'completed', '◆ Added: Josh follow-up', external_id='evt_9')
+            v7b, k7b, _ = ops.begin(CAL, interrupted)   # unknown; reconcile it explicitly
+            ops.settle(k4, ops.COMPLETED, '◆ Added: Josh follow-up', external_id='evt_9')
             v8, _, prior8 = ops.begin(CAL, interrupted)
             assert v8 == 'duplicate', v8
             assert 'Josh follow-up' in prior8
@@ -87,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix='ace-ops-pg-') as temp:
             # 7. A failed write is a fresh intention next time, not a permanent block.
             bad = {'title': 'Broken', 'date': '2026-09-11'}
             _, k9, _ = ops.begin(CAL, bad)
-            ops.settle(k9, 'failed', '⚠️ Calendar create error')
+            ops.settle(k9, ops.FAILED_BEFORE_DISPATCH, '⚠️ Calendar create error')
             v10, _, _ = ops.begin(CAL, bad)
             assert v10 == 'execute', v10
 

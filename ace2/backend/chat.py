@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 import re
 import time
 from datetime import datetime, timedelta
@@ -1572,20 +1573,30 @@ BRIDGE_LEASE_SEC = int(os.environ.get("ACE2_BRIDGE_LEASE", "900"))
 _bridge_leases: dict = {}
 
 
-def bridge_lease_take(key: str) -> None:
-    """Reserve a job for the bridge worker for BRIDGE_LEASE_SEC."""
-    _bridge_leases[key] = time.time() + BRIDGE_LEASE_SEC
+def bridge_lease_take(key: str) -> str:
+    """Reserve a job for the bridge worker for BRIDGE_LEASE_SEC. Returns an owner token so
+    a completion arriving after the lease lapsed (and after the server took the job back)
+    can be recognised as late rather than applied blindly."""
+    token = uuid.uuid4().hex[:16]
+    _bridge_leases[key] = {"until": time.time() + BRIDGE_LEASE_SEC, "token": token}
+    return token
 
 
 def bridge_lease_active(key: str) -> bool:
     """True while a bridge worker still has a live reservation on this job."""
-    until = _bridge_leases.get(key)
-    if until is None:
+    lease = _bridge_leases.get(key)
+    if not lease:
         return False
-    if time.time() >= until:
+    if time.time() >= lease["until"]:
         _bridge_leases.pop(key, None)
         return False
     return True
+
+
+def bridge_lease_token(key: str) -> str:
+    """The current owner token, or '' when nothing holds this job."""
+    lease = _bridge_leases.get(key)
+    return lease["token"] if lease and time.time() < lease["until"] else ""
 
 
 def bridge_lease_release(key: str) -> None:
@@ -2334,17 +2345,30 @@ async def stage_pass(user_text: str, emit, prior=None):
 
 
 async def _run_and_settle(name: str, args: dict, key: str) -> str:
-    """Execute one write and record its outcome. Runs as its own task so that a
-    superseded voice turn cancelling its AWAIT cannot leave the journal unsettled —
-    the thread was never stoppable anyway (see ops.py)."""
+    """Execute one write and record what it ACTUALLY did. Runs as its own task so that a
+    superseded voice turn cancelling its AWAIT cannot leave the journal unsettled — the
+    thread was never stoppable anyway (see ops.py).
+
+    The outcome comes from the executor, not from how its sentence starts. An executor
+    that returns plain prose can only be recorded as REPORTED (claimed, unverified);
+    only a structured Outcome can say COMPLETED.
+    """
     try:
         result = await asyncio.to_thread(tools.execute, name, args)
     except Exception as e:
-        await asyncio.to_thread(ops.settle, key, "failed", f"\u26a0\ufe0f {e}")
+        # An exception AFTER the request left the process does not mean nothing happened:
+        # the provider may have committed before the response was lost. Only an executor
+        # that explicitly says failed_before_dispatch is safe to retry, so an unexpected
+        # error against an external service is UNKNOWN — surfaced, never auto-replayed.
+        state = ops.UNKNOWN if name in ops.EXTERNAL else ops.FAILED_BEFORE_DISPATCH
+        text = (f"\u26a0\ufe0f {name} failed with {type(e).__name__}. "
+                + ("The request may already have gone through — check before retrying."
+                   if state == ops.UNKNOWN else "Nothing was sent; it is safe to try again."))
+        await asyncio.to_thread(ops.settle, key, state, text)
         raise
-    state = "failed" if str(result).lstrip().startswith("\u26a0") else "completed"
-    await asyncio.to_thread(ops.settle, key, state, result)
-    return result
+    state, text, record_id = ops.classify(result)
+    await asyncio.to_thread(ops.settle, key, state, text, record_id)
+    return text
 
 
 async def _dispatch_write(name: str, args: dict) -> str:
@@ -2356,8 +2380,15 @@ async def _dispatch_write(name: str, args: dict) -> str:
     an invisible maybe. An interrupted-with-unknown-outcome action is reported, never
     silently replayed."""
     if name not in ops.JOURNALLED:
-        return await asyncio.to_thread(tools.execute, name, args)
+        return str(await asyncio.to_thread(tools.execute, name, args))
     verdict, key, prior_receipt = await asyncio.to_thread(ops.begin, name, args)
+    if verdict == "unavailable":
+        # Fail CLOSED. Without the journal we cannot tell a redelivery from a new request,
+        # and for an external provider that means a silent double-booking. Say plainly that
+        # nothing was attempted, so the request is preserved rather than half-claimed.
+        return ("\u26a0\ufe0f NOT DONE — I could not reach the record that stops this from "
+                "being done twice, so I did not attempt it. Tell Brady it still needs doing "
+                "and try again shortly. Do not claim it happened.")
     if verdict == "duplicate":
         return prior_receipt or "Already done moments ago — not repeated."
     if verdict == "in_flight":
@@ -2367,7 +2398,7 @@ async def _dispatch_write(name: str, args: dict) -> str:
         return "\u26a0\ufe0f " + (prior_receipt or "Previous attempt's outcome is unknown.")
     task = asyncio.create_task(_run_and_settle(name, args, key))
     try:
-        return await asyncio.shield(task)
+        return str(await asyncio.shield(task))
     except asyncio.CancelledError:
         # The write is still in flight and will settle itself. Do NOT mark it failed:
         # "cancelled the await" is not "the write did not happen".

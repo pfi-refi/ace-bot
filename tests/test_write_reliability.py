@@ -79,10 +79,23 @@ class CaptureReviewMessage(unittest.TestCase):
                    'requested_due': '2026-09-08'}
         payload.update(over)
         with patch.object(tools.daybank, 'add_item', lambda *a, **k: (False, payload)):
-            return tools._do_capture_item(text=payload['requested_text'])
+            self.outcome = tools._do_capture_item(text=payload['requested_text'])
+        return str(self.outcome)
 
     def test_says_it_was_not_saved(self):
         self.assertIn('NOT SAVED', self.render())
+
+    def test_state_is_needs_review_not_completed(self):
+        """Codex's finding: this message does not start with the warning glyph, so a
+        prose-prefix classifier recorded it as a COMPLETED action and the planning
+        context then listed it as done work that had never been saved."""
+        self.render()
+        self.assertEqual(self.outcome.state, ops.NEEDS_REVIEW)
+        self.assertNotEqual(self.outcome.state, ops.COMPLETED)
+
+    def test_classify_agrees(self):
+        self.render()
+        self.assertEqual(ops.classify(self.outcome)[0], ops.NEEDS_REVIEW)
 
     def test_is_not_worded_as_a_failure(self):
         self.assertNotIn('Could not capture', self.render())
@@ -126,11 +139,30 @@ class DispatchLifecycle(unittest.IsolatedAsyncioTestCase):
              patch.object(self.chat.tools, 'execute', tool or self._tool()):
             return await self.chat._dispatch_write(name, {'text': 'x'})
 
-    async def test_execute_runs_once_and_settles_completed(self):
+    async def test_legacy_prose_settles_reported_not_completed(self):
+        """An executor that only returns a sentence cannot prove it did anything."""
         out = await self._dispatch('execute')
         self.assertIn('Added', out)
         self.assertEqual(len(self.ran), 1)
-        self.assertEqual(self.settled[0][1], 'completed')
+        self.assertEqual(self.settled[0][1], ops.REPORTED)
+
+    async def test_structured_success_settles_completed(self):
+        tool = lambda n, a: ops.Outcome(ops.COMPLETED, '◆ Added: Ken', record_id='evt_1')
+        out = await self._dispatch('execute', tool=tool)
+        self.assertIn('Ken', out)
+        self.assertEqual(self.settled[0][1], ops.COMPLETED)
+
+    async def test_unsaved_capture_never_settles_completed(self):
+        """The release blocker, end to end through the dispatcher."""
+        tool = lambda n, a: ops.Outcome(ops.NEEDS_REVIEW, '◆ NOT SAVED — needs your call')
+        await self._dispatch('execute', tool=tool)
+        self.assertEqual(self.settled[0][1], ops.NEEDS_REVIEW)
+
+    async def test_unavailable_journal_refuses_to_execute(self):
+        out = await self._dispatch('unavailable')
+        self.assertEqual(self.ran, [], 'nothing may run without write ownership')
+        self.assertIn('NOT DONE', out)
+        self.assertIn('do not claim it happened', out.lower())
 
     async def test_retry_returns_prior_receipt_without_re_executing(self):
         """A redelivered request produces ONE write, and reports the original receipt."""
@@ -148,9 +180,26 @@ class DispatchLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertIn('interrupted', out.lower())
         self.assertEqual(self.ran, [], 'an unknown outcome must NOT re-execute')
 
-    async def test_failed_result_settles_failed(self):
+    async def test_warning_prose_settles_failed_before_dispatch(self):
         await self._dispatch('execute', tool=self._tool(result='⚠️ Calendar create error'))
-        self.assertEqual(self.settled[0][1], 'failed')
+        self.assertEqual(self.settled[0][1], ops.FAILED_BEFORE_DISPATCH)
+
+    async def test_exception_on_external_write_is_unknown_not_failed(self):
+        """The provider may have committed before the response was lost, so this is not
+        a safe-to-retry failure."""
+        def boom(n, a):
+            raise TimeoutError('connection reset')
+        with self.assertRaises(TimeoutError):
+            await self._dispatch('execute', tool=boom, name='create_calendar_event')
+        self.assertEqual(self.settled[-1][1], ops.UNKNOWN)
+        self.assertIn('may already have gone through', self.settled[-1][2])
+
+    async def test_exception_on_local_write_is_safe_to_retry(self):
+        def boom(n, a):
+            raise ValueError('bad row')
+        with self.assertRaises(ValueError):
+            await self._dispatch('execute', tool=boom, name='capture_item')
+        self.assertEqual(self.settled[-1][1], ops.FAILED_BEFORE_DISPATCH)
 
     async def test_cancellation_mid_dispatch_still_completes_and_settles(self):
         """THE core guarantee. Cancelling the await cannot stop the thread, so the write
@@ -183,7 +232,7 @@ class DispatchLifecycle(unittest.IsolatedAsyncioTestCase):
             await task
         await asyncio.sleep(0.6)                      # let the shielded write land
         self.assertEqual(len(self.ran), 1, 'the write must still complete')
-        self.assertEqual(self.settled[-1][1], 'completed',
+        self.assertEqual(self.settled[-1][1], ops.REPORTED,
                          'the outcome must be durably recorded despite cancellation')
 
     async def test_unjournalled_tool_passes_straight_through(self):
@@ -216,9 +265,20 @@ class BridgeLease(unittest.TestCase):
         """The failure that lost 52 sweeps: worker dies holding the claim forever."""
         import time
         self.chat.bridge_lease_take('sweep')
-        self.chat._bridge_leases['sweep'] = time.time() - 1
+        self.chat._bridge_leases['sweep']['until'] = time.time() - 1
         self.assertFalse(self.chat.bridge_lease_active('sweep'),
                          'an unacknowledged claim must lapse so the server can take over')
+
+    def test_lease_issues_an_owner_token(self):
+        token = self.chat.bridge_lease_take('brief:morning')
+        self.assertTrue(token)
+        self.assertEqual(self.chat.bridge_lease_token('brief:morning'), token)
+
+    def test_expired_lease_has_no_owner(self):
+        import time
+        self.chat.bridge_lease_take('brief:eod')
+        self.chat._bridge_leases['brief:eod']['until'] = time.time() - 1
+        self.assertEqual(self.chat.bridge_lease_token('brief:eod'), '')
 
     def test_release_on_acknowledgement(self):
         self.chat.bridge_lease_take('brief:eod')
@@ -355,3 +415,118 @@ class BillsFromSheet(unittest.TestCase):
     def test_unreadable_sheet_refuses_to_guess(self):
         bs, _, _ = self.bills()
         self.assertEqual(bs.parse_bills([['no', 'header', 'here']]), [])
+
+
+class WorkerAcknowledgement(unittest.TestCase):
+    """HTTP 200 is not an acknowledgement. {ok:false} must not destroy finished work."""
+    def setUp(self):
+        import importlib.util
+        import tempfile
+        spec = importlib.util.spec_from_file_location('bw2', ROOT / 'ops' / 'bridge_worker.py')
+        self.bw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.bw)
+        self.tmp = tempfile.mkdtemp(prefix='ace-ack-test-')
+        self.bw.PENDING = str(Path(self.tmp) / 'pending')
+        self.bw.LOG = str(Path(self.tmp) / 'bridge.log')
+
+    def park(self, body='{"job": "brief", "kind": "morning", "text": "work"}'):
+        Path(self.bw.PENDING).mkdir(parents=True, exist_ok=True)
+        (Path(self.bw.PENDING) / '20260908T090000-brief.json').write_text(body)
+
+    def parked(self):
+        return list(Path(self.bw.PENDING).glob('*.json'))
+
+    def test_negative_ack_is_retried_not_treated_as_delivered(self):
+        seen = []
+
+        def declining(cfg, path, body=None):
+            seen.append(1)
+            return {'ok': False, 'reason': 'this result is already being applied', 'retry': True}
+
+        with patch.object(self.bw, 'api', declining), patch.object(self.bw.time, 'sleep', lambda s: None):
+            self.bw.post_result({}, {'job': 'brief', 'text': 'work'})
+        self.assertGreater(len(seen), 1, 'a declined result must be retried')
+        self.assertEqual(len(self.parked()), 1, 'and then parked, not dropped')
+
+    def test_idempotent_ack_counts_as_delivered(self):
+        with patch.object(self.bw, 'api', lambda c, p, body=None: {'ok': True, 'idempotent': True}), \
+             patch.object(self.bw.time, 'sleep', lambda s: None):
+            out = self.bw.post_result({}, {'job': 'brief'})
+        self.assertTrue(out['ok'])
+        self.assertEqual(self.parked(), [])
+
+    def test_stale_period_result_is_discarded_not_retried_forever(self):
+        self.park()
+        with patch.object(self.bw, 'api', lambda c, p, body=None: {'ok': False, 'stale': True}):
+            self.bw.flush_pending({})
+        self.assertEqual(self.parked(), [], 'a result for a passed period can never succeed')
+
+    def test_already_delivered_result_is_discarded(self):
+        self.park()
+        with patch.object(self.bw, 'api', lambda c, p, body=None: {'ok': False, 'late': True}):
+            self.bw.flush_pending({})
+        self.assertEqual(self.parked(), [])
+
+    def test_recoverable_decline_keeps_the_parked_result(self):
+        self.park()
+        with patch.object(self.bw, 'api', lambda c, p, body=None: {'ok': False, 'retry': True,
+                                                                   'reason': 'busy'}):
+            self.bw.flush_pending({})
+        self.assertEqual(len(self.parked()), 1, 'finished work must survive a recoverable decline')
+
+
+class CalendarConflictVerification(unittest.TestCase):
+    """A 409 says an id exists, not that it holds what we asked for."""
+    def test_changed_end_time_is_a_difference(self):
+        w = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+             'end': {'dateTime': '2026-09-09T16:00:00-04:00'}}
+        e = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+             'end': {'dateTime': '2026-09-09T17:00:00-04:00'}}
+        self.assertIn('end', calendar_api._event_differences(w, e))
+
+    def test_changed_description_is_a_difference(self):
+        w = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+             'description': 'bring transcripts'}
+        e = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+             'description': ''}
+        self.assertIn('description', calendar_api._event_differences(w, e))
+
+    def test_equivalent_timezone_spellings_converge(self):
+        w = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+             'end': {'dateTime': '2026-09-09T16:00:00-04:00'}}
+        e = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T19:00:00Z'},
+             'end': {'dateTime': '2026-09-09T20:00:00Z'}}
+        self.assertEqual(calendar_api._event_differences(w, e), {},
+                         'the same instant written two ways is not a conflict')
+
+    def test_untouched_provider_fields_are_not_conflicts(self):
+        w = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'}}
+        e = {'summary': 'Ken', 'start': {'dateTime': '2026-09-09T15:00:00-04:00'},
+             'description': 'auto-added by Google', 'etag': 'x', 'htmlLink': 'y'}
+        self.assertEqual(calendar_api._event_differences(w, e), {})
+
+    def test_all_day_dates_compare(self):
+        w = {'summary': 'Holiday', 'start': {'date': '2026-09-07'}}
+        e = {'summary': 'Holiday', 'start': {'date': '2026-09-07'}}
+        self.assertEqual(calendar_api._event_differences(w, e), {})
+
+
+class WriteCoverageBoundary(unittest.TestCase):
+    """Not every write is journalled. The uncovered set must be visible, not assumed empty."""
+    GATED = {'send_email', 'mcp_send_gmail_message', 'delete_calendar_event'}
+
+    def test_gated_mcp_writes_are_not_reported_as_gaps(self):
+        self.assertEqual(ops.uncovered_mcp_writes(['mcp_send_gmail_message'], self.GATED), [])
+
+    def test_reads_are_not_gaps(self):
+        self.assertEqual(
+            ops.uncovered_mcp_writes(['mcp_search_gmail', 'mcp_list_events', 'mcp_get_file'],
+                                     self.GATED), [])
+
+    def test_an_ungated_mcp_write_is_surfaced(self):
+        gaps = ops.uncovered_mcp_writes(
+            ['mcp_create_drive_file', 'mcp_update_sheet_values', 'mcp_search_drive'], self.GATED)
+        self.assertEqual(gaps, ['mcp_create_drive_file', 'mcp_update_sheet_values'])
+
+    def test_journalled_local_tools_are_not_gaps(self):
+        self.assertEqual(ops.uncovered_mcp_writes(['create_calendar_event'], self.GATED), [])

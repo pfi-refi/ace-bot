@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import brain, daybank, memory_db
+from . import ops
 from .integrations.calendar_api import (
     create_calendar_event,
     delete_calendar_event,
@@ -843,18 +844,20 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
             # closed 8pm-midnight ET reads one day late. Same bug db.py:524 documents.
             when = db._done_et(res.get("done_ts")) or ""
             state = "open" if st == "open" else f"already {st}{f' {when}' if when else ''}"
-            return (f"◆ Already on your board as [{res.get('id')}] ({state}): "
+            return ops.Outcome(ops.COMPLETED, (
+                    f"◆ Already on your board as [{res.get('id')}] ({state}): "
                     f"{res.get('text', text)} — to change or complete it, use update_item "
-                    f"with that id.")
+                    f"with that id."), record_id=res.get("id", ""))
         tail = f" (due {due})" if due else ""
         cat = f" [{category}]" if category else ""
         out = f"◆ Added to your board{cat}: {res['text']}{tail}"
+        row_id = res.get("id", "") if isinstance(res, dict) else ""
         sim = res.get("similar") if isinstance(res, dict) else None
         if sim:
             out += (f"\n⚠ Similar existing item [{sim['id']}] ({sim['status']}): {sim['text']} — "
                     f"if that's the same task, keep ONE: update_item the existing one and drop "
                     f"this new one (status='dropped').")
-        return out
+        return ops.Outcome(ops.COMPLETED, out, record_id=row_id)
     if isinstance(res, dict) and res.get("needs_review"):
         # NOT an error: the board already holds a row that looks like this one but the
         # details differ, so saving either silently would lose information. Say precisely
@@ -862,7 +865,8 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
         # both keyed to the real item id so the next call can actually succeed.
         ex_due = f" (due {res['existing_due']})" if res.get("existing_due") else ""
         want_due = f" (due {res['requested_due']})" if res.get("requested_due") else ""
-        return (f"◆ NOT SAVED — needs your call. The board already has "
+        return ops.Outcome(ops.NEEDS_REVIEW, (
+                f"◆ NOT SAVED — needs your call. The board already has "
                 f"[{res['existing_id']}] ({res.get('existing_status', 'open')}): "
                 f"{res['existing_text']}{ex_due}\n"
                 f"You asked to add: {res['requested_text']}{want_due}\n"
@@ -871,8 +875,9 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
                 f"row and I will confirm the saved result. If it is genuinely DIFFERENT, "
                 f"call capture_item again with wording that names what makes it different "
                 f"(the person, the purpose, or which occurrence). Tell Brady which one you "
-                f"are doing; do not report this as added.")
-    return f"⚠️ Could not capture: {res}"
+                f"are doing; do not report this as added."),
+            detail={"existing_id": res["existing_id"]})
+    return ops.Outcome(ops.FAILED_BEFORE_DISPATCH, f"⚠️ Could not capture: {res}")
 
 
 def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None,

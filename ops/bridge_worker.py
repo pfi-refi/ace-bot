@@ -85,7 +85,18 @@ def post_result(cfg, payload, tries=3):
     last = None
     for attempt in range(tries):
         try:
-            return api(cfg, "/bridge/complete", payload)
+            res = api(cfg, "/bridge/complete", payload)
+            # An HTTP 200 is not an acknowledgement. The server answers {"ok": false} when
+            # it declined the result — stale period, already delivered, retry later — and
+            # treating that as delivered silently discarded finished Max-plan work.
+            if isinstance(res, dict) and res.get("ok") is False and not res.get("stale") \
+                    and not res.get("late") and res.get("retry") is not False:
+                last = RuntimeError(f"server declined: {res.get('reason') or res}")
+                if attempt < tries - 1:
+                    time.sleep(2 * (3 ** attempt))
+                    continue
+                break
+            return res
         except Exception as e:
             last = e
             if attempt < tries - 1:
@@ -116,11 +127,21 @@ def flush_pending(cfg) -> None:
             continue
         try:
             res = api(cfg, "/bridge/complete", payload)
-            os.remove(path)
-            log(f"recovered parked result {name} -> {res}")
         except Exception as e:
             log(f"parked result {name} still undeliverable: {e}")
             return                                     # server is down; try again next tick
+        accepted = not isinstance(res, dict) or res.get("ok") is not False
+        # Discard only what can never succeed: a result for a period that has passed, or one
+        # the server already delivered. Anything else stays parked — a negative answer we
+        # might yet recover from must not destroy finished work.
+        terminal = isinstance(res, dict) and (res.get("stale") or res.get("late")
+                                              or res.get("retry") is False)
+        if accepted or terminal:
+            os.remove(path)
+            log(f"parked result {name} {'delivered' if accepted else 'dropped'} -> {res}")
+        else:
+            log(f"parked result {name} declined, keeping it: {res}")
+            return
 
 
 def main() -> int:
@@ -168,7 +189,10 @@ def main() -> int:
         try:
             if job.get("job") == "brief":
                 text = think(claude_bin, model, job["prompt"])
-                res = post_result(cfg, {"job": "brief", "kind": job["kind"], "text": text})
+                res = post_result(cfg, {"job": "brief", "kind": job["kind"], "text": text,
+                                        "job_id": job.get("job_id", ""),
+                                        "job_date": job.get("job_date", ""),
+                                        "lease_token": job.get("lease_token", "")})
                 log(f"brief:{job['kind']} -> {res}")
             elif job.get("job") == "sweep":
                 facts = think(claude_bin, model, job["facts_prompt"])
@@ -176,7 +200,10 @@ def main() -> int:
                 reflection = think(claude_bin, model, job["reflection_prompt"])
                 res = post_result(cfg, {"job": "sweep", "hash": job.get("hash") or 0,
                                         "facts": facts, "triage": triage,
-                                        "reflection": reflection})
+                                        "reflection": reflection,
+                                        "job_id": job.get("job_id", ""),
+                                        "job_date": job.get("job_date", ""),
+                                        "lease_token": job.get("lease_token", "")})
                 log(f"sweep -> {res}")
         except Exception as e:
             log(f"job {job.get('job')} failed: {e}")

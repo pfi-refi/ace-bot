@@ -40,29 +40,47 @@ def context():
 
 
 def settled_actions() -> str:
-    """What the drafts above ACTUALLY resulted in.
+    """What the drafts above ACTUALLY resulted in, split by how well it is known.
 
-    A draft is an intention; the operation journal is the record. Without this, a resumed
-    session re-proposes work that already landed (how the Ken call reached the calendar
-    four times), or re-promises work whose outcome nobody knows. Completed rows say
-    'already done, do not redo'; unknown rows say 'check before touching'."""
+    The first version of this listed everything that had not raised an exception under
+    "ACTIONS ALREADY CARRIED OUT — these are DONE", which meant a capture that was
+    deliberately NOT saved appeared as finished work. Ace's own record then said the job
+    was done when it was not — the exact failure this system exists to remove. Only a
+    verified COMPLETED outcome may be described as done; a legacy executor's prose is
+    reported-but-unverified, and anything unresolved is called out as needing a check.
+    """
     try:
         rows = ops.recent_writes()
     except Exception:
         return ''
     if not rows:
         return ''
-    done = [r for r in rows if r['state'] == 'completed']
-    open_q = [r for r in rows if r['state'] in ('dispatched', 'unknown')]
-    out = ['\n\nACTIONS ALREADY CARRIED OUT (from the write journal, not the draft). '
-           'These are DONE — resume only what is missing, and never recreate these:']
-    for r in done[:20]:
-        out.append('  \u2713 ' + r['tool'] + ': ' + (r['receipt'] or '')[:160])
-    if not done:
-        out.append('  (none yet \u2014 nothing in this plan has actually been written)')
+    done = [r for r in rows if r['state'] == ops.COMPLETED]
+    claimed = [r for r in rows if r['state'] == ops.REPORTED]
+    review = [r for r in rows if r['state'] == ops.NEEDS_REVIEW]
+    open_q = [r for r in rows if r['state'] in ('dispatched', ops.UNKNOWN, ops.UNAVAILABLE)]
+
+    out = ['\n\nWHAT ACTUALLY HAPPENED (from the write journal, not from the draft):']
+    if done:
+        out.append('CONFIRMED DONE \u2014 do not recreate these:')
+        for r in done[:20]:
+            ident = f" [{r['external_id']}]" if r.get('external_id') else ''
+            out.append('  \u2713 ' + r['tool'] + ident + ': ' + (r['receipt'] or '')[:150])
+    if claimed:
+        out.append('REPORTED BUT NOT VERIFIED \u2014 Ace said these ran; no receipt confirms '
+                   'it. Say so if asked, and check rather than assert:')
+        for r in claimed[:12]:
+            out.append('  ~ ' + r['tool'] + ': ' + (r['receipt'] or '')[:150])
+    if review:
+        out.append('NOT SAVED \u2014 these were deliberately held back for a decision and are '
+                   'still outstanding. They are NOT done:')
+        for r in review[:10]:
+            out.append('  \u2717 ' + r['tool'] + ': ' + (r['receipt'] or '')[:150])
     if open_q:
-        out.append('UNRESOLVED \u2014 outcome not recorded. Do NOT retry these blindly; '
-                   'check the calendar or board first and tell Brady they need confirming:')
+        out.append('UNRESOLVED \u2014 outcome not recorded. Do NOT retry these blindly; check '
+                   'the calendar or board first and tell Brady they need confirming:')
         for r in open_q[:10]:
-            out.append('  ? ' + r['tool'] + ': ' + str(r['args'])[:140])
+            out.append('  ? ' + r['tool'] + ': ' + str(r['args'])[:130])
+    if len(out) == 1:
+        return ''
     return '\n'.join(out)

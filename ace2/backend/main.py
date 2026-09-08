@@ -2017,19 +2017,26 @@ async def bridge_jobs(request: Request):
         # in-server loop skipped it as "already sent". A lease keeps the double-send protection
         # the 2026-08-11 fix was for, while letting the loop reclaim the job if no acknowledgement
         # arrives. The permanent marker is now written in /bridge/complete, on success only.
-        chat.bridge_lease_take(f"brief:{kind}")
+        token = chat.bridge_lease_take(f"brief:{kind}")
         prompt = await chat.compose_brief_prompt(kind)
         if not prompt:
             chat.bridge_lease_release(f"brief:{kind}")
             continue   # nothing to compose: hand the job straight back to the loop
-        jobs.append({"job": "brief", "kind": kind, "prompt": prompt, "max_tokens": 400})
+        # job_id carries the PERIOD, so yesterday's parked result can never be applied as
+        # today's brief; lease_token identifies the holder, so a late completion after the
+        # lease lapsed is recognisable as late.
+        jobs.append({"job": "brief", "kind": kind, "prompt": prompt, "max_tokens": 400,
+                     "job_id": f"brief:{kind}:{today}", "job_date": today,
+                     "lease_token": token})
     sweep = await chat.compose_sweep()
     if not sweep.get("skipped"):
         # Reserve rather than stamp: stamping last_hash here made a failed worker look like a
         # completed sweep, which is how 52 learning sweeps were lost. apply_sweep stamps it for
         # real on acknowledgement; until then the lease keeps _learn_loop off the metered API.
-        chat.bridge_lease_take("sweep")
+        sweep_token = chat.bridge_lease_take("sweep")
         jobs.append({"job": "sweep", "hash": sweep["hash"],
+                     "job_id": f"sweep:{sweep['hash']}", "job_date": today,
+                     "lease_token": sweep_token,
                      "facts_prompt": sweep["facts_prompt"],
                      "triage_prompt": sweep["triage_prompt"],
                      "reflection_prompt": sweep["reflection_prompt"]})
@@ -2037,6 +2044,9 @@ async def bridge_jobs(request: Request):
 
 
 class BridgeResultReq(BaseModel):
+    job_id: str = ""       # durable identity incl. period, e.g. "brief:morning:2026-09-08"
+    job_date: str = ""     # Eastern date the job was issued for
+    lease_token: str = ""  # which lease produced this result
     job: str = ""          # "brief" | "sweep"
     kind: str = ""         # brief: morning | eod
     text: str = ""         # brief body
@@ -2050,21 +2060,59 @@ class BridgeResultReq(BaseModel):
 async def bridge_complete(req: BridgeResultReq, request: Request):
     """Apply one finished job through the same guarded delivery/filing paths."""
     _bridge_check(request)
+    from . import db as _db2, ops as _ops
+    today2 = chat.datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
+
+    # A brief is delivered ONCE for its period. The worker retries the completion POST when
+    # its response is lost (that lost-response case happened 10 times), so without a durable
+    # job identity the retry pushed the same brief to Brady's phone again.
+    job_id = req.job_id or (f"brief:{req.kind}:{today2}" if req.job == "brief"
+                            else f"sweep:{req.hash}")
+    if req.job == "brief" and req.job_date and req.job_date != today2:
+        # Yesterday's parked result must never consume today's slot.
+        return {"ok": False, "stale": True, "reason": f"issued for {req.job_date}, today is {today2}"}
+
+    verdict, attempt, prior = await asyncio.to_thread(
+        _ops.begin, "bridge_deliver", {"job_id": job_id}, 86400)
+    if verdict == "duplicate":
+        return {"ok": True, "idempotent": True, "result": prior, "job_id": job_id}
+    if verdict == "in_flight":
+        return {"ok": False, "retry": True, "reason": "this result is already being applied"}
+    if verdict == "unknown":
+        return {"ok": False, "retry": False,
+                "reason": "a previous delivery of this job had an unrecorded outcome; "
+                          "check before resending"}
+
     if req.job == "brief" and req.kind in ("morning", "eod"):
+        already = await asyncio.to_thread(_db2.latest_summary, f"brief_{req.kind}")
+        if (already.get("text") or "") == today2:
+            # The lease lapsed and the in-server loop already sent it. A late worker result
+            # must not push a second copy.
+            await asyncio.to_thread(_ops.settle, attempt, _ops.COMPLETED,
+                                    "late result discarded; brief already delivered")
+            chat.bridge_lease_release(f"brief:{req.kind}")
+            return {"ok": False, "late": True, "reason": "brief already delivered by the server"}
         delivered = await chat.deliver_brief(req.kind, req.text)
         if delivered:
             # NOW it is really sent — consume the day's slot. Until this point the lease
             # only reserved it, so a worker that died left the brief recoverable.
-            from . import db as _db2
-            today2 = chat.datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
             chat._brief_sent[req.kind] = today2
             await asyncio.to_thread(_db2.add_summary, today2, f"brief_{req.kind}")
+        await asyncio.to_thread(
+            _ops.settle, attempt,
+            _ops.COMPLETED if delivered else _ops.FAILED_BEFORE_DISPATCH,
+            f"brief {req.kind} {'delivered' if delivered else 'not delivered'} {today2}")
         chat.bridge_lease_release(f"brief:{req.kind}")
-        return {"ok": bool(delivered), "kind": req.kind}
+        return {"ok": bool(delivered), "kind": req.kind, "job_id": job_id}
     if req.job == "sweep":
         res = await chat.apply_sweep(req.hash, req.facts, req.triage, req.reflection)
+        ok = "error" not in res
+        await asyncio.to_thread(_ops.settle, attempt,
+                                _ops.COMPLETED if ok else _ops.FAILED_BEFORE_DISPATCH,
+                                f"sweep {job_id} {'applied' if ok else 'failed'}")
         chat.bridge_lease_release("sweep")
-        return {"ok": "error" not in res, **res}
+        return {"ok": ok, "job_id": job_id, **res}
+    await asyncio.to_thread(_ops.settle, attempt, _ops.FAILED_BEFORE_DISPATCH, "unknown job")
     return {"ok": False, "error": "unknown job"}
 
 
