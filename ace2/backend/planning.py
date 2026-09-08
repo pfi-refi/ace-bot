@@ -1,7 +1,7 @@
 """A persistent planning notebook, independent of voice connection lifetime."""
 import re
 from datetime import datetime, timezone
-from . import review_store
+from . import ops, review_store
 START = re.compile(r'\b(?:plan(?:ning)?\s+(?:my|the|our|this|next)\s+week|week(?:ly)?\s+plan|lay\s+out\s+(?:my|the)\s+week)\b', re.I)
 DAYS = re.compile(r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', re.I)
 
@@ -36,4 +36,33 @@ def context():
             'Resume this work. Later user corrections override older draft text. '
             'Flag conflicting dates instead of booking both. Do not repeat answered intake '
             'questions. Only describe calendar entries as created after tool receipts.\n' +
-            rendered)
+            rendered + settled_actions())
+
+
+def settled_actions() -> str:
+    """What the drafts above ACTUALLY resulted in.
+
+    A draft is an intention; the operation journal is the record. Without this, a resumed
+    session re-proposes work that already landed (how the Ken call reached the calendar
+    four times), or re-promises work whose outcome nobody knows. Completed rows say
+    'already done, do not redo'; unknown rows say 'check before touching'."""
+    try:
+        rows = ops.recent_writes()
+    except Exception:
+        return ''
+    if not rows:
+        return ''
+    done = [r for r in rows if r['state'] == 'completed']
+    open_q = [r for r in rows if r['state'] in ('dispatched', 'unknown')]
+    out = ['\n\nACTIONS ALREADY CARRIED OUT (from the write journal, not the draft). '
+           'These are DONE — resume only what is missing, and never recreate these:']
+    for r in done[:20]:
+        out.append('  \u2713 ' + r['tool'] + ': ' + (r['receipt'] or '')[:160])
+    if not done:
+        out.append('  (none yet \u2014 nothing in this plan has actually been written)')
+    if open_q:
+        out.append('UNRESOLVED \u2014 outcome not recorded. Do NOT retry these blindly; '
+                   'check the calendar or board first and tell Brady they need confirming:')
+        for r in open_q[:10]:
+            out.append('  ? ' + r['tool'] + ': ' + str(r['args'])[:140])
+    return '\n'.join(out)

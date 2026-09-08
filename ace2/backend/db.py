@@ -895,10 +895,19 @@ def _repeat_result(existing, text, due, parent_id=None):
     same_parent = (parent_id or None) == (existing.get("parent_id") or None)
     if same_text and same_due and same_parent:
         return True, {**existing, "dup": True}
-    return False, ("REVIEW EXISTING ITEM [" + existing["id"] + "]: " + existing.get("text", "")
-                   + " — new wording/date was NOT saved. Use update_item on this ID if it is the "
-                   "same obligation; otherwise clarify the distinct person, purpose or occurrence. "
-                   "Original requested text: " + text)
+    # Changed detail on a near-identical row is NOT a failure and NOT a silent merge —
+    # it is an unresolved question with exactly two answers, and the caller needs the
+    # existing ID to act on either. Structured, not prose, so the renderer can say what
+    # actually happened rather than the reader guessing from a string (2026-09-08).
+    return False, {
+        "needs_review": True,
+        "existing_id": existing["id"],
+        "existing_text": existing.get("text", ""),
+        "existing_status": existing.get("status", "open"),
+        "existing_due": existing.get("due"),
+        "requested_text": text,
+        "requested_due": due,
+    }
 
 
 def _dedup_eligible(existing, text, due, parent_id):

@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime
 
@@ -24,6 +25,7 @@ HOME = os.path.expanduser("~")
 DIR = os.path.join(HOME, "ace-bridge")
 LOG = os.path.join(DIR, "bridge.log")
 CONFIG = os.path.join(DIR, "config.json")
+PENDING = os.path.join(DIR, "pending")   # results whose POST failed after the model ran
 
 
 def log(msg: str) -> None:
@@ -71,6 +73,56 @@ def think(claude_bin, model, prompt) -> str:
     return (r.stdout or "").strip()
 
 
+def post_result(cfg, payload, tries=3):
+    """Deliver a finished job result, retrying the POST only — never the model call.
+
+    Ten of the 62 bridge failures on record were `The read operation timed out` on this
+    POST: the Max-plan model work had ALREADY been done and the answer was thrown away,
+    while the server still counted the job as claimed. Re-running `think` would spend
+    the work twice, so the retry is on delivery alone, and a result that still cannot be
+    delivered is parked on disk for the next run instead of being dropped.
+    """
+    last = None
+    for attempt in range(tries):
+        try:
+            return api(cfg, "/bridge/complete", payload)
+        except Exception as e:
+            last = e
+            if attempt < tries - 1:
+                time.sleep(2 * (3 ** attempt))          # 2s, 6s — bounded, not a hot loop
+    try:
+        os.makedirs(PENDING, exist_ok=True)
+        name = f"{datetime.now().strftime('%Y%m%dT%H%M%S')}-{payload.get('job', 'job')}.json"
+        with open(os.path.join(PENDING, name), "w") as f:
+            json.dump(payload, f)
+        log(f"result undeliverable ({last}) — parked at pending/{name} for the next run")
+    except Exception as e:
+        log(f"result LOST — could not park it: {e} (original: {last})")
+    return {"parked": True}
+
+
+def flush_pending(cfg) -> None:
+    """Deliver anything parked by an earlier run, before claiming new work."""
+    try:
+        names = sorted(os.listdir(PENDING)) if os.path.isdir(PENDING) else []
+    except Exception:
+        return
+    for name in names:
+        path = os.path.join(PENDING, name)
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+        try:
+            res = api(cfg, "/bridge/complete", payload)
+            os.remove(path)
+            log(f"recovered parked result {name} -> {res}")
+        except Exception as e:
+            log(f"parked result {name} still undeliverable: {e}")
+            return                                     # server is down; try again next tick
+
+
 def main() -> int:
     try:
         with open(CONFIG) as config_file:
@@ -93,6 +145,7 @@ def main() -> int:
     except Exception:
         log("authentication preflight failed — no jobs claimed")
         return 1
+    flush_pending(cfg)
     try:
         data = api(cfg, "/bridge/jobs")
     except urllib.error.HTTPError as e:
@@ -115,16 +168,15 @@ def main() -> int:
         try:
             if job.get("job") == "brief":
                 text = think(claude_bin, model, job["prompt"])
-                res = api(cfg, "/bridge/complete",
-                          {"job": "brief", "kind": job["kind"], "text": text})
+                res = post_result(cfg, {"job": "brief", "kind": job["kind"], "text": text})
                 log(f"brief:{job['kind']} -> {res}")
             elif job.get("job") == "sweep":
                 facts = think(claude_bin, model, job["facts_prompt"])
                 triage = think(claude_bin, model, job["triage_prompt"])
                 reflection = think(claude_bin, model, job["reflection_prompt"])
-                res = api(cfg, "/bridge/complete",
-                          {"job": "sweep", "hash": job.get("hash") or 0,
-                           "facts": facts, "triage": triage, "reflection": reflection})
+                res = post_result(cfg, {"job": "sweep", "hash": job.get("hash") or 0,
+                                        "facts": facts, "triage": triage,
+                                        "reflection": reflection})
                 log(f"sweep -> {res}")
         except Exception as e:
             log(f"job {job.get('job')} failed: {e}")

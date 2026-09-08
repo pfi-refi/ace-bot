@@ -39,6 +39,7 @@ import pytz
 from anthropic import AsyncAnthropic
 
 from . import brain, daybank, history, tools
+from . import ops
 from .integrations.calendar_api import (
     get_events_structured,
     get_tomorrow_events,
@@ -897,6 +898,8 @@ async def compose_sweep(force: bool = False) -> dict:
         # updates lived) — a primary reason the sweep under-captured. Opus can hold the whole thing.
         convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:2000]}" for t in turns)
         h = hash(convo)
+        if not force and bridge_lease_active("sweep"):
+            return {"skipped": "bridge worker holds this sweep"}
         if not force and h == _learn_state.get("last_hash"):
             return {"skipped": "no change"}   # nothing new since the last sweep — don't burn a call
         existing = await asyncio.to_thread(brain.read_memory)
@@ -1554,6 +1557,41 @@ async def generate_business_report() -> str:
 _brief_sent: dict = {}   # process-local claim: {kind: "YYYY-MM-DD"} — survives db outages
 
 
+# ── BRIDGE LEASES (2026-09-08) ──────────────────────────────────────────────────
+# The bridge used to claim a brief PERMANENTLY the instant it handed the prompt over:
+# it wrote the brief_{kind} marker before the worker had done anything. When the worker
+# then failed — 52 times because the Claude CLI was never signed in, 10 more when the
+# result POST timed out — the brief was simply gone for the day, and the in-server loop
+# skipped it because the marker said "sent".
+#
+# A lease keeps the double-send protection without the data loss: while it is fresh, the
+# in-server loop stays out of the way; once it expires unacknowledged, the loop takes the
+# job back on the metered API. Worst case is a brief that arrives late on the API instead
+# of one that never arrives at all.
+BRIDGE_LEASE_SEC = int(os.environ.get("ACE2_BRIDGE_LEASE", "900"))
+_bridge_leases: dict = {}
+
+
+def bridge_lease_take(key: str) -> None:
+    """Reserve a job for the bridge worker for BRIDGE_LEASE_SEC."""
+    _bridge_leases[key] = time.time() + BRIDGE_LEASE_SEC
+
+
+def bridge_lease_active(key: str) -> bool:
+    """True while a bridge worker still has a live reservation on this job."""
+    until = _bridge_leases.get(key)
+    if until is None:
+        return False
+    if time.time() >= until:
+        _bridge_leases.pop(key, None)
+        return False
+    return True
+
+
+def bridge_lease_release(key: str) -> None:
+    _bridge_leases.pop(key, None)
+
+
 async def _brief_loop() -> None:
     """Fire the morning/EOD briefs at their Eastern times — once per day each, INSIDE a
     2-hour window (a late boot never sends a 'morning' brief at 11pm). Claim-first via a
@@ -1573,6 +1611,8 @@ async def _brief_loop() -> None:
                     continue   # only within 2h of the target — missed windows are skipped
                 if _brief_sent.get(kind) == today:
                     continue   # local claim (also caps retries if db reads fail)
+                if bridge_lease_active(f"brief:{kind}"):
+                    continue   # the Max-plan worker holds it; take over when the lease lapses
                 last = await asyncio.to_thread(db.latest_summary, f"brief_{kind}")
                 if (last.get("text") or "") == today:
                     _brief_sent[kind] = today
@@ -2293,6 +2333,49 @@ async def stage_pass(user_text: str, emit, prior=None):
         logger.warning("stage_pass failed: %s", e)
 
 
+async def _run_and_settle(name: str, args: dict, key: str) -> str:
+    """Execute one write and record its outcome. Runs as its own task so that a
+    superseded voice turn cancelling its AWAIT cannot leave the journal unsettled —
+    the thread was never stoppable anyway (see ops.py)."""
+    try:
+        result = await asyncio.to_thread(tools.execute, name, args)
+    except Exception as e:
+        await asyncio.to_thread(ops.settle, key, "failed", f"\u26a0\ufe0f {e}")
+        raise
+    state = "failed" if str(result).lstrip().startswith("\u26a0") else "completed"
+    await asyncio.to_thread(ops.settle, key, state, result)
+    return result
+
+
+async def _dispatch_write(name: str, args: dict) -> str:
+    """Run a write exactly once, whatever ElevenLabs does to the turn around it.
+
+    Barge-in is preserved: the caller is still cancellable and Ace still stops talking.
+    What changes is that the WRITE keeps its own lifecycle — shielded, then settled by
+    its own task — so an interrupted turn leaves an accurate durable record instead of
+    an invisible maybe. An interrupted-with-unknown-outcome action is reported, never
+    silently replayed."""
+    if name not in ops.JOURNALLED:
+        return await asyncio.to_thread(tools.execute, name, args)
+    verdict, key, prior_receipt = await asyncio.to_thread(ops.begin, name, args)
+    if verdict == "duplicate":
+        return prior_receipt or "Already done moments ago — not repeated."
+    if verdict == "in_flight":
+        return ("STOP: this exact action is already running from a previous turn. Do not "
+                "send it again. Say it is in progress and wait.")
+    if verdict == "unknown":
+        return "\u26a0\ufe0f " + (prior_receipt or "Previous attempt's outcome is unknown.")
+    task = asyncio.create_task(_run_and_settle(name, args, key))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # The write is still in flight and will settle itself. Do NOT mark it failed:
+        # "cancelled the await" is not "the write did not happen".
+        logger.info("write %s superseded mid-flight; op %s settles independently",
+                    name, key[:8])
+        raise
+
+
 async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
@@ -2568,7 +2651,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 elif mcp_client.is_mcp_tool(block.name):
                     result = await mcp_client.call(block.name, use_args)
                 else:
-                    result = await asyncio.to_thread(tools.execute, block.name, use_args)
+                    result = await _dispatch_write(block.name, use_args)
                 await emit("tool", {"name": block.name, "label": label, "status": "done", "ui": is_ui})
                 if not is_ui:
                     await emit("confirmation", {"text": result})

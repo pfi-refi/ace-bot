@@ -855,6 +855,23 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
                     f"if that's the same task, keep ONE: update_item the existing one and drop "
                     f"this new one (status='dropped').")
         return out
+    if isinstance(res, dict) and res.get("needs_review"):
+        # NOT an error: the board already holds a row that looks like this one but the
+        # details differ, so saving either silently would lose information. Say precisely
+        # what is on the board, what was asked for, and the two moves that resolve it —
+        # both keyed to the real item id so the next call can actually succeed.
+        ex_due = f" (due {res['existing_due']})" if res.get("existing_due") else ""
+        want_due = f" (due {res['requested_due']})" if res.get("requested_due") else ""
+        return (f"◆ NOT SAVED — needs your call. The board already has "
+                f"[{res['existing_id']}] ({res.get('existing_status', 'open')}): "
+                f"{res['existing_text']}{ex_due}\n"
+                f"You asked to add: {res['requested_text']}{want_due}\n"
+                f"If it is the SAME obligation with new details, call update_item with "
+                f"id='{res['existing_id']}' and the new text/due — that amends the existing "
+                f"row and I will confirm the saved result. If it is genuinely DIFFERENT, "
+                f"call capture_item again with wording that names what makes it different "
+                f"(the person, the purpose, or which occurrence). Tell Brady which one you "
+                f"are doing; do not report this as added.")
     return f"⚠️ Could not capture: {res}"
 
 

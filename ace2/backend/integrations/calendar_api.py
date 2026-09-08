@@ -62,10 +62,34 @@ _CAL_DENY_IDS = _merged("ACE2_CAL_DENY_IDS", "mikeywilson4mw@gmail.com")
 _EVENT_DENY = _merged("ACE2_EVENT_DENY", "bpm,hierarchy training,base shop,rblc,live calling,gfi lgnds,momentum monday")
 
 
+# Per-drop detail is DEBUG, not INFO (2026-09-08). Calendar reads run on every context
+# refresh, and one INFO line per filtered event produced 237 of 500 lines in the Railway
+# window — which is WHY the voice-turn lifecycle could not be diagnosed from the logs.
+# It also wrote personal event titles into hosting logs. The diagnostic value the
+# 2026-08-11 fix wanted (over-filtering must not be invisible) is kept as ONE aggregated
+# line per read, counting drops per deny-term with no titles.
+_drop_tally: dict = {}
+
+
+def _note_drop(term: str) -> None:
+    _drop_tally[term] = _drop_tally.get(term, 0) + 1
+
+
+def log_filter_summary(context: str = "") -> None:
+    """Emit one line for everything filtered since the last summary, then reset."""
+    if not _drop_tally:
+        return
+    parts = ", ".join(f"{t}\u00d7{n}" for t, n in sorted(_drop_tally.items()))
+    logger.info("cal filter%s: dropped %d (%s)",
+                f" [{context}]" if context else "", sum(_drop_tally.values()), parts)
+    _drop_tally.clear()
+
+
 def _cal_dropped(cal_id: str, cal_name: str) -> bool:
     nid, nm = (cal_id or "").lower(), (cal_name or "").lower()
     if any(d in nid for d in _CAL_DENY_IDS) or any(d in nm for d in _CAL_DENY):
-        logger.info("cal filter: dropped whole calendar '%s'", cal_name)
+        _note_drop("calendar:" + (cal_name or "?")[:24])
+        logger.debug("cal filter: dropped whole calendar '%s'", cal_name)
         return True
     return False
 
@@ -73,13 +97,14 @@ def _cal_dropped(cal_id: str, cal_name: str) -> bool:
 def _event_dropped(title: str) -> bool:
     # WORD-BOUNDARY match (2026-08-11 review fix): a bare substring test would hide a real
     # meeting whose title merely CONTAINS a deny word (e.g. 'bpm' inside another word). Match
-    # whole words/phrases only, and LOG every drop so over-filtering is diagnosable (a filtered
-    # day used to look identical to an empty one — that was the 'missing appointment' symptom).
+    # whole words/phrases only, and record every drop so over-filtering stays diagnosable (a
+    # filtered day used to look identical to an empty one — the 'missing appointment' symptom).
     import re
     t = (title or "").lower()
     for d in _EVENT_DENY:
         if re.search(r"(?<!\w)" + re.escape(d) + r"(?!\w)", t):
-            logger.info("cal filter: dropped event '%s' (matched '%s')", title, d)
+            _note_drop(d)
+            logger.debug("cal filter: dropped event '%s' (matched '%s')", title, d)
             return True
     return False
 
@@ -154,6 +179,7 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
             except Exception as e:
                 logger.warning("Error fetching calendar '%s': %s", cal_name, e)
         events.sort(key=lambda x: x["iso"])   # sort by tz-normalized time, not the raw start string
+        log_filter_summary(f"{len(events)} kept")
         return events
     except Exception as e:
         logger.error("Structured calendar fetch error: %s", e)
@@ -437,11 +463,46 @@ def create_calendar_event(title: str, date_str: str, time_str: str = None,
         except Exception as e:
             logger.warning("calendar dup-probe failed (%s) — creating anyway", e)
 
-        result = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-        return True, result.get("id", "created")
+        # PROVIDER-SIDE IDEMPOTENCY (2026-09-08). The probe above is a read-then-write:
+        # two turns racing (a superseded voice turn whose thread kept running, plus its
+        # replacement) can BOTH see nothing and BOTH insert, and a probe that throws falls
+        # through to "create anyway". Google accepts a caller-supplied event id and rejects
+        # a second insert of the same id with 409, so a deterministic id derived from
+        # title+start makes the duplicate impossible at the provider rather than unlikely
+        # here. Same title at the same minute is the definition of the duplicate we keep
+        # hitting (Grandpa coffee ×2, Ken ×4); a genuinely different event differs in one
+        # of those. Charset is base32hex: a-v and 0-9.
+        event_body["id"] = _deterministic_event_id(title, event_body["start"])
+        try:
+            result = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+            return True, result.get("id", "created")
+        except Exception as insert_err:
+            if _is_duplicate_id_error(insert_err):
+                logger.info("calendar: '%s' already created with the same id — retry converged", title)
+                return True, event_body["id"]
+            raise
     except Exception as e:
         logger.error("Calendar create error: %s", e)
         return False, str(e)
+
+
+def _deterministic_event_id(title: str, start: dict) -> str:
+    """Stable Google event id for (title, start). Same inputs → same id → the second
+    insert 409s instead of creating a twin. base32hex alphabet only (a-v, 0-9)."""
+    import hashlib
+    stamp = start.get("dateTime") or start.get("date") or ""
+    raw = " ".join((title or "").split()).casefold() + "|" + stamp[:16]
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()   # 0-9a-f, all legal base32hex
+    return "ace" + digest[:29]
+
+
+def _is_duplicate_id_error(err) -> bool:
+    """True when Google refused an insert because that event id already exists."""
+    status = getattr(getattr(err, "resp", None), "status", None)
+    if status == 409:
+        return True
+    text = str(err).lower()
+    return "duplicate" in text and ("409" in text or "already exists" in text)
 
 
 def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALENDAR_ID) -> tuple:

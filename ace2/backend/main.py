@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.1-review-candidate"
+VERSION = "v2.0.2-reliability-candidate"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -259,6 +259,17 @@ async def _prime_voice_ctx():
             await chat.prime_ctx()
         except Exception as e:
             logger.warning("voice ctx prime failed: %s", e)
+        try:
+            # RESTART RECOVERY (2026-09-08). A process that died mid-write leaves rows that
+            # still read as in-flight. Promote them to 'unknown' so they are surfaced for
+            # confirmation instead of looking either finished or safe to replay — replaying
+            # is what booked the Ken call four times.
+            from . import ops
+            n = await asyncio.to_thread(ops.sweep_stale)
+            if n:
+                logger.warning("startup: %d interrupted write(s) marked unknown for review", n)
+        except Exception as e:
+            logger.warning("op sweep at startup failed: %s", type(e).__name__)
     asyncio.create_task(_bg())
 
     # SEMANTIC DEDUP (Phase 4, 2026-09-05). db keeps no model dependency; the judge is handed
@@ -2000,20 +2011,24 @@ async def bridge_jobs(request: Request):
         if (last.get("text") or "") == today:
             chat._brief_sent[kind] = today
             continue
-        # CLAIM FIRST — BEFORE the multi-second compose (2026-08-11 review fix). _brief_sent is
-        # shared in-process with _brief_loop, so claiming now makes the loop skip; claiming AFTER
-        # compose left a window where the loop could send the same brief (double push).
-        chat._brief_sent[kind] = today
-        await asyncio.to_thread(_db.add_summary, today, f"brief_{kind}")
+        # RESERVE, DO NOT CONSUME (2026-09-08). This used to write the permanent brief_{kind}
+        # marker here, before the worker had run a single token — so a worker that then failed
+        # (52× unauthenticated CLI, 10× result POST timeout) destroyed that day's brief and the
+        # in-server loop skipped it as "already sent". A lease keeps the double-send protection
+        # the 2026-08-11 fix was for, while letting the loop reclaim the job if no acknowledgement
+        # arrives. The permanent marker is now written in /bridge/complete, on success only.
+        chat.bridge_lease_take(f"brief:{kind}")
         prompt = await chat.compose_brief_prompt(kind)
         if not prompt:
-            continue   # claimed but nothing to compose (rare); never double-sends
+            chat.bridge_lease_release(f"brief:{kind}")
+            continue   # nothing to compose: hand the job straight back to the loop
         jobs.append({"job": "brief", "kind": kind, "prompt": prompt, "max_tokens": 400})
     sweep = await chat.compose_sweep()
     if not sweep.get("skipped"):
-        # Claim the sweep hash so the in-server _learn_loop won't ALSO run it on the metered API
-        # (the double-burn the Max bridge exists to prevent).
-        chat._learn_state["last_hash"] = sweep["hash"]
+        # Reserve rather than stamp: stamping last_hash here made a failed worker look like a
+        # completed sweep, which is how 52 learning sweeps were lost. apply_sweep stamps it for
+        # real on acknowledgement; until then the lease keeps _learn_loop off the metered API.
+        chat.bridge_lease_take("sweep")
         jobs.append({"job": "sweep", "hash": sweep["hash"],
                      "facts_prompt": sweep["facts_prompt"],
                      "triage_prompt": sweep["triage_prompt"],
@@ -2037,9 +2052,18 @@ async def bridge_complete(req: BridgeResultReq, request: Request):
     _bridge_check(request)
     if req.job == "brief" and req.kind in ("morning", "eod"):
         delivered = await chat.deliver_brief(req.kind, req.text)
+        if delivered:
+            # NOW it is really sent — consume the day's slot. Until this point the lease
+            # only reserved it, so a worker that died left the brief recoverable.
+            from . import db as _db2
+            today2 = chat.datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
+            chat._brief_sent[req.kind] = today2
+            await asyncio.to_thread(_db2.add_summary, today2, f"brief_{req.kind}")
+        chat.bridge_lease_release(f"brief:{req.kind}")
         return {"ok": bool(delivered), "kind": req.kind}
     if req.job == "sweep":
         res = await chat.apply_sweep(req.hash, req.facts, req.triage, req.reflection)
+        chat.bridge_lease_release("sweep")
         return {"ok": "error" not in res, **res}
     return {"ok": False, "error": "unknown job"}
 

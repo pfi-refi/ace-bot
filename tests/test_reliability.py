@@ -48,12 +48,12 @@ class BoardTests(unittest.TestCase):
     def test_amounts_never_merge(self):
         self.existing('Pay electric bill $100');ok,r=self.add('Pay electric bill $200');self.assertTrue(ok);self.assertNotIn('dup',r);self.assertIn('200',r['text'])
     def test_new_information_is_not_claimed_saved(self):
-        self.existing('Call Ken about filing');ok,r=self.add('Call Ken about filing with updated documents');self.assertFalse(ok);self.assertIn('NOT saved',r);self.assertFalse(self.cursor.writes)
+        self.existing('Call Ken about filing');ok,r=self.add('Call Ken about filing with updated documents');self.assertFalse(ok);self.assertTrue(r['needs_review']);self.assertEqual(r['existing_id'],'old');self.assertFalse(self.cursor.writes)
     def test_new_occurrence_after_completion(self):
         self.existing('Call Ken about filing',due='2026-09-08');self.rows[0]['status']='done'
         ok,r=self.add('Call Ken about filing',due='2026-10-08');self.assertTrue(ok);self.assertNotIn('dup',r)
     def test_changed_due_requires_review(self):
-        self.existing('Call Ken about filing',due='2026-09-08');ok,r=self.add('Call Ken about filing',due='2026-09-09');self.assertFalse(ok);self.assertIn('REVIEW',r)
+        self.existing('Call Ken about filing',due='2026-09-08');ok,r=self.add('Call Ken about filing',due='2026-09-09');self.assertFalse(ok);self.assertTrue(r['needs_review']);self.assertEqual(r['requested_due'],'2026-09-09')
     def test_wrong_person_cannot_complete(self):
         self.existing('Call Damon about website');ok,r=db.update_item('',status='done',match='Call Ken about website');self.assertFalse(ok);self.assertIn('AMBIGUOUS',r);self.assertFalse(self.cursor.writes)
     def test_exact_text_completion_still_works(self):
@@ -64,7 +64,7 @@ class BoardTests(unittest.TestCase):
         self.existing("Sienna aunt signature packet sent awaiting return")
         with patch.object(db,'_DUP_JUDGE',lambda text,cands:'old'):
             ok,r=self.add("Sienna aunt packet still pending no push needed")
-        self.assertFalse(ok);self.assertIn('NOT saved',r)
+        self.assertFalse(ok);self.assertTrue(r['needs_review'])
     def test_parent_action_is_not_parent_record(self):
         self.existing('Mail Rebecca packet');ok,r=self.add('Mail Rebecca packet',parent_id='record');self.assertTrue(ok);self.assertNotIn('dup',r)
 
