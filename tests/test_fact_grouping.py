@@ -51,7 +51,8 @@ class GroupingIsLossless(unittest.TestCase):
 
     def test_every_fact_is_printed_exactly_once(self):
         out = chat._group_facts(self.FACTS)
-        body = [l.strip()[2:].split('   [also names:')[0]
+        import re as _re
+        body = [_re.sub(r'^\[[^\]]+\] ', '', l.strip()[2:].split('   [also names:')[0])
                 for l in out.splitlines() if l.startswith('  - ')]
         self.assertEqual(len(body), len(self.FACTS))
         self.assertEqual(sorted(body), sorted(self.FACTS))
@@ -66,11 +67,22 @@ class GroupingIsLossless(unittest.TestCase):
         self.assertIn('MARLOW (3):', out)
         self.assertIn('RENNER (3):', out)
 
-    def test_newest_is_last_within_a_group(self):
-        out = chat._group_facts(self.FACTS)
-        block = out.split('MARLOW (3):')[1].split('\n\n')[0]
-        self.assertLess(block.index('Marlow one'), block.index('Marlow three'),
-                        'store order is oldest-first, so a correction must land last')
+    def test_the_correction_is_the_last_dated_line(self):
+        stale = 'Marlow project is on Thursday'
+        fix = 'Marlow correction: project is on Friday, not Thursday'
+        out = chat._group_facts([fix, stale], min_facts=2, meta={
+            fix: {'ts': '2026-09-08T10:00:00', 'tier': 'core'},
+            stale: {'ts': '2026-09-01T10:00:00', 'tier': 'active'}})
+        lines = [l for l in out.splitlines() if l.startswith('  - ')]
+        self.assertIn('2026-09-08', lines[-1])
+        self.assertIn('Friday', lines[-1], 'the newest DATE must land last, not the core tier')
+
+    def test_dates_are_printed_so_recency_is_not_inferred(self):
+        f = 'Marlow one'
+        out = chat._group_facts([f, 'Marlow two'], min_facts=2,
+                                meta={f: {'ts': '2026-09-02T00:00:00', 'tier': 'active'}})
+        self.assertIn('[2026-09-02]', out)
+        self.assertIn('[undated]', out, 'a fact with no date must say so, not borrow one')
 
     def test_a_shared_fact_is_printed_once_and_cross_referenced(self):
         facts = self.FACTS + ['Marlow and Renner met about the same job']
@@ -83,7 +95,8 @@ class GroupingIsLossless(unittest.TestCase):
     def test_the_reading_instruction_is_present(self):
         out = chat._group_facts(self.FACTS)
         self.assertIn('Never carry a detail from one heading to another', out)
-        self.assertIn('the LAST line is the most recent', out)
+        self.assertIn('the newest date in a heading is the current position', out)
+        self.assertIn('Where two dated lines disagree, say so and ask', out)
 
 
 class SweepNarrativesAreNotFacts(unittest.TestCase):
@@ -132,3 +145,31 @@ class LiveEntitiesDriveTheWindow(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TargetedConversationRules(unittest.TestCase):
+    """Instructions aimed at the four reproduced failures. Presence only — these do NOT
+    show the failures are fixed; that needs a paid retest, which is Brady's call."""
+
+    def prompt(self):
+        return chat.build_system_prompt()
+
+    def test_two_cases_are_not_one_case(self):
+        p = self.prompt()
+        self.assertIn('TWO CASES ARE NOT ONE CASE', p)
+        self.assertIn('because they share a word', p)
+
+    def test_a_promise_is_not_a_completion(self):
+        p = self.prompt()
+        self.assertIn('A PROMISE IS NOT A COMPLETION', p)
+        self.assertIn('never chain further steps off it', p)
+
+    def test_conflicts_are_surfaced_not_smoothed(self):
+        p = self.prompt()
+        self.assertIn('WHEN TWO DATED LINES DISAGREE', p)
+        self.assertIn('Do not pick one silently', p)
+
+    def test_the_earlier_rules_survive(self):
+        p = self.prompt()
+        for rule in ('13b.', '13c.', '13d.', '13e.', '13f.', '13g.', 'PLAN MY WEEK'):
+            self.assertIn(rule, p)

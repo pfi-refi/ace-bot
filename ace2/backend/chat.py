@@ -487,7 +487,14 @@ def _entities_in(fact: str) -> list:
     return out[:4]          # a fact naming half the roster is not about any of them
 
 
-def _group_facts(mem_list: list, min_facts: int = 3) -> str:
+def _fact_date(meta: dict, f: str) -> str:
+    """The stored date for a fact, or '' when unknown. Never guessed."""
+    m = (meta or {}).get(f) or {}
+    ts = m.get("ts") or ""
+    return str(ts)[:10]
+
+
+def _group_facts(mem_list: list, min_facts: int = 3, meta: dict = None) -> str:
     """Render memory grouped by the entity each fact names, newest LAST inside each group.
 
     Order within a group is preserved from the store, which sorts oldest→newest, so the last
@@ -521,21 +528,38 @@ def _group_facts(mem_list: list, min_facts: int = 3) -> str:
         if primary not in groups:
             groups[primary] = []; order.append(primary)
         others = [e for e in ents[f] if e != primary and e in worthy]
-        groups[primary].append(f + (f"   [also names: {', '.join(others)}]" if others else ""))
+        groups[primary].append((f, others))
     order.sort(key=lambda e: -len(groups[e]))
     lines = ["HOW TO READ THIS: each heading holds what is known about THAT person or "
              "project. Never carry a detail from one heading to another — a requirement on "
-             "one deal is not a requirement on another. Within a heading the LAST line is "
-             "the most recent and it WINS over anything above it, including anything you "
-             "believed earlier."]
+             "one deal is not a requirement on another. Every line is DATED: the newest date "
+             "in a heading is the current position and it WINS over anything older, "
+             "including anything you believed earlier. Where two dated lines disagree, say "
+             "so and ask — do not pick one silently. An undated line has no known date and "
+             "settles nothing."]
+
+    def _render(items):
+        # Sorted by the STORED DATE, not by list position. read_facts() returns core-tier
+        # facts first regardless of age, so position told the model a stale line was the
+        # newest — the exact reproduction Codex ran with a 1 Sept fact outranking an 8 Sept
+        # correction. Undated facts sort first so a dated line always lands last.
+        dated = sorted(items, key=lambda t: (_fact_date(meta, t[0]) or "0000-00-00"))
+        out = []
+        for f, others in dated:
+            d = _fact_date(meta, f)
+            stamp = f"[{d}] " if d else "[undated] "
+            tail = f"   [also names: {', '.join(others)}]" if others else ""
+            out.append(f"  - {stamp}{f}{tail}")
+        return out
+
     for name in order:
         lines.append("")
         lines.append(f"{name.upper()} ({len(groups[name])}):")
-        lines.extend(f"  - {f}" for f in groups[name])
+        lines.extend(_render(groups[name]))
     if rest:
         lines.append("")
         lines.append("OTHER:")
-        lines.extend(f"  - {f}" for f in rest)
+        lines.extend(_render([(f, []) for f in rest]))
     return "\n".join(lines)
 
 
@@ -616,7 +640,7 @@ async def _live_context() -> tuple:
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
     mem_list = _mem_slim(ok(memory, []), live_entities=_live_entities(ok(bank, [])))
-    mem = _group_facts(mem_list)
+    mem = _group_facts(mem_list, meta=_CTX.get("memory_meta") or brain.read_memory_meta())
     today_sched = _format_today_schedule(today_events, now)
     bank_str = _format_daybank(ok(bank, []))
     p_list = ok(personal, [])   # [] until Brady links br80mcgraw — nothing shows before then
@@ -1058,7 +1082,8 @@ def _format_calendar_window(events: list, now) -> str:
 # `prior`), so we serve those from a background-refreshed cache and format the per-turn
 # string from cache + the LIVE clock: microseconds, zero per-turn network. Primed at startup
 # (main.prime) and kept warm every ~30s.
-_CTX = {"memory": [], "events": [], "bank": [], "convo": [], "wx": {}, "tasks": [], "recap": "", "ts": 0.0}
+_CTX = {"memory": [], "memory_meta": {}, "events": [], "bank": [], "convo": [], "wx": {},
+        "tasks": [], "recap": "", "ts": 0.0}
 _CTX_TTL = 45.0
 
 
@@ -1106,9 +1131,10 @@ async def _refresh_ctx() -> None:
 
 async def _refresh_ctx_inner() -> None:
     try:
-        memory, cal_all, bank, convo, wx = await asyncio.wait_for(
+        memory, mem_meta, cal_all, bank, convo, wx = await asyncio.wait_for(
             asyncio.gather(
                 asyncio.to_thread(brain.read_memory),
+                asyncio.to_thread(brain.read_memory_meta),   # dates, so recency is not guessed
                 asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
                 asyncio.to_thread(daybank.read_items, True),   # HIS task board — voice's task titles
                 asyncio.to_thread(_unified_thread),   # the ONE thread: voice + chat
@@ -1125,6 +1151,7 @@ async def _refresh_ctx_inner() -> None:
 
         _CTX.update(
             memory=keep(memory, _CTX["memory"]),
+            memory_meta=keep(mem_meta, _CTX["memory_meta"]),
             events=keep(cal_all, _CTX["events"]),
             bank=keep(bank, _CTX["bank"]),
             convo=keep(convo, _CTX["convo"]),
@@ -2413,7 +2440,7 @@ async def _fast_context() -> str:
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
     mem_list = _mem_slim(_CTX["memory"], live_entities=_live_entities(_CTX["bank"]))
-    mem = _group_facts(mem_list)
+    mem = _group_facts(mem_list, meta=_CTX.get("memory_meta"))
     bank = _CTX["bank"]
     wx = _CTX["wx"]
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers

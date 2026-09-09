@@ -113,6 +113,26 @@ def read_memory() -> list:
     return _read_json(MEMORY_FILE_NAME).get("memories", [])
 
 
+def read_memory_meta() -> dict:
+    """{fact text: {"ts": iso, "tier": str}} for the facts currently in context.
+
+    read_facts() returns strings ordered by (tier='core') DESC, id — importance first, NOT
+    chronology — so list position cannot tell a correction from the thing it corrects. This
+    carries the real dates through so the formatter can order and label by recency instead
+    of guessing from position (Codex, 8 Sept).
+    """
+    try:
+        from . import db
+        if not db.enabled():
+            return {}
+        return {r["text"]: {"ts": r.get("ts"), "tier": r.get("tier")}
+                for r in db.read_facts_full()
+                if r.get("text") and not r.get("invalid_at")}
+    except Exception as e:
+        logger.warning("read_memory_meta failed: %s", e)
+        return {}
+
+
 def add_memory(new_items: list, source: str = "ace2") -> bool:
     """Add durable fact(s) — COMPOUNDING. Postgres path reconciles each new fact against the
     current ones (skip if known, supersede-not-pile-up if it updates one, add if new); UNCAPPED,
