@@ -1528,7 +1528,17 @@ _BRIEF_TIMES = {"morning": (9, 0), "eod": (20, 15)}   # Eastern — Brady wants 
 # THE THREE WAYS THE BRIEF LIED (2026-09-05). Each rule below is a morning Brady actually got.
 # Shared by both briefs because all three failed in both.
 _BRIEF_RULES = (
-    "\n\nTHESE THREE RULES OUTRANK EVERYTHING ABOVE.\n"
+    "\n\nTHESE RULES OUTRANK EVERYTHING ABOVE.\n"
+    "(0) NEVER SAY SOMETHING IS DONE WITHOUT EVIDENCE. On 9 September this brief said 'you hit "
+    "the gym this morning, so that's done' forty minutes after Brady said he was skipping it "
+    "until the evening. Evidence means BRADY said he did it, or a tool receipt says so. These "
+    "are NOT evidence: a calendar entry (that is a plan), a board item existing, a promise from "
+    "somebody else ('she said she'll sign' is still outstanding), or something YOU said in an "
+    "earlier turn — your own prose is a claim, not a source. His words are testimony; yours are "
+    "not. When you do not know, say what is still open rather than congratulating him for it.\n"
+    "(0b) HIS PLAN FOR TODAY IS THE POINT. If he has just told you what he is doing today, lead "
+    "with that. Bills belong here only as far as the sheet actually warrants; do not let a "
+    "standing money narrative crowd out what he just said he needs to get done.\n"
     "(1) THE CONVERSATION OUTRANKS THE BOARD. The board is written once and rarely revisited; "
     "what Brady SAID is newer and truer. Where the thread and a board item disagree, the thread "
     "wins outright — never repeat the stale version, and never quietly narrate around it. Say "
@@ -1626,6 +1636,85 @@ def _board_stats() -> str:
     return "\n".join(lines)
 
 
+# ── THE BRIEF'S OWN CONVERSATION INPUT (2026-09-09) ────────────────────────────
+# The 9 Sept brief said "You hit the gym this morning, so that's done" forty minutes after
+# Brady said he was skipping the gym until the evening. Rebuilding the deployed input from
+# saved history showed why, and it is an input defect before it is a model one:
+#   • compose_brief_prompt took the last 16 TURNS and formatted them at the default 280
+#     characters, so the long day-layout answer — the one carrying the actual plan — was cut;
+#   • four of those sixteen slots were partial re-flushes of ONE sentence, because the ASR
+#     re-spelled a name and the strict-prefix collapse could not see them as the same turn;
+#   • the gym correction sat outside the window entirely.
+# So the brief is given a character budget rather than a turn count, a workable per-turn cap,
+# a fuzzier re-flush collapse, and — most importantly — Brady's OWN action-bearing statements
+# lifted out verbatim where truncation cannot reach them.
+_BRIEF_THREAD_CHARS = int(os.environ.get("ACE2_BRIEF_THREAD_CHARS", "9000"))
+_BRIEF_TURN_CHARS = int(os.environ.get("ACE2_BRIEF_TURN_CHARS", "900"))
+
+
+def _similar(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, a or "", b or "").ratio()
+
+
+def _collapse_near_reflushes(turns: list, ratio: float = 0.72, window: int = 180) -> list:
+    """Collapse consecutive user turns that are the SAME sentence re-transcribed.
+
+    _collapse_reflushes only merges a strict extension. Live ASR also re-spells as it goes
+    ("Sianazan" -> "Siana Zahn"), which is not a prefix, so four separate rows survived for
+    one spoken sentence. The longest form wins. A genuine short correction is not similar to
+    the turn before it and is never touched — the deployed 60-second window still applies.
+    """
+    out = []
+    for t in turns:
+        if (out and t.get("role") == "user" and out[-1].get("role") == "user"
+                and _seconds_apart(out[-1], t) <= window
+                and (_similar(out[-1].get("content", ""), t.get("content", "")) >= ratio
+                     or t.get("content", "").startswith(out[-1].get("content", "")[:40]))):
+            if len(t.get("content", "")) >= len(out[-1].get("content", "")):
+                out[-1] = t
+            continue
+        out.append(t)
+    return out
+
+
+# What Brady says he will DO, or corrects. Kept verbatim and never truncated.
+_COMMIT_RE = re.compile(
+    r"\b(i'?m going to|i'?m gonna|i'?ll|i will|i need to|i have to|i gotta|i'?ve got to|"
+    r"i want to|i'?m doing|i'?m out|today|tonight|this evening|this morning|"
+    r"not tomorrow|not today|instead of|actually|no,? i|scratch that)\b", re.I)
+
+
+def _user_commitments(turns: list, limit: int = 10) -> str:
+    """Brady's own action-bearing lines, newest last, in full.
+
+    The brief kept contradicting things he had just said because his words were competing
+    for room with Ace's replies and losing. His statements are the one input that must not
+    be summarised, truncated or outranked — an assistant line is a claim, his line is
+    testimony.
+    """
+    # De-duplicated first: the same spoken sentence arriving three times used three of the
+    # ten slots and made his own words look like repetition rather than testimony.
+    turns = _collapse_near_reflushes(_collapse_reflushes(turns or []))
+    said = [t for t in turns if t.get("role") == "user"
+            and _COMMIT_RE.search(t.get("content") or "")]
+    if not said:
+        return ""
+    lines = []
+    for t in said[-limit:]:
+        stamp = str(t.get("ts") or "")[11:16]
+        lines.append(f"  - {stamp} \u201c{(t.get('content') or '').strip()[:400]}\u201d")
+    return ("\n\nWHAT BRADY HIMSELF SAID TODAY (his words, newest last — these OUTRANK "
+            "anything you or the board say, and you must not contradict them):\n"
+            + "\n".join(lines))
+
+
+def _brief_thread(turns: list) -> str:
+    """The conversation as the brief should receive it."""
+    kept = _collapse_near_reflushes(_collapse_reflushes(turns or []))
+    return _format_thread(_budget_turns(kept, _BRIEF_THREAD_CHARS), per_turn=_BRIEF_TURN_CHARS)
+
+
 async def compose_brief_prompt(kind: str = "morning") -> str:
     """Everything the brief knows, minus the model call — split out (2026-08-03) so the
     MAX BRIDGE can run the same brief on Brady's Claude Max plan ($0/token); this server
@@ -1637,7 +1726,7 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
         events_raw, wx, convo, bills_res = await asyncio.gather(
             asyncio.to_thread(get_events_structured, 2 if kind == "eod" else 1),
             get_weather(),
-            asyncio.to_thread(_unified_thread, 16),
+            asyncio.to_thread(_unified_thread, 60),   # budget-bounded below
             bills_sheet.fetch_bills(),
             return_exceptions=True,
         )
@@ -1756,7 +1845,8 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
                + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
             + fb_line
-            + "\n\nRECENT THREAD (for what happened):\n" + _format_thread(ok(convo, [])))
+            + _user_commitments(ok(convo, []))
+            + "\n\nRECENT THREAD (for what happened):\n" + _brief_thread(ok(convo, [])))
     except Exception as e:
         logger.warning("compose_brief_prompt(%s) failed: %s", kind, e)
         return ""
