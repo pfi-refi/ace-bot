@@ -1658,55 +1658,117 @@ def _similar(a: str, b: str) -> float:
 
 
 def _collapse_near_reflushes(turns: list, ratio: float = 0.72, window: int = 180) -> list:
-    """Collapse consecutive user turns that are the SAME sentence re-transcribed.
+    """DELIBERATELY A NO-OP FOR USER TEXT (2026-09-09, Codex).
 
-    _collapse_reflushes only merges a strict extension. Live ASR also re-spells as it goes
-    ("Sianazan" -> "Siana Zahn"), which is not a prefix, so four separate rows survived for
-    one spoken sentence. The longest form wins. A genuine short correction is not similar to
-    the turn before it and is never touched — the deployed 60-second window still applies.
+    This used to merge consecutive user turns that looked similar, keeping the longer one.
+    Reproduced failure:
+
+        "I am going to call the concrete supplier tomorrow morning for the pour."
+        "I am going to call the concrete supplier today for the pour."
+
+    Twenty seconds apart, judged similar, and the LONGER one kept — so the correction was
+    thrown away and the stale date survived. That is precisely the failure this whole patch
+    exists to fix, recreated by the fix. The same shape applies to a changed name, amount or
+    negation: a correction is usually SHORTER than what it corrects.
+
+    Nothing but explicit transcription or session metadata can prove one utterance supersedes
+    another, and we do not have it. So distinct statements are all kept, and the character
+    budget — not lossy guessing — is what bounds the input. `_collapse_reflushes` still merges
+    a STRICT extension, where the later text contains the earlier one in full and nothing can
+    be lost.
     """
-    out = []
-    for t in turns:
-        if (out and t.get("role") == "user" and out[-1].get("role") == "user"
-                and _seconds_apart(out[-1], t) <= window
-                and (_similar(out[-1].get("content", ""), t.get("content", "")) >= ratio
-                     or t.get("content", "").startswith(out[-1].get("content", "")[:40]))):
-            if len(t.get("content", "")) >= len(out[-1].get("content", "")):
-                out[-1] = t
-            continue
-        out.append(t)
-    return out
+    return list(turns or [])
 
 
 # What Brady says he will DO, or corrects. Kept verbatim and never truncated.
+# Deliberately generous: a missed commitment falls back to the thread, but a missed
+# CORRECTION is how the 9 September brief went wrong. Contractions and the spelled-out
+# forms both count ("I'm gonna" and "I am going to"), and a bare negation or a changed
+# day qualifies on its own.
 _COMMIT_RE = re.compile(
-    r"\b(i'?m going to|i'?m gonna|i'?ll|i will|i need to|i have to|i gotta|i'?ve got to|"
-    r"i want to|i'?m doing|i'?m out|today|tonight|this evening|this morning|"
-    r"not tomorrow|not today|instead of|actually|no,? i|scratch that)\b", re.I)
+    r"\b(i(?:'?m| am) (?:going to|gonna|doing|out|not)|i'?ll|i will|i need to|i have to|"
+    r"i gotta|i'?ve got to|i want to|i'?m|today|tonight|tomorrow|this evening|this morning|"
+    r"instead of|actually|no,? i|scratch that|don'?t|do not|never mind|cancel|"
+    r"changed my mind|make it)\b", re.I)
 
 
-def _user_commitments(turns: list, limit: int = 10) -> str:
-    """Brady's own action-bearing lines, newest last, in full.
+def _commitment_lines(turns: list, now=None, limit: int = 12,
+                      total_chars: int = 4000) -> tuple:
+    """(today_block, prior_block) — Brady's action-bearing lines, complete or not at all.
 
-    The brief kept contradicting things he had just said because his words were competing
-    for room with Ace's replies and losing. His statements are the one input that must not
-    be summarised, truncated or outranked — an assistant line is a claim, his line is
-    testimony.
+    Three things this must not do, all reproduced on 9 September:
+
+      • label a statement from ANOTHER DAY as "today". `_unified_thread` falls back to older
+        turns on a quiet morning, so a 8 September line could arrive and be presented under
+        TODAY — turning "I'll mail it today" into today's commitment.
+      • print a UTC clock as if it were his. 12:28 UTC was 8:28 in his morning.
+      • quote a statement PARTIALLY while calling it verbatim testimony. A 482-character line
+        ending "Do not send the packet; the client has not signed" lost exactly that ending,
+        and the opening was then presented as the whole thing.
+
+    So: dates and times are resolved in EASTERN, today is separated from earlier days, and a
+    statement either appears complete or is named as omitted — never trimmed in silence.
     """
-    # De-duplicated first: the same spoken sentence arriving three times used three of the
-    # ten slots and made his own words look like repetition rather than testimony.
-    turns = _collapse_near_reflushes(_collapse_reflushes(turns or []))
-    said = [t for t in turns if t.get("role") == "user"
-            and _COMMIT_RE.search(t.get("content") or "")]
-    if not said:
-        return ""
-    lines = []
-    for t in said[-limit:]:
-        stamp = str(t.get("ts") or "")[11:16]
-        lines.append(f"  - {stamp} \u201c{(t.get('content') or '').strip()[:400]}\u201d")
-    return ("\n\nWHAT BRADY HIMSELF SAID TODAY (his words, newest last — these OUTRANK "
-            "anything you or the board say, and you must not contradict them):\n"
-            + "\n".join(lines))
+    now = now or datetime.now(EASTERN)
+    today = now.strftime("%Y-%m-%d")
+
+    def local(ts):
+        try:
+            d = datetime.fromisoformat(str(ts))
+            return d.astimezone(EASTERN) if d.tzinfo else EASTERN.localize(d)
+        except Exception:
+            return None
+
+    said = []
+    for t in (turns or []):
+        if t.get("role") != "user":
+            continue
+        text = (t.get("content") or "").strip()
+        if not text or not _COMMIT_RE.search(text):
+            continue
+        when = local(t.get("ts"))
+        said.append((when, text))
+
+    def render(rows, header, budget):
+        if not rows:
+            return ""
+        lines, used, omitted = [], 0, []
+        for when, text in reversed(rows[-limit:]):          # newest first while filling
+            entry = "  - %s \u201c%s\u201d" % (
+                when.strftime("%-I:%M %p ET") if when else "time unknown", text)
+            if used + len(entry) > budget:
+                omitted.append((when, text))
+                continue
+            lines.append(entry); used += len(entry)
+        lines.reverse()                                      # present oldest-first
+        out = header + "\n" + "\n".join(lines)
+        if omitted:
+            # Named, never silently trimmed: a partial quote presented as testimony is worse
+            # than an explicit gap.
+            out += ("\n  [%d earlier statement(s) did not fit and are NOT quoted here. Do not "
+                    "treat this list as complete; ask before acting on anything you cannot "
+                    "see.]" % len(omitted))
+        return out
+
+    today_rows = [(w, x) for w, x in said if w and w.strftime("%Y-%m-%d") == today]
+    prior_rows = [(w, x) for w, x in said if not w or w.strftime("%Y-%m-%d") != today]
+
+    today_block = render(
+        today_rows,
+        "\n\nWHAT BRADY HIMSELF SAID TODAY (%s, his words, newest last — these OUTRANK "
+        "anything you or the board say, and you must not contradict them):" % today,
+        total_chars)
+    prior_block = render(
+        prior_rows,
+        "\n\nEARLIER DAYS, for context only (NOT today's plan — do not read a 'today' or "
+        "'tomorrow' in these as meaning today):",
+        max(800, total_chars // 4))
+    return today_block, prior_block
+
+
+def _user_commitments(turns: list, now=None) -> str:
+    today_block, prior_block = _commitment_lines(turns, now=now)
+    return today_block + prior_block
 
 
 def _brief_thread(turns: list) -> str:
@@ -1845,7 +1907,7 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
                + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
             + fb_line
-            + _user_commitments(ok(convo, []))
+            + _user_commitments(ok(convo, []), now=now)
             + "\n\nRECENT THREAD (for what happened):\n" + _brief_thread(ok(convo, [])))
     except Exception as e:
         logger.warning("compose_brief_prompt(%s) failed: %s", kind, e)

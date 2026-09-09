@@ -74,12 +74,18 @@ class TheBriefsInput(unittest.TestCase):
         self.assertNotIn(tail, chat._format_thread(MORNING[-16:]), 'old cap should cut it')
         self.assertIn(tail, self.thread(), 'the brief must now see the whole answer')
 
-    def test_re_transcriptions_of_one_sentence_collapse(self):
-        """Four rows for one spoken sentence used four of sixteen slots."""
+    def test_re_transcriptions_are_kept_rather_than_guessed_away(self):
+        """Changed 9 Sept: fuzzy merging was removed because it discarded corrections — a
+        correction is usually SHORTER than what it corrects. Slot pressure is now handled by
+        the character budget, so every distinct statement survives and the fullest form is
+        present among them."""
         kept = chat._collapse_near_reflushes(chat._collapse_reflushes(MORNING))
         sianas = [x for x in kept if 'Siana' in x['content'] or 'Sianazan' in x['content']]
-        self.assertEqual(len(sianas), 1, [x['content'][:40] for x in sianas])
-        self.assertIn('everything signed', sianas[0]['content'], 'the fullest form must win')
+        self.assertGreaterEqual(len(sianas), 1)
+        self.assertTrue(any('everything signed' in x['content'] for x in sianas),
+                        'the fullest form must still be present')
+        self.assertIn('everything signed', chat._brief_thread(MORNING),
+                      'and it must reach the brief')
 
     def test_a_genuine_short_correction_is_not_collapsed_away(self):
         pair = [t('user', 'Go ahead and book it', 10), t('user', 'No, do not.', 11)]
@@ -120,3 +126,129 @@ class TheEvidenceRule(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ── Codex's three reproduced failures, 9 September ────────────────────────────
+import pytz  # noqa: E402
+NOW = chat.EASTERN.localize(datetime(2026, 9, 9, 9, 0))
+
+
+def et(role, text, mins, day=9):
+    return {'role': role, 'content': text,
+            'ts': chat.EASTERN.localize(
+                datetime(2026, 9, day, 8, 0) + timedelta(minutes=mins)).isoformat()}
+
+
+class CorrectionsAreNeverDiscarded(unittest.TestCase):
+    """A correction is usually SHORTER than what it corrects. Keeping "the longer one"
+    threw the correction away — the exact bug this patch exists to fix."""
+
+    def block(self, rows):
+        return chat._user_commitments(rows, now=NOW)
+
+    def test_a_shorter_date_correction_survives(self):
+        rows = [et('user', 'I am going to call the concrete supplier tomorrow morning '
+                           'for the pour.', 0),
+                et('user', 'I am going to call the concrete supplier today for the pour.', 0.3)]
+        b = self.block(rows)
+        self.assertIn('today for the pour', b)
+        self.assertGreater(b.rindex('today for the pour'), b.rindex('tomorrow morning'),
+                           'the correction must be the newest line')
+
+    def test_a_negation_correction_survives(self):
+        rows = [et('user', 'I am going to send the packet to the title company today.', 0),
+                et('user', 'Do not send the packet.', 0.3)]
+        self.assertIn('Do not send the packet', self.block(rows))
+
+    def test_a_changed_person_survives(self):
+        rows = [et('user', 'I am going to call Damon about the pour this afternoon.', 0),
+                et('user', 'I am going to call my uncle instead.', 0.3)]
+        b = self.block(rows)
+        self.assertIn('call my uncle instead', b)
+        self.assertIn('call Damon', b, 'both statements are kept; neither is guessed away')
+
+    def test_a_changed_amount_survives(self):
+        rows = [et('user', 'I am going to pay the minimum of eighty dollars on it.', 0),
+                et('user', 'Actually it is a hundred and six.', 0.3)]
+        self.assertIn('hundred and six', self.block(rows))
+
+    def test_nothing_is_merged_on_similarity(self):
+        rows = [et('user', 'I am going to call the plant tomorrow.', 0),
+                et('user', 'I am going to call the plant today.', 0.3)]
+        self.assertEqual(len(chat._collapse_near_reflushes(rows)), 2)
+
+    def test_a_strict_extension_still_merges(self):
+        """Nothing is lost when the later text contains the earlier one in full."""
+        rows = [et('user', 'I am going to call the plant', 0),
+                et('user', 'I am going to call the plant today about Friday', 0.2)]
+        self.assertEqual(len(chat._collapse_reflushes(rows)), 1)
+
+
+class TodayMeansToday(unittest.TestCase):
+    """_unified_thread falls back to older turns on a quiet morning, and a prior-day
+    statement was then presented under TODAY with a UTC clock."""
+
+    def test_a_prior_day_statement_is_not_labelled_today(self):
+        rows = [et('user', 'I am going to mail the packet today.', 0, day=8)]
+        today_block, prior_block = chat._commitment_lines(rows, now=NOW)
+        self.assertNotIn('mail the packet', today_block)
+        self.assertIn('mail the packet', prior_block)
+
+    def test_prior_context_warns_about_relative_words(self):
+        rows = [et('user', 'I am going to mail the packet today.', 0, day=8)]
+        _, prior = chat._commitment_lines(rows, now=NOW)
+        self.assertIn('do not read a', prior.lower())
+
+    def test_times_are_rendered_in_eastern(self):
+        rows = [et('user', 'I am going to call the plant today.', 30)]
+        today, _ = chat._commitment_lines(rows, now=NOW)
+        self.assertIn('8:30 AM ET', today, today)
+
+    def test_a_quiet_morning_yields_an_empty_today_block(self):
+        """The fallback case: only older turns available. Nothing may be claimed as today."""
+        rows = [et('user', 'I am going to do it today.', 0, day=7),
+                et('user', 'I am going to do it today.', 0, day=8)]
+        today, prior = chat._commitment_lines(rows, now=NOW)
+        self.assertEqual(today, '')
+        self.assertIn('EARLIER DAYS', prior)
+
+    def test_just_after_midnight_is_still_today(self):
+        row = {'role': 'user', 'content': 'I am going to head out early today.',
+               'ts': chat.EASTERN.localize(datetime(2026, 9, 9, 0, 5)).isoformat()}
+        today, _ = chat._commitment_lines([row], now=NOW)
+        self.assertIn('head out early', today)
+
+    def test_just_before_midnight_is_not_today(self):
+        row = {'role': 'user', 'content': 'I am going to head out early tomorrow.',
+               'ts': chat.EASTERN.localize(datetime(2026, 9, 8, 23, 55)).isoformat()}
+        today, prior = chat._commitment_lines([row], now=NOW)
+        self.assertEqual(today, '')
+        self.assertIn('head out early', prior)
+
+
+class VerbatimMeansComplete(unittest.TestCase):
+    """A 482-character statement lost its ending — the operative constraint — and the
+    opening was presented as authoritative testimony."""
+
+    LONG = ('I am going to run the whole plan for the day. ' * 10
+            + 'Do not send the packet; the client has not signed.')
+
+    def test_a_long_statement_keeps_its_ending(self):
+        b = chat._user_commitments([et('user', self.LONG, 0)], now=NOW)
+        self.assertIn('the client has not signed', b)
+
+    def test_an_unfittable_statement_is_named_not_trimmed(self):
+        today, _ = chat._commitment_lines([et('user', self.LONG, 0)], now=NOW, total_chars=120)
+        self.assertIn('NOT quoted here', today)
+        self.assertNotIn('whole plan for the day', today,
+                         'a partial quote must never be presented as testimony')
+
+    def test_the_omission_warns_against_acting_on_it(self):
+        today, _ = chat._commitment_lines([et('user', self.LONG, 0)], now=NOW, total_chars=120)
+        self.assertIn('ask before acting', today)
+
+    def test_newer_statements_win_the_budget(self):
+        rows = [et('user', 'I am going to do the old thing today. ' * 20, 0),
+                et('user', 'Actually, do the new thing instead.', 30)]
+        today, _ = chat._commitment_lines(rows, now=NOW, total_chars=200)
+        self.assertIn('do the new thing instead', today)
