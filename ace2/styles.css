@@ -1072,3 +1072,93 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   .cmd-chips { overflow-x: auto; }
   .db-meta { flex-wrap: wrap; row-gap: 4px; }
 }
+
+/* ── RELEASE ONE: areas as navigation, real date controls, follow-ups ────────────
+   Brady asked for his old reminder lists back: obvious areas, explicit dates and status.
+   These sit on top of the existing Command Center rather than replacing it — same shell,
+   same colours, same rows. (2026-09-09) */
+
+/* AREAS ROW. Primary navigation, above the category chips, which are now secondary. */
+.cmd-areas { display: flex; gap: 7px; padding: 2px 14px 8px; overflow-x: auto; }
+.cmd-areas::-webkit-scrollbar { display: none; }
+.cmd-area { flex: 0 0 auto; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; padding: 7px 12px; border-radius: 4px; cursor: pointer;
+  white-space: nowrap; display: flex; align-items: center; gap: 6px;
+  border: 1px solid rgba(140,160,175,.22); background: rgba(255,255,255,.02); color: #8fa4a0; }
+.cmd-area.on { border-color: rgba(190,210,225,.5); background: rgba(255,255,255,.08); color: #fff; }
+.cmd-area b { font-weight: 700; opacity: .7; }
+.cmd-arealist { color: #45ffa6; border-color: rgba(69,255,166,.3); letter-spacing: 0; }
+
+/* A group note explains an optional or advisory section, so a suggestion never reads as
+   an instruction and a carried-over row never reads as a change that was made. */
+.cmd-note { font-size: 11.5px; line-height: 1.45; color: #8fa4a0; padding: 2px 16px 8px; }
+
+/* THE REVIEW FLAG. Deliberately not styled like the Needs-a-decision badge: it marks a row
+   nobody has looked at, not a decision Brady made. */
+.cmd-carried { color: #a78bfa; border: 1px solid rgba(167,139,250,.38);
+  background: rgba(167,139,250,.08); font-family: var(--mono); font-size: 9px;
+  letter-spacing: .6px; text-transform: uppercase; padding: 1px 6px; border-radius: 4px;
+  margin-left: 4px; white-space: nowrap; }
+
+/* HANDLING A FOLLOW-UP. Its own controls, below the row's meta line, so the completion
+   checkbox keeps exactly one meaning. */
+.cmd-fuprow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 6px; width: 100%; }
+.cmd-fup { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 5px 9px; min-height: 30px; border-radius: 6px;
+  cursor: pointer; color: #53e7ff; border: 1px solid rgba(83,231,255,.34);
+  background: rgba(83,231,255,.07); }
+.cmd-fup:disabled { opacity: .5; }
+.cmd-fuphint { font-size: 10.5px; color: #7d8f8b; }
+
+/* EDITOR. Labelled controls and real pickers — the brief's "understandable without knowing
+   the backend". The three date meanings each get their own labelled row. */
+.cmd-el { font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: #7d8f8b; align-self: center; flex: 0 0 auto;
+  min-width: 62px; }
+.cmd-ebucket, .cmd-eentry, .cmd-estate, .cmd-efup, .cmd-enext, .cmd-ewait {
+  flex: 1; border-radius: 8px; padding: 7px 9px; font-size: 12px; min-height: 34px;
+  border: 1px solid rgba(120,200,170,.2); background: rgba(5,13,15,.7); color: #dce8e4;
+  outline: none; font-family: inherit; }
+.cmd-ebucket option, .cmd-eentry option, .cmd-estate option { background: #06121a; }
+.cmd-edates .cmd-edue, .cmd-edates .cmd-efup { flex: 1; min-height: 34px; }
+.cmd-eclear { flex: 0 0 auto; font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 6px 10px; min-height: 34px; border-radius: 6px;
+  cursor: pointer; color: #8fa4a0; background: transparent;
+  border: 1px solid rgba(120,200,170,.2); }
+.cmd-ehint { font-size: 10.5px; color: #7d8f8b; align-self: center; }
+.cmd-etoday { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; padding: 8px 12px; min-height: 34px; border-radius: 8px;
+  cursor: pointer; color: #8fa4a0; background: transparent;
+  border: 1px solid rgba(120,200,170,.2); }
+.cmd-etoday.on { color: #04120b; background: #45ffa6; border-color: #45ffa6; font-weight: 700; }
+
+/* SECONDARY TAGS: extra filters inside an area. One record, several labels — never a copy. */
+.cmd-etags { flex-wrap: wrap; gap: 5px; }
+.cmd-etag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 5px 9px; min-height: 30px; border-radius: 6px;
+  cursor: pointer; color: #7d8f8b; background: transparent;
+  border: 1px solid rgba(120,200,170,.18); }
+.cmd-etag.on { background: rgba(255,255,255,.06); }
+
+/* PHONE. The brief asks for readable controls and no horizontal page overflow: the areas
+   row scrolls on its own, and every control clears a 44px touch target. */
+@media (max-width: 560px) {
+  .cmd-areas { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .cmd-area { padding-left: 14px; padding-right: 14px; min-height: 36px; }
+  .cmd-el { min-width: 100%; }
+  .cmd-erow { flex-wrap: wrap; }
+  .cmd-ebucket, .cmd-eentry, .cmd-estate, .cmd-efup, .cmd-enext, .cmd-ewait,
+  .cmd-ecat, .cmd-edue { min-height: 44px; font-size: 16px; }   /* 16px stops iOS zooming in */
+  .cmd-eclear, .cmd-etoday, .cmd-etag, .cmd-fup { min-height: 44px; }
+  .cmd-esave, .cmd-ecancel { min-height: 44px; }
+}
+
+/* SHOW MORE. Suggestions are capped at three on both surfaces; the rest are one tap away
+   and the count is always stated, so a short list never looks like the whole list. */
+.cmd-more, .db-more { display: block; width: calc(100% - 32px); margin: 4px 16px 10px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 10px 8px; min-height: 40px; border-radius: 8px; cursor: pointer; color: #8fa4a0;
+  background: rgba(255,255,255,.02); border: 1px solid rgba(120,200,170,.2); }
+.cmd-more:disabled, .db-more:disabled { opacity: .6; }
+@media (max-width: 560px) { .cmd-more, .db-more { min-height: 44px; } }

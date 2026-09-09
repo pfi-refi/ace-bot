@@ -1040,7 +1040,7 @@ def _dedup_eligible(existing, text, due, parent_id):
 
 
 def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bool = True,
-             parent_id: str = None) -> tuple:
+             parent_id: str = None, bucket: str = None) -> tuple:
     text = (text or "").strip()
     if not text:
         return False, "empty text"
@@ -1175,11 +1175,20 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
             # parent_id links a spawned ACTION back to the RECORD it came from ("mail Rebecca's
             # packet" -> the Rebecca record), so completing the action cannot take the record
             # with it. The column has existed since 2026-07-31 but nothing could ever set it.
+            # bucket is the area Brady was LOOKING AT when he captured this. Storing it (as
+            # opposed to leaving it to the keyword rules) is what makes "add it to this list"
+            # mean what it says; an empty value still falls through to derive_bucket, which
+            # lands unrecognised capture in Inbox rather than guessing Personal.
+            _bkt = (bucket or "").strip() or None
+            if _bkt and _bkt not in all_areas():
+                return False, f"unknown area '{bucket}'"
+            item["bucket"] = _bkt
             cur.execute(
                 "INSERT INTO daybank_items (id, ts, kind, text, status, tags, due, done_ts, "
-                "parent_id) VALUES (%s, %s::timestamptz, %s, %s, 'open', %s::jsonb, %s, NULL, %s)",
+                "parent_id, bucket) VALUES (%s, %s::timestamptz, %s, %s, 'open', %s::jsonb, %s, "
+                "NULL, %s, %s)",
                 (item["id"], item["ts"], kind, text, json.dumps(item["tags"]), item["due"],
-                 (parent_id or None)))
+                 (parent_id or None), _bkt))
         if similar:
             item["similar"] = similar   # heads-up, not a block: caller can merge/update
         return True, item

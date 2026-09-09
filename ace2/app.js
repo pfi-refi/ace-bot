@@ -1156,6 +1156,27 @@
         note.textContent = 'Not scheduled and not due — things you could reasonably finish today.';
         body6.appendChild(note);
         dt.suggested.forEach(function (it) { row(it, 'nodate', { suggest: true }); });
+        // SHOW MORE (Brady, 2026-09-09): three by default on phone and desktop, the rest on
+        // request. It refetches the SAME server-computed group with a bigger size, so this
+        // card can never end up suggesting something the Command Center would not.
+        if (dt.suggested_total > dt.suggested.length) {
+          var more = document.createElement('button');
+          more.className = 'db-more';
+          more.textContent = 'Show more · ' + (dt.suggested_total - dt.suggested.length) + ' more';
+          more.addEventListener('click', function () {
+            more.textContent = '…'; more.disabled = true;
+            fetch(API + '/daybank?suggest=' + (dt.suggested.length + 5), { headers: headers() })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (d) {
+                if (!d) throw 0;
+                materializeCard('daybank', { items: d.items, summary: d.summary || null,
+                                             due_today: d.due_today, today: d.today,
+                                             reviews_pending: d.reviews_pending || 0 });
+              })
+              .catch(function () { more.textContent = 'Could not load more'; more.disabled = false; });
+          });
+          body6.appendChild(more);
+        }
       }
       sect('WAITING ON SOMEONE ELSE', dt.waiting, 'parked');
 
@@ -1692,16 +1713,37 @@
   // THE FIVE LANES (2026-09-06). Filed by WHOSE TIME IT TAKES, not what the row is about —
   // the haircut is Personal even when it is for a Groundworks interview. Separate axis from
   // the 11 categories, which say what a row IS; this says whose day it comes out of.
-  var CMD_LANES = ['GFI/PFI','Groundworks','Side Work','Personal','Ace'];
-  var LANE_COLORS = { 'GFI/PFI':'#38bdf8', 'Groundworks':'#ff8c1a', 'Side Work':'#2fd36b',
-                      'Personal':'#ff4757', 'Ace':'#8091a8' };
-  var cmd = { open:false, min:false, lens:'areas', cat:'All', items:[], editing:null, today:'' };
+  // RELEASE ONE (2026-09-09): the areas are no longer a constant. Inbox is permanent, and
+  // Brady can add and rename his own lists, so the list is whatever the server says it is —
+  // a hardcoded copy here would quietly hide any area he created.
+  var CMD_LANES = ['Inbox','GFI/PFI','Groundworks','Side Work','Personal','Ace'];
+  var LANE_COLORS = { 'Inbox':'#a78bfa', 'GFI/PFI':'#38bdf8', 'Groundworks':'#ff8c1a',
+                      'Side Work':'#2fd36b', 'Personal':'#ff4757', 'Ace':'#8091a8' };
+  var LANE_FALLBACK = ['#7dd3fc','#fca5a5','#fcd34d','#86efac','#c4b5fd','#f9a8d4'];
+  function laneColor(name){
+    if (LANE_COLORS[name]) return LANE_COLORS[name];
+    var h = 0; for (var i=0;i<(name||'').length;i++) h = (h*31 + name.charCodeAt(i)) & 0xffff;
+    return LANE_FALLBACK[h % LANE_FALLBACK.length];
+  }
+  var cmd = { open:false, min:false, lens:'today', cat:'All', items:[], editing:null, today:'',
+              areas:CMD_LANES.slice(), custom:[], dueToday:null, area:'All', suggest:3 };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
   function cmdFetch(){
-    return fetch(API+'/daybank?all=true',{headers:headers()})
+    return fetch(API+'/daybank?all=true&suggest='+(cmd.suggest||3),{headers:headers()})
       .then(function(r){ if(r.status===401){toLogin();throw 0;} return r.json(); })
-      .then(function(d){ cmd.items=(d.items||[]); cmd.today=d.today||''; });
+      .then(function(d){
+        cmd.items=(d.items||[]); cmd.today=d.today||'';
+        // The SAME server-computed grouping the Due Today card renders. Recomputing it here
+        // is how the two Today surfaces would start disagreeing about the same row.
+        cmd.dueToday = d.due_today || null;
+        return fetch(API+'/board/lists',{headers:headers()})
+          .then(function(r2){ return r2.ok ? r2.json() : null; })
+          .then(function(l){
+            if (l && l.areas && l.areas.length){ cmd.areas = l.areas; cmd.custom = l.custom||[]; }
+          })
+          .catch(function(){});   // an unreachable list endpoint must not blank the board
+      });
   }
   function cmdOpen(){
     cmd.open=true; cmd.min=false;
@@ -1741,7 +1783,9 @@
     if (cmd.editing === it.id) {
       var dText = (cmd.draft && cmd.draft.text != null) ? cmd.draft.text : it.text;
       var dCat  = (cmd.draft && cmd.draft.cat) || c;
-      var dDue  = (cmd.draft && cmd.draft.due != null) ? cmd.draft.due : (it.due || '');
+      // due_on is the server's normalized YYYY-MM-DD; `due` can still be the raw phrase he
+      // typed, which a date input would silently render as blank and then save as a clear.
+      var dDue  = (cmd.draft && cmd.draft.due != null) ? cmd.draft.due : (it.due_on || it.due || '');
       var opts = CMD_ORDER.map(function (o) {
         return '<option value="'+o+'"'+(o===dCat?' selected':'')+'>'+o+'</option>';
       }).join('');
@@ -1750,30 +1794,65 @@
       // are the override, and they are also the only way to reach 'settled' — a record that
       // is finished but must STAY (Feliz's annuity is closed and paid, not deleted).
       var dEntry = (cmd.draft && cmd.draft.entry) || it.entry || 'action';
-      var dState = (cmd.draft && cmd.draft.state) || it.state || 'active';
-      var dBucket = (cmd.draft && cmd.draft.bucket) || it.bucket || 'Personal';
-      var bOpts = CMD_LANES.map(function (o) {
-        return '<option value="'+o+'"'+(o===dBucket?' selected':'')+'>'+o+'</option>';
+      var dState = (cmd.draft && cmd.draft.state != null) ? cmd.draft.state : (it.state || '');
+      var dBucket = (cmd.draft && cmd.draft.bucket) || it.bucket || 'Inbox';
+      var dNext = (cmd.draft && cmd.draft.next != null) ? cmd.draft.next : (it.next_step || '');
+      var dFup  = (cmd.draft && cmd.draft.fup  != null) ? cmd.draft.fup  : (it.followup || '');
+      var dTags = (cmd.draft && cmd.draft.tags) || (it.tags || []).slice(1);
+      var bOpts = (cmd.areas || CMD_LANES).map(function (o) {
+        return '<option value="'+cmdEsc(o)+'"'+(o===dBucket?' selected':'')+'>'+cmdEsc(o)+'</option>';
       }).join('');
       var eOpts = ['action', 'record'].map(function (o) {
         return '<option value="'+o+'"'+(o===dEntry?' selected':'')+'>'+
                (o === 'action' ? 'ACTION — ends when done' : 'RECORD — has a state')+'</option>';
       }).join('');
-      var sOpts = ['active', 'waiting', 'settled'].map(function (o) {
-        return '<option value="'+o+'"'+(o===dState?' selected':'')+'>'+
-               (o === 'waiting' ? 'WAITING — parked on someone else'
-                : o === 'settled' ? 'SETTLED — finished, keep it' : 'ACTIVE')+'</option>';
+      // ONE STATUS CONTROL, ONE MEANING (2026-09-09, Brady). Needs a decision used to be
+      // derived from "undated and nothing written down", so it filled up with work he had
+      // simply not read. It is a choice now, and it sits in the same list as Ready and
+      // Waiting because that is how he thinks about it: what is this row waiting on — me,
+      // someone else, or a decision I haven't made?
+      var STATES = dEntry === 'record'
+        ? [['', 'ACTIVE'], ['waiting', 'WAITING — parked on someone else'],
+           ['decide', 'NEEDS A DECISION — my call to make'],
+           ['settled', 'SETTLED — finished, keep it']]
+        : [['', 'READY — mine to do'], ['waiting', 'WAITING — parked on someone else'],
+           ['decide', 'NEEDS A DECISION — my call to make']];
+      var sOpts = STATES.map(function (o) {
+        return '<option value="'+o[0]+'"'+(o[0]===dState?' selected':'')+'>'+o[1]+'</option>';
       }).join('');
+      // Secondary tags: extra filters inside an area, never a second copy of the row.
+      var tagChips = CMD_ORDER.map(function (t) {
+        var on = dTags.indexOf(t) >= 0;
+        return '<button type="button" class="cmd-etag'+(on?' on':'')+'" data-tag="'+t+'"'
+             + ' style="'+(on?'color:'+CMD_CATS[t]+';border-color:'+CMD_CATS[t]+'88':'')+'">'
+             + t + '</button>';
+      }).join('');
+      var chosen = !!(it.chosen_on && cmd.today && it.chosen_on.slice(0,10) === cmd.today);
       return '<div class="cmd-row cmd-editing" data-id="'+it.id+'" style="border-left-color:'+col+'">'
         +'<div class="cmd-eform">'
         +'<textarea class="cmd-etext" rows="2">'+cmdEsc(dText)+'</textarea>'
-        +'<div class="cmd-erow"><select class="cmd-ecat">'+opts+'</select>'
-        +'<input class="cmd-edue" placeholder="due (e.g. Fri 3pm)" value="'+cmdEsc(dDue)+'"></div>'
-        +'<div class="cmd-erow"><select class="cmd-ebucket"'+(dEntry==='record'?' disabled':'')+'>'+bOpts+'</select></div>'
-        +'<div class="cmd-erow"><select class="cmd-eentry">'+eOpts+'</select>'
-        +'<select class="cmd-estate"'+(dEntry==='action'?' disabled':'')+'>'+sOpts+'</select></div>'
+        +'<div class="cmd-erow"><label class="cmd-el">Area</label>'
+        +'<select class="cmd-ebucket"'+(dEntry==='record'?' disabled':'')+'>'+bOpts+'</select>'
+        +'<label class="cmd-el">Category</label><select class="cmd-ecat">'+opts+'</select></div>'
+        +'<div class="cmd-erow"><label class="cmd-el">Kind</label><select class="cmd-eentry">'+eOpts+'</select>'
+        +'<label class="cmd-el">Status</label><select class="cmd-estate">'+sOpts+'</select></div>'
         +'<div class="cmd-erow"><input class="cmd-ewait" placeholder="waiting on who? (e.g. Tony, approval)" '
         +'value="'+cmdEsc(it.waiting_on||'')+'"'+(dState==='waiting'?'':' disabled')+'></div>'
+        // THREE DATES, THREE MEANINGS (Brady, 2026-09-09). The deadline belongs to the
+        // obligation, the follow-up is when HE chases it, and "doing today" is a choice that
+        // must never write either one. They get separate controls so they cannot be confused.
+        +'<div class="cmd-erow cmd-edates"><label class="cmd-el">Deadline</label>'
+        +'<input type="date" class="cmd-edue" value="'+cmdEsc(dDue)+'">'
+        +'<button type="button" class="cmd-eclear" data-clears="cmd-edue" title="Remove the deadline">clear</button></div>'
+        +'<div class="cmd-erow cmd-edates"><label class="cmd-el">Follow up</label>'
+        +'<input type="date" class="cmd-efup" value="'+cmdEsc(dFup)+'">'
+        +'<button type="button" class="cmd-eclear" data-clears="cmd-efup" title="Remove the follow-up">clear</button></div>'
+        +'<div class="cmd-erow"><label class="cmd-el">Next step</label>'
+        +'<input class="cmd-enext" placeholder="the one move that advances this" value="'+cmdEsc(dNext)+'"></div>'
+        +'<div class="cmd-erow"><button type="button" class="cmd-etoday'+(chosen?' on':'')+'">'
+        +(chosen?'✓ Doing today':'Do today')+'</button>'
+        +'<span class="cmd-ehint">Chooses the day. Never sets a deadline.</span></div>'
+        +'<div class="cmd-erow cmd-etags">'+tagChips+'</div>'
         +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button>'
         +'<button class="cmd-ecancel cmd-edrop" style="margin-left:auto;color:#ff8080;border-color:#ff808055" title="Archive this item (kept in history, never deleted)">REMOVE</button></div>'
         +'</div></div>';
@@ -1793,14 +1872,30 @@
       // `chosen_on` records that he picked it up today — none of them is a deadline.
       +(it.next_step?'<span class="cmd-next">next: '+cmdEsc(it.next_step)+'</span>':'')
       +(it.followup?'<span class="cmd-follow">follow up '+cmdEsc(it.followup)+'</span>':'')
-      +(it.lane==='undecided'?'<span class="cmd-decide">needs a decision</span>':'')
+      // The FLAG, not the lane: a row can be due Friday and still be a decision he has not
+      // made. The deadline wins the lane so he cannot miss it; the mark stays visible anyway.
+      +(it.needs_decision?'<span class="cmd-decide">needs a decision</span>':'')
+      // A REVIEW FLAG, NOT A LANE (2026-09-09). These are the rows the old rule would have
+      // called decisions on Brady's behalf. Saying so out loud beats moving them.
+      +(it.carried_over?'<span class="cmd-carried" title="The old board called this a decision '
+        +'because it had no date and no next step. Nothing was changed — it is here for you '
+        +'to look at.">carried over · not yet reviewed</span>':'')
       +(it.lane==='waiting'&&it.waiting_on?'<span class="cmd-waitfor">→ '+cmdEsc(it.waiting_on)+'</span>':'')
       +((it.chosen_on&&cmd.today&&it.chosen_on.slice(0,10)===cmd.today)?'<span class="cmd-today">doing today</span>':'')
       // THE LINK, BOTH WAYS (2026-09-06). An action spawned from a record shows where it came
       // from; a record shows how many open actions hang off it. Without this the two row types
       // just coexist — the split only pays off when you can see that completing the action
       // leaves the record standing.
-      +cmdParentChip(it)+cmdChildChip(it)+'</div></div>'
+      +cmdParentChip(it)+cmdChildChip(it)
+      // FOLLOW-UP ≠ THE TASK (Codex, 2026-09-09). In the prototype one control meant both "I
+      // chased them" and "the work is finished", so clearing the chase closed the job. The
+      // follow-up gets its own two buttons and the checkbox keeps its single meaning.
+      +(it.followup && !done
+        ? '<div class="cmd-fuprow"><button class="cmd-fup" data-fup="clear" data-id="'+it.id+'">'
+          + 'Follow-up handled</button><button class="cmd-fup" data-fup="push" data-id="'+it.id+'">'
+          + 'Push a week</button><span class="cmd-fuphint">the task stays open</span></div>'
+        : '')
+      +'</div></div>'
       +'<button class="cmd-pencil" title="Edit">✎</button></div>';
   }
   function cmdRender(resetScroll){
@@ -1819,7 +1914,11 @@
         due:   er.querySelector('.cmd-edue').value,
         entry: er.querySelector('.cmd-eentry').value,
         state: er.querySelector('.cmd-estate').value,
-        bucket: (er.querySelector('.cmd-ebucket') || {}).value
+        bucket: (er.querySelector('.cmd-ebucket') || {}).value,
+        fup:   (er.querySelector('.cmd-efup')  || {}).value,
+        next:  (er.querySelector('.cmd-enext') || {}).value,
+        tags:  Array.prototype.map.call(er.querySelectorAll('.cmd-etag.on'),
+                                        function(t){ return t.getAttribute('data-tag'); })
       };
     }
     if(cmd.min){
@@ -1839,16 +1938,35 @@
     // work". It is gone, and the two states that had nowhere to live here (waiting on
     // someone else, and undated work with no next step) now have their own lens. Every
     // lens reads the SAME server-computed `lane` the Due Today card reads.
-    var LN={due:'Due',waiting:'Waiting',decide:'Decide',areas:'Areas',all:'All',done:'Done'};
-    var LENS_ORDER=['due','waiting','decide','areas','all','done'];
-    if (LENS_ORDER.indexOf(cmd.lens)<0) cmd.lens='areas';   // migrate 'pipeline'/'lanes'
+    // TODAY IS THE SAME TODAY (2026-09-09, Brady). The Command Center and the Due Today card
+    // must show the same work; this lens renders the server's `due_today` grouping directly
+    // rather than filtering the list again with its own idea of what counts.
+    var LN={today:'Today',due:'Scheduled',waiting:'Waiting',decide:'Decide',
+            areas:'Areas',all:'All',done:'Done'};
+    var LENS_ORDER=['today','due','waiting','decide','areas','all','done'];
+    if (LENS_ORDER.indexOf(cmd.lens)<0) cmd.lens='today';   // migrate 'pipeline'/'lanes'
     var nWait=cmd.items.filter(function(x){return x.lane==='waiting';}).length;
-    var nDec=cmd.items.filter(function(x){return x.lane==='undecided';}).length;
+    var nDec=cmd.items.filter(function(x){return x.needs_decision;}).length;
     var LC={waiting:nWait,decide:nDec};
     var lenses=LENS_ORDER.map(function(l){
       var n=LC[l]; return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'
         +LN[l]+(n?' <b>'+n+'</b>':'')+'</button>'; }).join('');
-    var items=cmd.items.filter(function(x){ return cmd.cat==='All'||cmdCatOf(x)===cmd.cat; });
+    // AREAS ARE THE PRIMARY NAVIGATION (brief, 2026-09-09), with the categories demoted to
+    // secondary filters inside one. Inbox is permanently visible but is never the default.
+    var areaList = ['All'].concat(cmd.areas || CMD_LANES);
+    if (areaList.indexOf(cmd.area) < 0) cmd.area = 'All';
+    var areaCounts = {};
+    cmd.items.forEach(function(x){ if(x.status==='open'){
+      areaCounts[x.bucket||'Inbox'] = (areaCounts[x.bucket||'Inbox']||0)+1; } });
+    var areaTabs = areaList.map(function(a){
+      var n = a==='All' ? null : (areaCounts[a]||0);
+      var dot = a==='All' ? '' : '<span class="cmd-sq" style="background:'+laneColor(a)+'"></span>';
+      return '<button class="cmd-area'+(a===cmd.area?' on':'')+'" data-area="'+cmdEsc(a)+'">'
+           + dot + cmdEsc(a) + (n!=null?' <b>'+n+'</b>':'') + '</button>';
+    }).join('') + '<button class="cmd-area cmd-arealist" id="cmd-lists" title="Add or rename a list">⋯</button>';
+    var items=cmd.items.filter(function(x){
+      return (cmd.cat==='All'||cmdCatOf(x)===cmd.cat)
+          && (cmd.area==='All'||(x.bucket||'Inbox')===cmd.area); });
     // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
     // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
     // captures stop shoving to the top like a pile.
@@ -1856,13 +1974,47 @@
     var nDone=cmd.items.filter(function(x){return x.status==='done';}).length;
     function byAge(a,b){ return (a.ts||'')<(b.ts||'')?-1:1; }
     var body='';
-    if(cmd.lens==='due'){
+    if(cmd.lens==='today'){
+      var dt = cmd.dueToday;
+      if (!dt) body='<div class="cmd-empty">loading today…</div>';
+      else {
+        function grp(label, rows, note){
+          if(!rows||!rows.length) return;
+          body += '<div class="cmd-grp">'+label+' · '+rows.length+'</div>'
+               + (note?'<div class="cmd-note">'+note+'</div>':'')
+               + rows.map(cmdRow).join('');
+        }
+        grp('DEADLINES', dt.deadlines);
+        grp('DOING TODAY', dt.chosen);
+        if (dt.suggested && dt.suggested.length) {
+          grp('ACE SUGGESTS' + (dt.suggested_total > dt.suggested.length
+                ? ' · ' + dt.suggested.length + ' of ' + dt.suggested_total + ' open' : ''),
+              dt.suggested,
+              'Optional. Not scheduled and not due — choosing one sets the day, never a deadline.');
+          if (dt.suggested_total > dt.suggested.length)
+            body += '<button class="cmd-more" id="cmd-more">Show more · '
+                  + (dt.suggested_total - dt.suggested.length) + ' more</button>';
+        }
+        grp('WAITING ON SOMEONE ELSE', dt.waiting);
+        if(!body) body='<div class="cmd-empty">Nothing due and nothing waiting on you. Clear.</div>';
+      }
+    }
+    else if(cmd.lens==='due'){
       // DUE lens (2026-08-13): what's due, no sifting. Open items with a computed due date,
       // grouped Overdue / Today / Tomorrow / This week (next 7d). due_days comes from the server.
       var due=items.filter(function(x){ return x.status==='open' && x.due_days!=null && x.due_days<=7; })
                    .sort(function(a,b){ return a.due_days-b.due_days; });
       var buckets=[['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]];
-      buckets.forEach(function(bk){ var g=due.filter(function(x){return bk[1](x.due_days);}); if(g.length){ body+='<div class="cmd-grp">'+bk[0]+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } });
+      buckets.forEach(function(bk){ var g=due.filter(function(x){return bk[1](x.due_days);}); if(g.length){ body+='<div class="cmd-grp">'+bk[0]+' · '+g.length+' — deadlines</div>'+g.map(cmdRow).join(''); } });
+      // FOLLOW-UPS ARE DATED WORK TOO, and they were missing from this lens entirely — the
+      // day Brady meant to chase something never appeared anywhere he looks for dates. They
+      // are listed separately and labelled, because a day he chose to call someone is not a
+      // deadline anyone gave him.
+      var fups = items.filter(function(x){ return x.status==='open' && x.followup; })
+                      .sort(function(a,b){ return (a.followup||'')<(b.followup||'')?-1:1; });
+      if (fups.length) body += '<div class="cmd-grp">FOLLOW-UPS · '+fups.length+' — when you chase them</div>'
+                             + '<div class="cmd-note">Your own reminder to check in. Handling one leaves the task open.</div>'
+                             + fups.map(cmdRow).join('');
       if(!body) body='<div class="cmd-empty">nothing due in the next 7 days ✓</div>';
     }
     else if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
@@ -1874,29 +2026,43 @@
                       : '<div class="cmd-empty">Nothing parked on anyone else.</div>';
     }
     else if(cmd.lens==='decide'){
-      // Undated work with no next step recorded — the one thing to decide, not to schedule.
-      var u=items.filter(function(x){ return x.lane==='undecided'; }).sort(byAge);
-      body = u.length ? u.map(cmdRow).join('')
-                      : '<div class="cmd-empty">Everything open has a date or a next step.</div>';
+      // Rows Brady MARKED as open questions, plus — listed separately and never mixed in —
+      // the ones the old derived rule had been calling decisions for him.
+      var u=items.filter(function(x){ return x.needs_decision; }).sort(byAge);
+      var carried=items.filter(function(x){ return x.status==='open' && x.carried_over
+                                                 && !x.needs_decision; }).sort(byAge);
+      body = u.length ? '<div class="cmd-grp">YOUR OPEN QUESTIONS · '+u.length+'</div>'+u.map(cmdRow).join('')
+                      : '<div class="cmd-empty">Nothing marked as needing a decision.</div>';
+      if (carried.length) body += '<div class="cmd-grp">CARRIED OVER · '+carried.length+'</div>'
+        + '<div class="cmd-note">The old board called these decisions because they had no date '
+        + 'and no next step. Nothing was changed and none of them is set to Ready — they are '
+        + 'here for you to look at when you want to.</div>' + carried.map(cmdRow).join('');
     }
     else if(cmd.lens==='areas'){
       // ACTIONS only: a lane answers "whose time does this take", and a record has no ending
       // to spend time on. Records stay visible under the pipeline lens.
       var acts=items.filter(function(x){ return x.status==='open' && x.entry!=='record'; });
-      CMD_LANES.forEach(function(L){
-        var g=acts.filter(function(x){ return (x.bucket||'Personal')===L; }).sort(byAge);
-        if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'
-          +LANE_COLORS[L]+'"></span>'+L+' · '+g.length+'</div>'+g.map(cmdRow).join(''); }
+      (cmd.areas || CMD_LANES).forEach(function(L){
+        var g=acts.filter(function(x){ return (x.bucket||'Inbox')===L; }).sort(byAge);
+        // Inbox stays visible even at zero: it is where capture lands, and an area that
+        // disappears when empty is one Brady cannot trust to be checked.
+        if(!g.length && L!=='Inbox') return;
+        body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'
+          +laneColor(L)+'"></span>'+cmdEsc(L)+' · '+g.length+'</div>'
+          +(g.length?g.map(cmdRow).join('')
+                    :'<div class="cmd-note">Nothing unfiled. New captures land here.</div>');
       });
       if(!body) body='<div class="cmd-empty">No open actions.</div>';
     }
     else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status==='open';}).sort(byAge); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
     var addCat=cmd.cat==='All'?'Money':cmd.cat;
+    var addArea=cmd.area==='All'?'':cmd.area;   // '' lets the server file it (Inbox if unsure)
     v.innerHTML='<div class="cmd-hd"><div class="cmd-orb"></div><div class="cmd-ttl">COMMAND</div>'
       +'<div class="cmd-n" style="margin-left:8px;font-size:11px;letter-spacing:.08em;opacity:.65">'+nOpen+' open · '+nDone+' done</div>'
       +'<button class="cmd-ic" id="cmd-min" title="Clean view">⌄</button><button class="cmd-ic" id="cmd-x" title="Close">✕</button></div>'
-      +'<div class="cmd-lens">'+lenses+'</div><div class="cmd-chips">'+chips+'</div>'
+      +'<div class="cmd-lens">'+lenses+'</div>'
+      +'<div class="cmd-areas">'+areaTabs+'</div><div class="cmd-chips">'+chips+'</div>'
       +'<div class="cmd-list">'+body+'</div>'
       +'<form class="cmd-add" id="cmd-add"><span class="cmd-plus">+</span><input id="cmd-input" placeholder="Add to '+addCat+'…" autocomplete="off"></form>';
     var _nl=v.querySelector('.cmd-list'); if(_nl&&_keep) _nl.scrollTop=_keep;
@@ -1904,6 +2070,56 @@
     v.querySelector('#cmd-min').onclick=function(){ cmd.min=true; cmdRender(); };
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(true); }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-chip'), function(b){ b.onclick=function(){ cmd.cat=b.getAttribute('data-cat'); cmdRender(true); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-area[data-area]'), function(b){
+      b.onclick=function(){ cmd.area=b.getAttribute('data-area'); cmdRender(true); }; });
+
+    // ADD / RENAME A LIST. Renaming moves nothing: the rows are updated in place, so ids,
+    // history, dates, waiting information and parent links all stay attached.
+    var mb=v.querySelector('#cmd-more');
+    if(mb) mb.onclick=function(){
+      // Ask the SERVER for more of the same list rather than filling the gap here — the
+      // whole point of the shared grouping is that neither surface invents its own.
+      cmd.suggest=(cmd.suggest||3)+5; mb.textContent='…';
+      cmdFetch().then(function(){ cmdRender(); }).catch(function(){});
+    };
+    var lb=v.querySelector('#cmd-lists');
+    if(lb) lb.onclick=function(){
+      var name=prompt('Add a list, or type an existing name to rename it:', '');
+      if(!name) return; name=name.trim(); if(!name) return;
+      var exists=(cmd.areas||[]).filter(function(a){ return a===name; }).length>0;
+      var payload={name:name};
+      if(exists){
+        var to=prompt('Rename "'+name+'" to:', name);
+        if(!to || to.trim()===name) return;
+        payload.rename_to=to.trim();
+      }
+      fetch(API+'/board/lists',{method:'POST',headers:headers(),body:JSON.stringify(payload)})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(!d||!d.ok){ boardNotice((d&&d.error)||'Could not change that list.'); return; }
+          if(exists && cmd.area===name) cmd.area=payload.rename_to;
+          return cmdFetch().then(function(){ cmdRender(true); });
+        })
+        .catch(function(){ boardNotice('Could not reach the board.'); });
+    };
+
+    // HANDLING A FOLLOW-UP NEVER TOUCHES THE TASK. The endpoint writes `followup` and
+    // nothing else; if the answer ever says otherwise, say so rather than showing a tick.
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-fup'), function(b){ b.onclick=function(e){
+      e.stopPropagation();
+      var id=b.getAttribute('data-id'), act=b.getAttribute('data-fup');
+      var was=b.textContent; b.textContent='…'; b.disabled=true;
+      fetch(API+'/board/followup',{method:'POST',headers:headers(),
+            body:JSON.stringify({id:id,action:act,days:7})})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(!d||!d.ok){ throw ((d&&d.error)||0); }
+          if(d.task_still_open===false){ boardNotice('That closed the task — reload and check it.'); }
+          return cmdFetch().then(function(){ cmdRender(); });
+        })
+        .catch(function(why){ b.textContent=was; b.disabled=false;
+          if(typeof why==='string'&&why) boardNotice(why); });
+    }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=function(){
       var id=b.parentNode.getAttribute('data-id');
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
@@ -1952,28 +2168,62 @@
       var bSel = row.querySelector('.cmd-ebucket');
       function sync(){
         if (bSel) bSel.disabled = (eSel.value !== 'action');   // a record has no lane
-        sSel.disabled = (eSel.value !== 'record');
-        wIn.disabled  = (eSel.value !== 'record' || sSel.value !== 'waiting');
+        // Status is no longer records-only: "Needs a decision" is a question about an
+        // ACTION, and disabling it here is what forced the derived lane in the first place.
+        sSel.disabled = false;
+        wIn.disabled  = (sSel.value !== 'waiting');
         if (wIn.disabled) wIn.value = '';
       }
-      eSel.onchange = sync; sSel.onchange = sync; sync();
+      eSel.onchange = function(){ cmd.draft = null; sync(); cmdRender(); };
+      sSel.onchange = sync; sync();
+      Array.prototype.forEach.call(row.querySelectorAll('.cmd-eclear'), function(cb){
+        cb.onclick = function(){ var t=row.querySelector('.'+cb.getAttribute('data-clears'));
+          if(t) t.value=''; };
+      });
+      Array.prototype.forEach.call(row.querySelectorAll('.cmd-etag'), function(tb){
+        tb.onclick = function(){ tb.classList.toggle('on');
+          var t=tb.getAttribute('data-tag');
+          tb.style.color = tb.classList.contains('on') ? CMD_CATS[t] : '';
+          tb.style.borderColor = tb.classList.contains('on') ? CMD_CATS[t]+'88' : '';
+        };
+      });
+      // DO TODAY writes chosen_on and only chosen_on — the same call the suggestion card
+      // makes, so accepting work here can no more invent a deadline than accepting it there.
+      var tBtn = row.querySelector('.cmd-etoday');
+      if (tBtn) tBtn.onclick = function(){
+        var id = row.getAttribute('data-id');
+        var on = tBtn.classList.contains('on');
+        tBtn.disabled = true;
+        fetch(API+'/daybank/update',{method:'POST',headers:headers(),
+              body:JSON.stringify({id:id, chosen_on: on ? '' : cmd.today})})
+          .then(function(r){ return r.json(); })
+          .then(function(d){ if(!d||!d.ok) throw 0;
+            cmd.draft=null; return cmdFetch().then(function(){ cmdRender(); }); })
+          .catch(function(){ tBtn.disabled=false; boardNotice('Could not change the day.'); });
+      };
     });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
       var row = b.closest('.cmd-row'); if (!row) return;
       var id = row.getAttribute('data-id');
       var ta = row.querySelector('.cmd-etext');
+      var isAction = row.querySelector('.cmd-eentry').value === 'action';
+      var stateVal = row.querySelector('.cmd-estate').value;
       var body = {
         id: id,
         text: (ta.value || '').trim(),
         category: row.querySelector('.cmd-ecat').value,
         entry: row.querySelector('.cmd-eentry').value,
-        bucket: (row.querySelector('.cmd-eentry').value === 'action'
-                 ? row.querySelector('.cmd-ebucket').value : ''),
-        state: (row.querySelector('.cmd-eentry').value === 'record'
-                ? row.querySelector('.cmd-estate').value : ''),
-        waiting_on: (row.querySelector('.cmd-estate').value === 'waiting'
+        bucket: (isAction ? row.querySelector('.cmd-ebucket').value : ''),
+        // An ACTION can carry 'decide' — that is Brady marking an open question — but the
+        // record lifecycle (active/waiting/settled) still belongs to records only.
+        state: (isAction && stateVal !== 'decide' && stateVal !== 'waiting') ? '' : stateVal,
+        waiting_on: (stateVal === 'waiting'
                      ? (row.querySelector('.cmd-ewait').value || '').trim() : ''),
-        due: (row.querySelector('.cmd-edue').value || '').trim()
+        due: (row.querySelector('.cmd-edue').value || '').trim(),
+        followup: (row.querySelector('.cmd-efup').value || '').trim(),
+        next_step: (row.querySelector('.cmd-enext').value || '').trim(),
+        tags: Array.prototype.map.call(row.querySelectorAll('.cmd-etag.on'),
+                                       function(t){ return t.getAttribute('data-tag'); })
       };
       if (!body.text) { ta.style.borderColor = '#ff6b6b'; ta.focus(); return; }   // blank = no-op server-side
       b.textContent = 'SAVING…'; b.disabled = true;
@@ -2009,7 +2259,7 @@
       var addPH = inp.placeholder;   // 'Add to <category>…' — restore the real one, not a guess
       function addFailed(msg){ inp.value = t; inp.placeholder = msg; inp.focus();
         setTimeout(function(){ inp.placeholder = addPH; }, 4000); }
-      fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat})})
+      fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat,bucket:addArea})})
         .then(function(r){ return r.ok ? r.json() : null; })
         .then(function(d){
           if (d && d.dup) { addFailed('Already on your board — nothing added'); return; }
@@ -2604,7 +2854,7 @@
     // Two config tables, one of them updated. The guard below stops that shipping again.
     // DUE TODAY keeps its name and its narrow job. The server computes the grouping, so
     // this card and the Command Center read the same records by the same rules.
-    daybank:  { title: 'DUE TODAY', url: '/daybank',
+    daybank:  { title: 'DUE TODAY', url: '/daybank?suggest=3',
                 shape: function (d) { return { items: d.items || [], summary: d.summary || null,
                                                due_today: d.due_today || null, today: d.today || '',
                                                reviews_pending: d.reviews_pending || 0 }; } }

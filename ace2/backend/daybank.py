@@ -102,7 +102,7 @@ def _drive_read_items(active_only: bool = True) -> list:
 
 
 def add_item(kind: str, text: str, due: str = None, tags: list = None,
-             parent_id: str = None) -> tuple:
+             parent_id: str = None, bucket: str = None) -> tuple:
     """Capture one item. Postgres when enabled, else Drive.
 
     parent_id links a spawned ACTION back to the RECORD it came out of, so completing the
@@ -110,7 +110,7 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None,
     rather than failing the capture, since Drive is the degraded fallback path.
     """
     if db.enabled():
-        return db.add_item(kind, text, due, tags, parent_id=parent_id)
+        return db.add_item(kind, text, due, tags, parent_id=parent_id, bucket=bucket)
     return _drive_add_item(kind, text, due, tags)
 
 

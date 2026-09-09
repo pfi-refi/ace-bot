@@ -517,7 +517,7 @@ async def weather():
     return await get_weather()  # already async (httpx)
 
 
-async def board_payload(all_items: bool = True) -> dict:
+async def board_payload(all_items: bool = True, suggest: int = 3) -> dict:
     """The board as EVERY caller should see it: decorated rows plus lane counts.
 
     One builder, used by the GET route and by every add/update response. Successful saves
@@ -534,16 +534,20 @@ async def board_payload(all_items: bool = True) -> dict:
             "today": today,
             # Computed here so Due Today and the Command Center cannot disagree about what
             # counts as a deadline, a choice, or a suggestion.
-            "due_today": classify.due_today_sections(items, today),
+            # `suggest` is how many optional suggestions to return; the group also carries
+            # `suggested_total`, so "Show more" asks for more of the SAME server-computed
+            # list rather than each surface inventing its own extras.
+            "due_today": classify.due_today_sections(items, today, max(1, min(suggest, 50))),
             "lane_order": list(classify.LANE_ORDER),
             "lane_labels": classify.LANE_LABELS}
 
 
 @app.get("/daybank", dependencies=[Depends(require_auth)])
-async def daybank_read(all: bool = False):
+async def daybank_read(all: bool = False, suggest: int = 3):
     """all=true also returns done items across days (the Completed lens); default is the
-    active view (open items + anything touched today)."""
-    return await board_payload(all_items=all)
+    active view (open items + anything touched today). `suggest` sizes the optional
+    suggestion list only — it never changes what is due, chosen or waiting."""
+    return await board_payload(all_items=all, suggest=suggest)
 
 
 # ── RELEASE ONE: lists, follow-ups, and a read-only mapping preview ────────────
@@ -731,6 +735,9 @@ class DaybankUpdateReq(BaseModel):
 class DaybankAddReq(BaseModel):
     text: str = ""
     category: str = ""   # Deals | Agents | Admin | Networking | Business | Tech
+    # The area he is looking at. "" means let the keyword rules file it, which sends anything
+    # unrecognised to Inbox. An unknown name is refused, never silently ignored.
+    bucket: str = ""
 
 
 @app.post("/daybank/add", dependencies=[Depends(require_auth)])
@@ -743,8 +750,11 @@ async def daybank_add(req: DaybankAddReq):
     if cat_err:
         return {"ok": False, "dup": False, "error": cat_err,
                 **(await board_payload())}
+    if req.bucket and req.bucket not in await asyncio.to_thread(db.all_areas):
+        return {"ok": False, "dup": False,
+                "error": "unknown area '%s'" % req.bucket, **(await board_payload())}
     ok, res = await asyncio.to_thread(
-        daybank.add_item, "todo", req.text, None, [cat] if cat else None)
+        daybank.add_item, "todo", req.text, None, [cat] if cat else None, None, req.bucket)
     dup = bool(isinstance(res, dict) and res.get("dup"))
     # Same shape and scope as GET /daybank — a successful add must not answer with rows the
     # panel cannot classify, or the lanes empty out and the counts read zero until reload.

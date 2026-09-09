@@ -36,6 +36,21 @@ class Lanes(unittest.TestCase):
         self.assertEqual(classify.lane_of(row()), classify.LANE_ANYTIME)
         self.assertEqual(classify.lane_of(row(state='decide')), classify.LANE_UNDECIDED)
 
+    def test_a_deadline_wins_the_lane_but_never_erases_the_mark(self):
+        # Both things are true at once: it is due Friday AND he has not decided. Lanes are
+        # mutually exclusive, so the deadline takes the lane — losing it would hide a dated
+        # row from Overdue. The mark rides alongside instead of competing with it.
+        dated = row(state='decide', due_days=3)
+        self.assertEqual(classify.lane_of(dated), classify.LANE_UPCOMING)
+        self.assertTrue(classify.needs_decision(dated))
+        self.assertTrue(classify.decorate(dated)['needs_decision'])
+        overdue = row(state='decide', due_days=-2)
+        self.assertEqual(classify.lane_of(overdue), classify.LANE_OVERDUE,
+                         'a flagged row must still be visibly overdue')
+        self.assertTrue(classify.needs_decision(overdue))
+        self.assertFalse(classify.needs_decision(row(state='decide', status='done')))
+        self.assertFalse(classify.needs_decision(row()))
+
     def test_the_review_flag_is_separate_from_the_lane(self):
         self.assertTrue(classify.carried_over(row()))
         self.assertFalse(classify.carried_over(row(state='decide')),

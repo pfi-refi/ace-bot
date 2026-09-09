@@ -81,6 +81,17 @@ def shelves_of(item: dict) -> list:
     return [s for s in SHELVES if s in tags]
 
 
+def needs_decision(item: dict) -> bool:
+    """Brady marked this as an open question — whatever lane its dates put it in.
+
+    Lanes are mutually exclusive and a real deadline has to win one, or a dated row he also
+    flagged would drop out of Overdue and he would miss it. But losing the lane must not lose
+    the MARK: this is the flag every surface reads, so "I haven't decided" and "this is due
+    Friday" can both be true and both be visible.
+    """
+    return (item.get("state") or "") == "decide" and (item.get("status") or "open") == "open"
+
+
 def carried_over(item: dict) -> bool:
     """True for a row that WOULD have been Needs a decision under the old derivation but was
     never marked by Brady. Used by the migration preview and shown as "carried over — not yet
@@ -142,6 +153,7 @@ def decorate(item: dict) -> dict:
         **item,
         "lane": lane,
         "carried_over": carried_over(item),
+        "needs_decision": needs_decision(item),
         "lane_label": LANE_LABELS[lane],
         "area": area_of(item),
         "shelves": shelves_of(item),
@@ -185,9 +197,14 @@ def chosen_today(item: dict, today: str) -> bool:
     return (item.get("chosen_on") or "")[:10] == today
 
 
-def due_today_sections(items: list, today: str, suggest: int = 5) -> dict:
-    """The three compact groups Due Today shows. Pure — it writes nothing and proposes
-    nothing that is not already on the board."""
+def due_today_sections(items: list, today: str, suggest: int = 3) -> dict:
+    """The compact groups both Today surfaces show. Pure — it writes nothing and proposes
+    nothing that is not already on the board.
+
+    THREE suggestions, not five (Brady, 2026-09-09): "Show three suggestions on both phone
+    and desktop with a Show more option." `suggested_total` carries the real size so a
+    surface can offer the rest without a second request, and so the count is never hidden.
+    """
     rows = [decorate(i) for i in (items or [])]
     live = [r for r in rows if r["lane"] != LANE_DONE]
     deadlines = [r for r in live if r["lane"] in (LANE_OVERDUE, LANE_TODAY)]
