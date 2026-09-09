@@ -395,6 +395,18 @@ def _is_meta_fact(f: str) -> bool:
     dominated by them, diluting every per-turn context. Filter them out of the LIVE context only
     (the brief's self-note path and recall still read the raw store)."""
     s = (f or "").strip().lower()
+    # "Learning sweep complete. Saved three updates: <five unrelated people in one sentence>"
+    # was a NEAR MISS on 'memory sweep complete' and is the single worst blending vector in
+    # the store: one row that names the aunt, Thiami, Rebecca and Damon together, which no
+    # amount of grouping can separate because the entities are already welded into one
+    # sentence (Codex, 8 Sept: "avoid concatenated sweep narratives as authoritative
+    # workflow facts"). It is a record of Ace SAVING things, not a fact about Brady.
+    # Filtered from the LIVE context only — the row stays in the store and in recall.
+    if re.match(r"^(learning|memory|nightly|background)\s+sweep\s+complete", s):
+        return True
+    if re.match(r"^saved\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+                r"(update|memory|memories|fact|facts|file|files|note|notes)", s):
+        return True
     return (s.startswith("ace self-note")
             or s.startswith("saved ")
             or s.startswith("memory sweep complete")
@@ -402,7 +414,149 @@ def _is_meta_fact(f: str) -> bool:
             or "new memory files written" in s)
 
 
-def _mem_slim(mem_list: list, head: int = 40, tail: int = 70) -> list:
+# ── KEEPING ONE PERSON'S FACTS TOGETHER ────────────────────────────────────────
+# Codex's 8 Sept evaluation reproduced two failures on BOTH the deployed and the proposed
+# prompt: Thiami's DC wet-signature requirement and Rebecca's Thursday mailing date were
+# each attached to the AUNT's signature case, and an explicit correction — "wait to confirm
+# with my uncle not Damon" — was ignored even though it was present in the input. So neither
+# failure is "the fact was missing"; both are "the facts arrived as one undifferentiated
+# stream of 110 bullets and the model had nothing holding them apart."
+#
+# This groups the SAME facts under the entity each one NAMES. It is deliberately an index by
+# literal mention, not a judgement about what a fact is "really about" — that judgement is
+# exactly what put "Ace Ready Mix" in the Ace lane and read a defects report as a waiting
+# item. A fact naming two people is listed under BOTH, which is lossless and makes the
+# ambiguity visible instead of hiding it. Nothing is dropped, reordered within a group, or
+# rewritten; the store is untouched.
+_ENTITY_STOP = {
+    # Brady, his companies, and the words that look like names but never are.
+    "brady", "ace", "pfi", "gfi", "the", "and", "for", "with", "his", "her", "their",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "irs", "llc", "cfi", "fta", "dns", "eod",
+    # process nouns that recur constantly and would each earn a meaningless heading
+    "completed", "income", "plan", "note", "update", "corrected", "learning", "saved",
+    "deal", "deals", "goal", "goals", "task", "tasks", "call", "calls", "meeting",
+    "google", "drive", "sheet", "board", "memory", "brief", "week", "today", "tomorrow",
+    "morning", "evening", "night", "status", "next", "new", "old", "final", "total",
+    "paid", "pay", "payment", "commission", "license", "test", "exam", "form", "packet",
+    "everything", "anything", "something", "nothing", "one", "two", "equal", "balance",
+    "groundworks", "personal", "side", "work", "money", "bills", "admin", "business",
+}
+# Relationship words Brady uses as names ("my uncle", "Syanna's aunt Ne").
+_RELATIONS = ("uncle", "aunt", "mom", "dad", "mother", "father", "brother", "sister",
+              "grandpa", "grandma", "wife", "girlfriend")
+_NAME_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
+# How Brady's board rows start. These are actions, never people.
+_IMPERATIVES = {
+    "find", "ask", "build", "review", "talk", "follow", "get", "call", "send", "pay",
+    "set", "check", "make", "order", "finish", "mark", "add", "update", "look", "figure",
+    "redo", "sort", "book", "email", "text", "confirm", "schedule", "start", "stop",
+    "keep", "move", "put", "take", "give", "run", "read", "write", "draft", "prep",
+    "clean", "fix", "close", "open", "sell", "buy", "help", "reach", "touch", "wait",
+    # past-tense forms show up mid-fact ("Left a message. Called again later")
+    "called", "sent", "asked", "emailed", "texted", "moved", "added", "updated",
+    "checked", "finished", "started", "left", "drafted", "reviewed", "ordered",
+    "confirmed", "scheduled", "booked", "signed", "received", "delayed", "waiting",
+    "pending", "cleared", "submitted", "approved", "declined", "resent", "holding",
+}
+
+
+def _entities_in(fact: str) -> list:
+    """Entity names this fact literally names. Mention-indexing only — no inference about
+    what the fact is 'really about', because that judgement is what put 'Ace Ready Mix' in
+    the Ace lane and read a defects report as a waiting item."""
+    out = []
+    low = (fact or "").lower()
+    for r in _RELATIONS:
+        if re.search(r"\b" + r + r"\b", low):
+            out.append(r.capitalize())
+    # Board rows open with an imperative — "Find a time with Damon", "Ask Tony" — and reading
+    # those as people gave a roster of Find/Ask/Build/Review and pulled 76 unrelated facts
+    # into the window. Blanking every sentence-initial capital fixed that but ALSO lost real
+    # names that legitimately start a sentence ("Marlow paramed scheduled…"), so the verbs
+    # are named instead of the position being blamed.
+    for m in _NAME_RE.findall(fact or ""):
+        low = m.lower()
+        if low in _ENTITY_STOP or low in _IMPERATIVES or m in out:
+            continue
+        out.append(m)
+    return out[:4]          # a fact naming half the roster is not about any of them
+
+
+def _group_facts(mem_list: list, min_facts: int = 3) -> str:
+    """Render memory grouped by the entity each fact names, newest LAST inside each group.
+
+    Order within a group is preserved from the store, which sorts oldest→newest, so the last
+    line under a heading is the current one. That is what lets a correction win without any
+    schema change: it is simply the most recent thing said about that entity.
+
+    Each fact is printed ONCE, under its primary entity, with any other names it mentions
+    noted inline. Printing it under every entity it named doubled the block (24k → 50k
+    characters on the live store, about 6,000 extra tokens a turn) for no added information.
+    """
+    facts = [f for f in (mem_list or []) if (f or "").strip()]
+    if not facts:
+        return "(memory empty)"
+    ents = {f: _entities_in(f) for f in facts}
+    tally = {}
+    for names in ents.values():
+        for e in names:
+            tally[e] = tally.get(e, 0) + 1
+    # A heading has to earn itself; anything rarer stays in one plain list rather than
+    # hiding behind a heading of its own.
+    worthy = {e for e, n in tally.items() if n >= min_facts}
+    groups, order, rest = {}, [], []
+    for f in facts:
+        # The most SPECIFIC entity wins the row: "Robin's daughter Rebecca's packet" belongs
+        # under REBECCA, not under ROBIN, who appears in dozens of unrelated facts. First-
+        # mentioned put it under the commonest name and buried it.
+        cands = [e for e in ents[f] if e in worthy]
+        primary = min(cands, key=lambda e: tally[e]) if cands else None
+        if primary is None:
+            rest.append(f); continue
+        if primary not in groups:
+            groups[primary] = []; order.append(primary)
+        others = [e for e in ents[f] if e != primary and e in worthy]
+        groups[primary].append(f + (f"   [also names: {', '.join(others)}]" if others else ""))
+    order.sort(key=lambda e: -len(groups[e]))
+    lines = ["HOW TO READ THIS: each heading holds what is known about THAT person or "
+             "project. Never carry a detail from one heading to another — a requirement on "
+             "one deal is not a requirement on another. Within a heading the LAST line is "
+             "the most recent and it WINS over anything above it, including anything you "
+             "believed earlier."]
+    for name in order:
+        lines.append("")
+        lines.append(f"{name.upper()} ({len(groups[name])}):")
+        lines.extend(f"  - {f}" for f in groups[name])
+    if rest:
+        lines.append("")
+        lines.append("OTHER:")
+        lines.extend(f"  - {f}" for f in rest)
+    return "\n".join(lines)
+
+
+def _live_entities(items: list, limit: int = 12) -> list:
+    """People and projects named on the OPEN board — the cases actually in play today.
+
+    Used to decide whose old facts must be carried into the live window. Mention-indexing
+    again, not inference: if the aunt's row is open, the aunt's facts are relevant, whatever
+    the row is "about".
+    """
+    tally = {}
+    for it in (items or []):
+        if (it.get("status") or "open") != "open":
+            continue
+        for e in _entities_in(it.get("text") or ""):
+            tally[e] = tally.get(e, 0) + 1
+    return [e for e, _ in sorted(tally.items(), key=lambda kv: -kv[1])][:limit]
+
+
+def _mem_slim(mem_list: list, head: int = 40, tail: int = 70,
+              live_entities: list = None, per_entity: int = 2) -> list:
     """SMART MEMORY TIER (2026-08-03, cost fix): the fact store crossed ~330 entries and
     re-mailing ALL of it every turn was the single biggest per-message cost. Inline =
     the head (core tier sorts first) + the most recent tail; everything in between is
@@ -412,10 +566,33 @@ def _mem_slim(mem_list: list, head: int = 40, tail: int = 70) -> list:
     mem_list = [m for m in mem_list if not _is_meta_fact(m)]
     if len(mem_list) <= head + tail:
         return mem_list
-    return (list(mem_list[:head])
-            + [f"… ({len(mem_list) - head - tail} older facts not shown — use recall to "
-               f"search them before ever saying you don't know or remember something)"]
-            + list(mem_list[-tail:]))
+    keep = list(mem_list[:head]) + list(mem_list[-tail:])
+    # PULL IN THE FACTS FOR WHOEVER IS LIVE ON THE BOARD (2026-09-08).
+    # head+tail is core + most-recent, and an entity whose last note is a month old falls out
+    # of both. Codex's evaluation caught the consequence: asked whether the AUNT's deal was
+    # complete, Ace had NO aunt facts in context at all and answered using Thiami's document
+    # requirement and Rebecca's mailing date instead. It was not confusing two people it could
+    # see — it was filling a hole with the nearest similar case. So for each person or project
+    # named on the OPEN board, carry their most recent few facts even if they are old.
+    if live_entities:
+        want = {e.lower() for e in live_entities}
+        have = set(keep)
+        extra = []
+        for e in want:
+            hits = [m for m in mem_list if m not in have
+                    and re.search(r"\b" + re.escape(e) + r"\b", m, re.I)]
+            for m in hits[-per_entity:]:
+                if m not in have:
+                    extra.append(m); have.add(m)
+        if extra:
+            # keep store order so "newest last" still holds inside each group
+            pos = {m: i for i, m in enumerate(mem_list)}
+            keep = sorted(set(keep) | set(extra), key=lambda m: pos.get(m, 0))
+    dropped = len(mem_list) - len(keep)
+    return (keep[:head] if len(keep) <= head else keep[:head]) + (
+        [f"… ({max(dropped, 0)} older facts not shown — use recall to "
+         f"search them before ever saying you don't know or remember something)"]
+        + keep[head:] if len(keep) > head else [])
 
 
 async def _live_context() -> tuple:
@@ -438,8 +615,8 @@ async def _live_context() -> tuple:
     events = ok(cal_all, [])
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
-    mem_list = _mem_slim(ok(memory, []))
-    mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
+    mem_list = _mem_slim(ok(memory, []), live_entities=_live_entities(ok(bank, [])))
+    mem = _group_facts(mem_list)
     today_sched = _format_today_schedule(today_events, now)
     bank_str = _format_daybank(ok(bank, []))
     p_list = ok(personal, [])   # [] until Brady links br80mcgraw — nothing shows before then
@@ -2235,8 +2412,8 @@ async def _fast_context() -> str:
     events = _CTX["events"]
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
-    mem_list = _mem_slim(_CTX["memory"])
-    mem = "\n".join(f"- {m}" for m in mem_list) if mem_list else "(memory empty)"
+    mem_list = _mem_slim(_CTX["memory"], live_entities=_live_entities(_CTX["bank"]))
+    mem = _group_facts(mem_list)
     bank = _CTX["bank"]
     wx = _CTX["wx"]
     # Continuity: the unified thread (voice + chat, date-stamped) so voice remembers
