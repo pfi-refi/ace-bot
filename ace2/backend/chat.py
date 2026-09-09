@@ -1528,7 +1528,17 @@ _BRIEF_TIMES = {"morning": (9, 0), "eod": (20, 15)}   # Eastern — Brady wants 
 # THE THREE WAYS THE BRIEF LIED (2026-09-05). Each rule below is a morning Brady actually got.
 # Shared by both briefs because all three failed in both.
 _BRIEF_RULES = (
-    "\n\nTHESE THREE RULES OUTRANK EVERYTHING ABOVE.\n"
+    "\n\nTHESE RULES OUTRANK EVERYTHING ABOVE.\n"
+    "(0) NEVER SAY SOMETHING IS DONE WITHOUT EVIDENCE. On 9 September this brief said 'you hit "
+    "the gym this morning, so that's done' forty minutes after Brady said he was skipping it "
+    "until the evening. Evidence means BRADY said he did it, or a tool receipt says so. These "
+    "are NOT evidence: a calendar entry (that is a plan), a board item existing, a promise from "
+    "somebody else ('she said she'll sign' is still outstanding), or something YOU said in an "
+    "earlier turn — your own prose is a claim, not a source. His words are testimony; yours are "
+    "not. When you do not know, say what is still open rather than congratulating him for it.\n"
+    "(0b) HIS PLAN FOR TODAY IS THE POINT. If he has just told you what he is doing today, lead "
+    "with that. Bills belong here only as far as the sheet actually warrants; do not let a "
+    "standing money narrative crowd out what he just said he needs to get done.\n"
     "(1) THE CONVERSATION OUTRANKS THE BOARD. The board is written once and rarely revisited; "
     "what Brady SAID is newer and truer. Where the thread and a board item disagree, the thread "
     "wins outright — never repeat the stale version, and never quietly narrate around it. Say "
@@ -1551,11 +1561,22 @@ _BRIEF_RULES = (
 
 
 def _board_stats() -> str:
-    """Deterministic business snapshot from Ace's own store — no LLM guessing."""
-    from . import db
+    """Deterministic business snapshot from Ace's own store — no LLM guessing.
+
+    SHARED INTERPRETATION (2026-09-09). This function used to read a row as "a category and
+    maybe a due date", and outside Money/Bills/Opportunities anything undated reached the
+    brief as a bare count. So the board could show a row parked on the county with a next
+    step written on it, and the brief saw a number. Worse, the two disagreed about what a row
+    even was, which is how a brief can contradict the screen and both look right.
+
+    It now decorates rows through `classify` — the same module the Command Center and Due
+    Today use — so a lane, a waiting owner, a next step, a follow-up and a chosen day mean
+    exactly one thing everywhere. Nothing here writes; decoration is additive.
+    """
+    from . import classify, db
     _CATS = ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
     try:
-        items = db.read_items(active_only=False)
+        items = [classify.decorate(i) for i in db.read_items(active_only=False)]
     except Exception:
         items = []
     def cat(it):
@@ -1578,6 +1599,9 @@ def _board_stats() -> str:
     # blending unrelated Opportunities rows into things Brady never said ("$200/day angles").
     # Ids ride along so a stale row can be NAMED: this pass has no tools and cannot write to
     # the board, and pointing at [id] beats narrating around it.
+    def _TODAY_STR():
+        return datetime.now(EASTERN).strftime("%Y-%m-%d")
+
     def _line(i, cap=300, show_cat=False):
         t = (i.get("text", "") or "")
         body = t if len(t) <= cap else t[:cap].rstrip() + " …[truncated — ask before quoting]"
@@ -1585,11 +1609,30 @@ def _board_stats() -> str:
         head = f"  - [{i.get('id','?')}] {tag}{body}"
         dd = i.get("due_days")
         if dd is None:
-            return head
+            return head + _state(i)
         when = ("DUE TODAY" if dd == 0 else "DUE TOMORROW" if dd == 1
                 else f"due in {dd} days" if dd > 0 else f"{abs(dd)} days OVERDUE")
         on = i.get("due_on") or ""
-        return f"{head}  [{when}{f' — {on}' if on else ''}]"
+        return f"{head}  [{when}{f' — {on}' if on else ''}]" + _state(i)
+
+    def _state(i):
+        """The structured fields the board carries and the brief was throwing away. Each is
+        STORED — never inferred from the wording — so the brief can say who owns the next
+        move without guessing, and can tell a deadline from a day Brady chose himself."""
+        bits = []
+        if (i.get("waiting_on") or "").strip():
+            bits.append(f"PARKED ON {i['waiting_on'].strip()} — he is NOT the next actor")
+        if (i.get("next_step") or "").strip():
+            bits.append(f"next step (his words): {i['next_step'].strip()[:120]}")
+        if (i.get("followup") or "").strip():
+            bits.append(f"he plans to chase it {i['followup']} — that is HIS reminder, "
+                        f"not the other party's deadline")
+        if (i.get("chosen_on") or "")[:10] == _TODAY_STR():
+            bits.append("HE CHOSE THIS FOR TODAY (his pick, not a deadline)")
+        lane = i.get("lane")
+        if lane in ("undecided",):
+            bits.append("no date and no next step recorded — a decision, not a schedule")
+        return ("\n      · " + "\n      · ".join(bits)) if bits else ""
     money = [i for i in open_items if cat(i) == "Money"]
     if money:
         lines.append("OPEN MONEY ACTIONS (priority — flag anything time-critical):\n"
@@ -1613,6 +1656,29 @@ def _board_stats() -> str:
                      "appointments, deals, personal commitments):\n" + "\n".join(
                          _line(i, show_cat=True)
                          for i in sorted(other, key=lambda x: x.get("due_days", 999))[:14]))
+    # WHAT HE PICKED UP TODAY, and what is ready without a date. Both were invisible: the
+    # brief only ever saw dated rows outside three categories, so the work Brady actually
+    # chose this morning could not appear, and the model filled the gap with the register.
+    chosen = [i for i in open_items
+              if (i.get("chosen_on") or "")[:10] == now.strftime("%Y-%m-%d")]
+    if chosen:
+        lines.append("HE CHOSE THESE FOR TODAY (his own pick — treat as today's plan, and "
+                     "never describe one as a deadline):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in chosen[:10]))
+    parked = [i for i in open_items if i.get("lane") == "waiting"]
+    if parked:
+        lines.append("PARKED ON SOMEONE ELSE (he is NOT the next actor — never list these as "
+                     "things for him to do, and never call one finished because time passed):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in parked[:10]))
+    ready = [i for i in open_items
+             if i.get("due_days") is None and i.get("lane") in ("anytime", "undecided")
+             and cat(i) not in ("Money", "Bills", "Opportunities", "Goals")
+             and i.get("id") not in {c.get("id") for c in chosen}]
+    if ready:
+        lines.append("UNDATED AND READY (real work with no deadline — candidates for spare "
+                     "time, NOT things he committed to today):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in ready[:12]))
+
     # Wins from memory (the win-logger writes "Deal won:" / "Goal reached:" facts)
     try:
         wins = [f for f in db.read_facts_full()
@@ -1626,6 +1692,183 @@ def _board_stats() -> str:
     return "\n".join(lines)
 
 
+# ── THE BRIEF'S OWN CONVERSATION INPUT (2026-09-09) ────────────────────────────
+# The 9 Sept brief said "You hit the gym this morning, so that's done" forty minutes after
+# Brady said he was skipping the gym until the evening. Rebuilding the deployed input from
+# saved history showed why, and it is an input defect before it is a model one:
+#   • compose_brief_prompt took the last 16 TURNS and formatted them at the default 280
+#     characters, so the long day-layout answer — the one carrying the actual plan — was cut;
+#   • four of those sixteen slots were partial re-flushes of ONE sentence, because the ASR
+#     re-spelled a name and the strict-prefix collapse could not see them as the same turn;
+#   • the gym correction sat outside the window entirely.
+# So the brief is given a character budget rather than a turn count, a workable per-turn cap,
+# a fuzzier re-flush collapse, and — most importantly — Brady's OWN action-bearing statements
+# lifted out verbatim where truncation cannot reach them.
+_BRIEF_THREAD_CHARS = int(os.environ.get("ACE2_BRIEF_THREAD_CHARS", "9000"))
+_BRIEF_TURN_CHARS = int(os.environ.get("ACE2_BRIEF_TURN_CHARS", "900"))
+
+
+def _similar(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, a or "", b or "").ratio()
+
+
+def _collapse_near_reflushes(turns: list, ratio: float = 0.72, window: int = 180) -> list:
+    """DELIBERATELY A NO-OP FOR USER TEXT (2026-09-09, Codex).
+
+    This used to merge consecutive user turns that looked similar, keeping the longer one.
+    Reproduced failure:
+
+        "I am going to call the concrete supplier tomorrow morning for the pour."
+        "I am going to call the concrete supplier today for the pour."
+
+    Twenty seconds apart, judged similar, and the LONGER one kept — so the correction was
+    thrown away and the stale date survived. That is precisely the failure this whole patch
+    exists to fix, recreated by the fix. The same shape applies to a changed name, amount or
+    negation: a correction is usually SHORTER than what it corrects.
+
+    Nothing but explicit transcription or session metadata can prove one utterance supersedes
+    another, and we do not have it. So distinct statements are all kept, and the character
+    budget — not lossy guessing — is what bounds the input. `_collapse_reflushes` still merges
+    a STRICT extension, where the later text contains the earlier one in full and nothing can
+    be lost.
+    """
+    return list(turns or [])
+
+
+# What Brady says he will DO, or corrects. Kept verbatim and never truncated.
+# Deliberately generous: a missed commitment falls back to the thread, but a missed
+# CORRECTION is how the 9 September brief went wrong. Contractions and the spelled-out
+# forms both count ("I'm gonna" and "I am going to"), and a bare negation or a changed
+# day qualifies on its own.
+_COMMIT_RE = re.compile(
+    r"\b(i(?:'?m| am) (?:going to|gonna|doing|out|not)|i'?ll|i will|i need to|i have to|"
+    r"i gotta|i'?ve got to|i want to|i'?m|today|tonight|tomorrow|this evening|this morning|"
+    r"instead of|actually|no,? i|scratch that|don'?t|do not|never mind|cancel|"
+    r"changed my mind|make it)\b", re.I)
+
+
+def _commitment_lines(turns: list, now=None, limit: int = 12,
+                      total_chars: int = 4000) -> tuple:
+    """(today_block, prior_block) — Brady's action-bearing lines, complete or not at all.
+
+    Three things this must not do, all reproduced on 9 September:
+
+      • label a statement from ANOTHER DAY as "today". `_unified_thread` falls back to older
+        turns on a quiet morning, so a 8 September line could arrive and be presented under
+        TODAY — turning "I'll mail it today" into today's commitment.
+      • print a UTC clock as if it were his. 12:28 UTC was 8:28 in his morning.
+      • quote a statement PARTIALLY while calling it verbatim testimony. A 482-character line
+        ending "Do not send the packet; the client has not signed" lost exactly that ending,
+        and the opening was then presented as the whole thing.
+
+    So: dates and times are resolved in EASTERN, today is separated from earlier days, and a
+    statement either appears complete or is named as omitted — never trimmed in silence.
+    """
+    now = now or datetime.now(EASTERN)
+    today = now.strftime("%Y-%m-%d")
+
+    def local(ts):
+        try:
+            d = datetime.fromisoformat(str(ts))
+            return d.astimezone(EASTERN) if d.tzinfo else EASTERN.localize(d)
+        except Exception:
+            return None
+
+    said = []
+    for t in (turns or []):
+        if t.get("role") != "user":
+            continue
+        text = (t.get("content") or "").strip()
+        if not text or not _COMMIT_RE.search(text):
+            continue
+        when = local(t.get("ts"))
+        said.append((when, text))
+
+    def render(rows, header, budget):
+        if not rows:
+            return ""
+        lines, used, omitted = [], 0, []
+        for when, text in reversed(rows[-limit:]):          # newest first while filling
+            entry = "  - %s \u201c%s\u201d" % (
+                when.strftime("%-I:%M %p ET") if when else "time unknown", text)
+            if used + len(entry) > budget:
+                omitted.append((when, text))
+                continue
+            lines.append(entry); used += len(entry)
+        lines.reverse()                                      # present oldest-first
+        out = header + "\n" + "\n".join(lines)
+        if omitted:
+            # Named, never silently trimmed: a partial quote presented as testimony is worse
+            # than an explicit gap.
+            out += ("\n  [%d earlier statement(s) did not fit and are NOT quoted here. Do not "
+                    "treat this list as complete; ask before acting on anything you cannot "
+                    "see.]" % len(omitted))
+        return out
+
+    today_rows = [(w, x) for w, x in said if w and w.strftime("%Y-%m-%d") == today]
+    prior_rows = [(w, x) for w, x in said if not w or w.strftime("%Y-%m-%d") != today]
+
+    today_block = render(
+        today_rows,
+        "\n\nWHAT BRADY HIMSELF SAID TODAY (%s, his words, newest last — these OUTRANK "
+        "anything you or the board say, and you must not contradict them):" % today,
+        total_chars)
+    prior_block = render(
+        prior_rows,
+        "\n\nEARLIER DAYS, for context only (NOT today's plan — do not read a 'today' or "
+        "'tomorrow' in these as meaning today):",
+        max(800, total_chars // 4))
+    return today_block, prior_block
+
+
+def _user_commitments(turns: list, now=None) -> str:
+    today_block, prior_block = _commitment_lines(turns, now=now)
+    return today_block + prior_block
+
+
+def _brief_thread(turns: list) -> str:
+    """The conversation as the brief should receive it."""
+    kept = _collapse_near_reflushes(_collapse_reflushes(turns or []))
+    return _format_thread(_budget_turns(kept, _BRIEF_THREAD_CHARS), per_turn=_BRIEF_TURN_CHARS)
+
+
+def _last_brief_cutoff(kind: str, now):
+    """(cutoff, a line saying what the window actually is).
+
+    deliver_brief writes a receipt row per kind on every delivery, so `summaries.ts` for
+    'brief_<kind>' is when the last one really went out. Anchoring to it means the window
+    matches what Brady was told last time instead of assuming it was twenty hours ago.
+
+    The note is not decoration: on a fallback the brief must not imply it knows what changed
+    since the last one, because it does not.
+    """
+    from . import db
+    fallback = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
+                else now - timedelta(hours=20))
+    try:
+        row = db.latest_summary(f"brief_{kind}")
+        ts = (row or {}).get("ts")
+        if ts:
+            last = datetime.fromisoformat(ts).astimezone(EASTERN)
+            # A stale receipt (days old) would open a window so wide the "change" is the whole
+            # board. Cap it, and say so, rather than quietly reporting a week as "since then".
+            if last < now - timedelta(days=3):
+                return (now - timedelta(days=3),
+                        "(WINDOW: the last %s brief went out %s — more than three days ago, so "
+                        "this covers the last three days only. Do not claim it covers "
+                        "everything since then.)" % (kind, last.strftime("%b %-d")))
+            if last <= now:
+                return (last, "(WINDOW: exactly since the last %s brief, delivered %s.)"
+                        % (kind, last.strftime("%b %-d at %-I:%M %p")))
+    except Exception:
+        pass
+    return (fallback,
+            "(WINDOW: no delivery receipt for a previous %s brief, so this is a fixed "
+            "look-back, not a true since-the-last-brief list. Do not say 'since your last "
+            "brief' as though it were exact.)" % kind)
+
+
 async def compose_brief_prompt(kind: str = "morning") -> str:
     """Everything the brief knows, minus the model call — split out (2026-08-03) so the
     MAX BRIDGE can run the same brief on Brady's Claude Max plan ($0/token); this server
@@ -1637,7 +1880,7 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
         events_raw, wx, convo, bills_res = await asyncio.gather(
             asyncio.to_thread(get_events_structured, 2 if kind == "eod" else 1),
             get_weather(),
-            asyncio.to_thread(_unified_thread, 16),
+            asyncio.to_thread(_unified_thread, 60),   # budget-bounded below
             bills_sheet.fetch_bills(),
             return_exceptions=True,
         )
@@ -1664,7 +1907,22 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                 "\n".join(f"- {e.get('time','')} {e.get('title','')}" for e in tom)
                 or "(nothing scheduled yet)")
         mem_all = await asyncio.to_thread(brain.read_memory)
-        goals = [f for f in mem_all if "goal" in f.lower() and not f.startswith("ACE SELF-NOTE")][:6]
+        # HIS ACTUAL GOALS, not the first six memory strings containing the word "goal"
+        # (2026-09-09 audit). That string match pulled in any sentence mentioning a goal —
+        # including Ace's own notes about goals — while the rows Brady deliberately files
+        # under Goals, which is his real current selection, were never consulted.
+        try:
+            _goal_rows = [i.get("text", "") for i in await asyncio.to_thread(db.read_items, True)
+                          if i.get("status") == "open"
+                          and "Goals" in (i.get("tags") or [])]
+        except Exception:
+            _goal_rows = []
+        goals = _goal_rows[:6] or [f for f in mem_all
+                                   if "goal" in f.lower() and not f.startswith("ACE SELF-NOTE")][:6]
+        # THE CURRENT PROFILE. Updating Ace's identity through update_profile changed how he
+        # talks in chat and did nothing to the brief, because the brief never read it — which
+        # is why the brief still sounded like a phase Brady had moved on from.
+        profile_now = await asyncio.to_thread(load_profile)
         self_notes = [f for f in mem_all if f.startswith("ACE SELF-NOTE")][-3:]
         # Brief feedback steering — Brady's 👍/👎 votes tune tomorrow's brief
         fb = await asyncio.to_thread(db.latest_summary, "brief_feedback")
@@ -1682,8 +1940,13 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             all_items = await asyncio.to_thread(db.read_items, False)
         except Exception:
             all_items = []
-        cutoff = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
-                  else now - timedelta(hours=20))
+        # ANCHOR THE WINDOW TO THE LAST BRIEF THAT ACTUALLY WENT OUT (2026-09-09).
+        # "Since the last brief" was a fixed 20 hours, which is not the last brief — it is a
+        # guess about when the last brief was. deliver_brief already writes a receipt row per
+        # kind, and that row's own ts is the real delivery instant, so use it. The fixed
+        # window stays as the fallback for a first run or a missing receipt, and the label
+        # below SAYS which one is in force rather than implying a precision it does not have.
+        cutoff, window_note = _last_brief_cutoff(kind, now)
         _CATS = ("Money", "Bills", "Opportunities", "Goals", "Personal", "Deals",
                  "Agents", "Admin", "Networking", "Business", "Tech")
         def _cat_of(it):
@@ -1700,6 +1963,12 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                        if i.get("status") == "done" and _after_cutoff(i.get("done_ts"))]
         new_recent = [i for i in all_items
                       if i.get("status") == "open" and _after_cutoff(i.get("ts"))]
+        # EDITS COUNT AS CHANGE. Only creations and completions were counted, so the evening
+        # Brady spent moving deadlines, naming who he was waiting on and writing next steps
+        # registered as nothing happening — and the brief told him so.
+        _seen = {i.get("id") for i in done_recent} | {i.get("id") for i in new_recent}
+        edited = [i for i in all_items
+                  if i.get("id") not in _seen and _after_cutoff(i.get("updated_at"))]
         dl = []
         if done_recent:
             dl.append("KNOCKED OUT since the last brief:")
@@ -1708,28 +1977,41 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             dl.append("NEW on the board since the last brief:")
             dl += [f"  + {i['text'][:160]}" + (f"  [{c}]" if (c := _cat_of(i)) else "")
                    for i in new_recent[:8]]
-        delta_block = "\n".join(dl) or "(nothing closed or added since the last brief)"
+        if edited:
+            dl.append("CHANGED since the last brief (he edited these — a changed deadline, "
+                      "a next step, who it is parked on. NOT finished work):")
+            dl += [f"  ~ {i['text'][:140]}" for i in edited[:8]]
+        delta_block = ("\n".join(dl) or "(nothing closed, added or changed since then)") \
+            + "\n" + window_note
         # PIVOT (2026-08-10): Brady stepped back from GFI/PFI to dig out financially. The brief
         # leads with the RECOVERY — money/tax deadlines, bills due, income moves — NOT the old
         # EMD/business chase. Never mention EMD. Keep the Gabby situation OUT of the pushed text
         # (this lands on his lock screen where she might see) unless he himself raised it today.
         if kind == "morning":
             ask = (
-                "You are Ace, Brady's chief of staff, writing his MORNING BRIEF for his FINANCIAL "
-                "RECOVERY. This is NOT a template to fill — it's a SYNTHESIS. Read the CHANGE SINCE "
-                "THE LAST BRIEF, the recent thread, his REAL schedule, and the board data below, "
-                "then tell him the true shape of today in your own words, woven naturally (never as "
-                "labeled sections): a one-line human open with the weather beat; then — only if "
-                "there's something real — what he moved since the last brief and what's new; then "
-                "the 1-3 things that GENUINELY matter today, led by anything time-critical from the "
-                "money/bills data (a tax/IRS deadline, a bill due within ~3 days, an income move) "
-                "blended with his actual appointments; then one honest, steadying line on where the "
-                "recovery stands. HARD RULES: surface only what's IMMINENT or decision-worthy — do "
-                "NOT list every bill or open item; the board data is REFERENCE to pull from, never "
-                "to recite. Vary it day to day — never open the same way twice. On a quiet day, say "
-                "so plainly instead of manufacturing urgency. ~130 words. No EMD, no old business "
-                "goals. Gabby is fully in the loop on the money, so referencing it is fine — keep "
-                "the tone steady, not heavy. Plain text, short lines, no markdown, no section labels."
+                # HIS DAY, NOT A FIXED NARRATIVE (2026-09-09 audit). This asked for a "FINANCIAL
+                # RECOVERY brief" led by money and bills every single morning, which is how a
+                # brief written forty minutes after Brady laid out his plan could spend itself on
+                # the register and omit the plan. Money leads when the sheet says something is
+                # actually imminent — not because the template says so.
+                "You are Ace, Brady's chief of staff, writing his MORNING BRIEF. This is NOT a "
+                "template to fill — it's a SYNTHESIS, and its subject is HIS DAY. Read what he "
+                "himself said, the CHANGE SINCE THE LAST BRIEF, his REAL schedule, and the board "
+                "data below, then tell him the true shape of today in your own words, woven "
+                "naturally (never as labeled sections): a one-line human open with the weather "
+                "beat; then — only if there's something real — what moved since the last brief; "
+                "then the 1-3 things that GENUINELY matter today. Those come FIRST from what he "
+                "said he is doing and what he chose for today, then from anything time-critical "
+                "in the money data (a tax/IRS deadline, a bill due within ~3 days), blended with "
+                "his actual appointments; then one honest, steadying line. If money is not "
+                "actually urgent today, do not lead with it — a bill due in nine days is not "
+                "today's news, and generic bill repetition must never crowd out something he "
+                "just committed to. HARD RULES: surface only what's IMMINENT or decision-worthy "
+                "— do NOT list every bill or open item; the board data is REFERENCE to pull "
+                "from, never to recite. Vary it day to day — never open the same way twice. On a "
+                "quiet day, say so plainly instead of manufacturing urgency. ~130 words. No EMD. "
+                "Gabby is fully in the loop on the money, so referencing it is fine — keep the "
+                "tone steady, not heavy. Plain text, short lines, no markdown, no section labels."
             )
         else:
             ask = (
@@ -1745,7 +2027,10 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             )
         ask += _BRIEF_RULES
         return (
-            f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
+            f"{ask}\n\nWHO HE IS RIGHT NOW — his current profile, which he edits. This is the\n"
+            f"standing context for everything below; if it disagrees with an older habit of\n"
+            f"this brief, the profile wins:\n{profile_now}\n\n"
+            f"CURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
             f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
             f"CHANGE SINCE THE LAST BRIEF:\n{delta_block}\n\n"
             f"MONEY DUE IN THE NEXT 10 DAYS — from Brady's budget sheet, the ONLY trustworthy\n"
@@ -1756,7 +2041,8 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             + ("\n\nACE'S OWN GROWTH NOTES (mention max ONE, casually, only if morning):\n"
                + "\n".join(f"- {n}" for n in self_notes) if self_notes else "")
             + fb_line
-            + "\n\nRECENT THREAD (for what happened):\n" + _format_thread(ok(convo, [])))
+            + _user_commitments(ok(convo, []), now=now)
+            + "\n\nRECENT THREAD (for what happened):\n" + _brief_thread(ok(convo, [])))
     except Exception as e:
         logger.warning("compose_brief_prompt(%s) failed: %s", kind, e)
         return ""

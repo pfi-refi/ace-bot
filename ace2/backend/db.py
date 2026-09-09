@@ -104,9 +104,14 @@ def _init_schema():
         # is rewritten. An empty next_step on an undated action is exactly what puts a row in
         # the "Needs a decision" lane, which is the signal Brady asked for rather than a
         # backlog of invented dates.
+        # updated_at (2026-09-09): the brief's "since the last brief" window counted only
+        # rows CREATED or COMPLETED, so moving a deadline, naming who you are waiting on, or
+        # writing a next step — the cleanup Brady had just finished — counted as no change at
+        # all and the brief told him nothing had moved. Nullable with no backfill: an
+        # un-migrated row simply reads as "not edited since this shipped", which is true.
         for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT",
                      "bucket TEXT", "next_step TEXT", "followup TEXT",
-                     "chosen_on TEXT"):
+                     "chosen_on TEXT", "updated_at TIMESTAMPTZ"):
             cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
@@ -826,7 +831,8 @@ def read_items(active_only: bool = True) -> list:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
                         "parent_id, superseded_by, entry, state, waiting_on, closed_by, "
-                        "bucket, next_step, followup, chosen_on FROM daybank_items")
+                        "bucket, next_step, followup, chosen_on, updated_at "
+                        "FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
         items = []
@@ -863,6 +869,9 @@ def read_items(active_only: bool = True) -> list:
             # deadline. Accepting one of Ace's suggestions must never invent a due date; the
             # obligation's own timing is `due` and belongs to the world, this belongs to him.
             it["chosen_on"] = r[17]
+            # When this row was last EDITED, as opposed to created or completed. The brief's
+            # change window reads it so a cleanup pass is not invisible.
+            it["updated_at"] = r[18].isoformat() if r[18] else None
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None
@@ -1556,6 +1565,7 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("bucket = %s"); args.append(str(bucket).strip())
             if not sets:
                 return False, "nothing to update"
+            sets.append("updated_at = now()")   # a receipt for the edit, not a new field to set
             args.append(item_id)
             cur.execute(f"UPDATE daybank_items SET {', '.join(sets)} WHERE id = %s RETURNING text", args)
             row = cur.fetchone()
