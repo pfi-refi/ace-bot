@@ -1162,3 +1162,13 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   background: rgba(255,255,255,.02); border: 1px solid rgba(120,200,170,.2); }
 .cmd-more:disabled, .db-more:disabled { opacity: .6; }
 @media (max-width: 560px) { .cmd-more, .db-more { min-height: 44px; } }
+
+/* "I've looked at this" — one tap to retire the review flag, with nothing else changed.
+   Deliberately quieter than the follow-up buttons: reviewing is an acknowledgement, not
+   an action on the work itself. (Codex, 2026-09-09) */
+.cmd-rev { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 5px 9px; min-height: 30px; border-radius: 6px;
+  cursor: pointer; color: #a78bfa; border: 1px solid rgba(167,139,250,.34);
+  background: rgba(167,139,250,.07); }
+.cmd-rev:disabled { opacity: .5; }
+@media (max-width: 560px) { .cmd-rev { min-height: 44px; } }

@@ -52,14 +52,52 @@ class Lanes(unittest.TestCase):
         self.assertFalse(classify.needs_decision(row()))
 
     def test_the_review_flag_is_separate_from_the_lane(self):
-        self.assertTrue(classify.carried_over(row()))
-        self.assertFalse(classify.carried_over(row(state='decide')),
+        # `legacy` = it existed before release one shipped, per the stored boundary.
+        legacy = dict(pre_release_one=True)
+        self.assertTrue(classify.carried_over(row(**legacy)))
+        self.assertFalse(classify.carried_over(row(state='decide', **legacy)),
                          'a row he marked himself was never "carried over"')
-        self.assertFalse(classify.carried_over(row(next_step='call Damon Tuesday')))
-        self.assertFalse(classify.carried_over(row(entry='record')))
-        self.assertFalse(classify.carried_over(row(status='done')))
-        self.assertFalse(classify.carried_over(row(chosen_on='2026-09-09')),
+        self.assertFalse(classify.carried_over(row(next_step='call Damon Tuesday', **legacy)))
+        self.assertFalse(classify.carried_over(row(entry='record', **legacy)))
+        self.assertFalse(classify.carried_over(row(status='done', **legacy)))
+        self.assertFalse(classify.carried_over(row(chosen_on='2026-09-09', **legacy)),
                          'choosing it for today is reviewing it')
+
+    def test_new_work_never_claims_it_came_from_the_old_board(self):
+        # The flag used to be computed from current fields alone, so a capture made five
+        # seconds ago — undated, no next step — wore "carried over · not yet reviewed".
+        self.assertFalse(classify.carried_over(row()),
+                         'a row created after release one is not carried over from anything')
+        self.assertFalse(classify.carried_over(row(pre_release_one=False)))
+
+    def test_saying_ready_is_enough_to_retire_the_flag(self):
+        # It must not take a fabricated due date or an invented next step to clear this.
+        legacy = row(pre_release_one=True)
+        self.assertTrue(classify.carried_over(legacy))
+        reviewed = row(pre_release_one=True, reviewed_at='2026-09-09T10:00:00-04:00')
+        self.assertFalse(classify.carried_over(reviewed))
+        self.assertIsNone(reviewed.get('due'), 'no date was invented to clear it')
+        self.assertIsNone(reviewed.get('next_step'), 'no next step was invented to clear it')
+
+    def test_an_unreviewed_row_is_never_offered_as_ready_work(self):
+        legacy = row(id='L', pre_release_one=True)
+        fresh = row(id='F')
+        sec = classify.due_today_sections([legacy, fresh], '2026-09-09')
+        self.assertNotIn('L', [x['id'] for x in sec['suggested']],
+                         'a row nobody has reviewed was offered as work to pick up')
+        self.assertIn('L', [x['id'] for x in sec['review']])
+        self.assertIn('F', [x['id'] for x in sec['suggested']])
+
+    def test_his_own_open_questions_are_answered_not_suggested(self):
+        sec = classify.due_today_sections([row(id='Q', state='decide')], '2026-09-09')
+        self.assertNotIn('Q', [x['id'] for x in sec['suggested']])
+        self.assertIn('Q', [x['id'] for x in sec['decisions']])
+
+    def test_review_and_completion_still_work_on_a_flagged_row(self):
+        # A review flag must not quietly disable the row: it is still real work he can do.
+        legacy = classify.decorate(row(pre_release_one=True))
+        self.assertTrue(legacy['actionable'])
+        self.assertTrue(legacy['completable'])
 
     def test_a_recorded_next_step_moves_it_out_of_undecided(self):
         self.assertEqual(classify.lane_of(row(next_step='call Damon Tuesday')),

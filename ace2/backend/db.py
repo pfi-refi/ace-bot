@@ -111,7 +111,8 @@ def _init_schema():
         # un-migrated row simply reads as "not edited since this shipped", which is true.
         for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT",
                      "bucket TEXT", "next_step TEXT", "followup TEXT",
-                     "chosen_on TEXT", "updated_at TIMESTAMPTZ"):
+                     "chosen_on TEXT", "updated_at TIMESTAMPTZ",
+                     "reviewed_at TIMESTAMPTZ"):
             cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
@@ -139,6 +140,18 @@ def _init_schema():
                 kind  TEXT NOT NULL DEFAULT 'recap',
                 text  TEXT NOT NULL
             )""")
+        # THE RELEASE-ONE BOUNDARY (Codex, 2026-09-09). "Carried over from the old board"
+        # was being computed purely from a row's current fields, so a capture made five
+        # seconds ago wore "carried over · not yet reviewed" — claiming a history it did not
+        # have. The boundary is stamped once, the first time this code touches the database,
+        # and never rewritten; a row created before it genuinely predates release one, and a
+        # row created after it never can. Stored, not inferred.
+        cur.execute("SELECT 1 FROM summaries WHERE kind = %s LIMIT 1",
+                    ("board_review_boundary",))
+        if not cur.fetchone():
+            cur.execute("INSERT INTO summaries (kind, text) "
+                        "VALUES (%s, to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SSOF'))",
+                        ("board_review_boundary",))
         # Web-push subscriptions — how Ace reaches the PHONE when nothing is open. The push
         # service mints a unique endpoint URL per installed app, so the endpoint IS the device
         # identity: it's the primary key, and a re-subscribe upserts instead of leaving a twin.
@@ -644,6 +657,29 @@ def custom_lists() -> list:
         return []
 
 
+def review_boundary() -> str:
+    """When release one first touched this database. '' when unknown.
+
+    Written once by _init_schema and never rewritten. Everything created before it is work
+    that existed under the old board; everything after it is not, whatever its fields say.
+    """
+    try:
+        return (latest_summary("board_review_boundary").get("text") or "").strip()
+    except Exception:
+        return ""
+
+
+def _before_boundary(ts, boundary: str) -> bool:
+    """True when this row predates release one. Unknown boundary ⇒ False: a row is never
+    called legacy on a guess, because that is the claim that has to be earned."""
+    if not boundary or not ts:
+        return False
+    try:
+        return datetime.fromisoformat(str(ts)) < datetime.fromisoformat(boundary)
+    except Exception:
+        return False
+
+
 def area_renames() -> dict:
     """{canonical built-in name: what Brady calls it now}.
 
@@ -671,14 +707,20 @@ def all_areas() -> list:
     return shown + [a for a in custom_lists() if a not in shown]
 
 
-def set_custom_lists(names: list) -> bool:
-    import json as _json
+def _clean_list_names(names: list) -> list:
+    """Dedupe case-insensitively, cap length and count, drop built-ins. Shared so the
+    in-transaction rename and the ordinary save cannot apply different rules."""
     clean, seen = [], set()
     for n in (names or []):
         n = (n or "").strip()[:40]
         if n and n not in BUCKETS and n.lower() not in seen:
             seen.add(n.lower()); clean.append(n)
-    return add_summary(_json.dumps(clean[:20]), "board_lists")
+    return clean[:20]
+
+
+def set_custom_lists(names: list) -> bool:
+    import json as _json
+    return add_summary(_json.dumps(_clean_list_names(names)), "board_lists")
 
 
 def rename_area(old_name: str, new_name: str) -> tuple:
@@ -697,18 +739,30 @@ def rename_area(old_name: str, new_name: str) -> tuple:
     if canonical is None and old_name not in lists:
         return False, f"no list named '{old_name}'"
     ensure_ready()
+    # ONE TRANSACTION, OR NEITHER (Codex, 2026-09-09). The rows were moved and committed
+    # first, and the list metadata was written afterwards through add_summary — a separate
+    # connection whose result was not even read. If that second write failed, every item had
+    # already moved to a name the navigation and the keyword filing still did not know, and
+    # the caller was told "renamed". Both writes now share a cursor, so the commit at the end
+    # of the `with` block is the only thing that makes either of them real.
+    import json as _json
     try:
         with _conn() as c, c.cursor() as cur:
             cur.execute("UPDATE daybank_items SET bucket = %s WHERE bucket = %s",
                         (new_name, old_name))
             moved = cur.rowcount or 0
+            if canonical is not None:
+                ren[canonical] = new_name
+                payload = _json.dumps({k: v for k, v in ren.items() if v != k})
+                kind = "board_list_renames"
+            else:
+                payload = _json.dumps(_clean_list_names(
+                    [new_name if x == old_name else x for x in lists]))
+                kind = "board_lists"
+            cur.execute("INSERT INTO summaries (kind, text) VALUES (%s, %s)", (kind, payload))
     except Exception as e:
-        return False, f"rename failed: {e}"
-    if canonical is not None:
-        ren[canonical] = new_name
-        _set_area_renames({k: v for k, v in ren.items() if v != k})
-    else:
-        set_custom_lists([new_name if x == old_name else x for x in lists])
+        logger.error("rename_area rolled back: %s", e)
+        return False, f"rename failed, nothing was changed: {e}"
     return True, f"renamed; {moved} item(s) stayed with it"
 
 
@@ -831,10 +885,11 @@ def read_items(active_only: bool = True) -> list:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
                         "parent_id, superseded_by, entry, state, waiting_on, closed_by, "
-                        "bucket, next_step, followup, chosen_on, updated_at "
+                        "bucket, next_step, followup, chosen_on, updated_at, reviewed_at "
                         "FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
+        _boundary = review_boundary()
         items = []
         for r in rows:
             it = {
@@ -872,6 +927,12 @@ def read_items(active_only: bool = True) -> list:
             # When this row was last EDITED, as opposed to created or completed. The brief's
             # change window reads it so a cleanup pass is not invisible.
             it["updated_at"] = r[18].isoformat() if r[18] else None
+            # WHEN BRADY LOOKED AT IT. Durable, and the only thing that retires the
+            # carried-over review flag — no fabricated date or next step required.
+            it["reviewed_at"] = r[19].isoformat() if r[19] else None
+            # Did this row exist before release one shipped? A stored boundary answers it, so
+            # a fresh capture can never inherit the old board's history.
+            it["pre_release_one"] = _before_boundary(it.get("ts"), _boundary)
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
             _d = parse_due(it["text"], it["due"], _today)
             it["due_on"] = _d.isoformat() if _d else None
@@ -1483,7 +1544,7 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 superseded_by: str = None, closed_by: str = None,
                 entry: str = None, state: str = None, waiting_on: str = None,
                 bucket: str = None, next_step: str = None, followup: str = None,
-                chosen_on: str = None, force_close: bool = False) -> tuple:
+                chosen_on: str = None, force_close: bool = False, reviewed: bool = None) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
@@ -1555,6 +1616,15 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("followup = %s"); args.append((pin_due(followup) or None))
             if chosen_on is not None:
                 sets.append("chosen_on = %s"); args.append((pin_due(chosen_on) or None))
+                # Picking a day IS looking at the row, so it retires the review flag for
+                # good rather than only until the next read.
+                if (pin_due(chosen_on) or None):
+                    reviewed = True if reviewed is None else reviewed
+            if reviewed is not None:
+                # Brady saying "this is Ready" has to be enough on its own. The old flag could
+                # only be shaken off by inventing a due date or a next step, which is exactly
+                # the fabricated-data pressure the derived lane created in the first place.
+                sets.append("reviewed_at = " + ("now()" if reviewed else "NULL"))
             # all_areas(), not BUCKETS: a list Brady made himself is a real destination, and
             # a renamed built-in answers to its new name. Membership was checked against the
             # frozen tuple, so a move to any other area was dropped without a word — and when

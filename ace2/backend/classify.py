@@ -93,17 +93,36 @@ def needs_decision(item: dict) -> bool:
 
 
 def carried_over(item: dict) -> bool:
-    """True for a row that WOULD have been Needs a decision under the old derivation but was
-    never marked by Brady. Used by the migration preview and shown as "carried over — not yet
-    reviewed", so nothing silently becomes Ready and nothing claims he chose it."""
+    """A row from the OLD board that the derived rule was calling a decision, which Brady has
+    not looked at yet.
+
+    Three facts, and all three have to hold. Two of them are durable and stored, which is the
+    correction (Codex, 2026-09-09): this used to be computed from a row's current fields
+    alone, so a capture made five seconds ago wore "carried over · not yet reviewed" and
+    claimed a history it never had, while a legacy row could shed the flag only by having a
+    date or a next step invented for it.
+
+      1. `pre_release_one` — it existed before release one shipped, per a boundary stamped
+         once in the database. A row created after it is new work and never wears this.
+      2. `reviewed_at` is empty — he has not looked at it. Saying "Ready" is enough to set
+         that, with no fabricated date or next step required.
+      3. It has the shape the OLD derivation flagged: an open action with no date and no
+         next step recorded.
+
+    This is a REVIEW flag, not a status. It never changes a row's lane and never blocks it
+    from being completed — but no surface may present a row wearing it as accepted, ready
+    work, because nobody has decided that yet.
+    """
     if (item.get("status") or "open") != "open":
+        return False
+    if not item.get("pre_release_one"):
+        return False
+    if (item.get("reviewed_at") or "").strip():
         return False
     if (item.get("state") or "") in ("waiting", "settled", "decide"):
         return False
     if (item.get("entry") or "") == "record":
         return False
-    # Picking it up for today IS looking at it. Leaving the flag on a row he just chose makes
-    # the review list argue with him about work he is doing right now.
     if (item.get("chosen_on") or "").strip():
         return False
     return not has_next_step(item)
@@ -217,14 +236,31 @@ def due_today_sections(items: list, today: str, suggest: int = 3) -> dict:
     taken = {r["id"] for r in deadlines} | {r["id"] for r in picked}
     # A suggestion is real work Brady could reasonably finish: actionable, not already
     # here, not waiting on anyone, not a record. Oldest first — the things quietly rotting.
+    #
+    # UNREVIEWED WORK IS NOT A SUGGESTION (Codex, 2026-09-09). Carried-over rows were landing
+    # here, so a row the old board had been calling an undecided question was offered as
+    # ordinary ready work — the label said "not yet reviewed" while the surface treated it as
+    # accepted. They get their own group, named for what it is: something to look at, not
+    # something to pick up.
     pool = [r for r in live
-            if r["actionable"] and r["id"] not in taken and r["lane"] != LANE_UPCOMING]
+            if r["actionable"] and r["id"] not in taken and r["lane"] != LANE_UPCOMING
+            and not r["carried_over"] and not r["needs_decision"]]
     pool.sort(key=lambda r: (r.get("ts") or ""))
+    review = [r for r in live if r["carried_over"] and r["id"] not in taken]
+    review.sort(key=lambda r: (r.get("ts") or ""))
+    open_q = [r for r in live if r["needs_decision"] and r["id"] not in taken]
+    open_q.sort(key=lambda r: (r.get("ts") or ""))
     return {
         "deadlines": sorted(deadlines, key=lambda r: (r.get("due_days") is None,
                                                       r.get("due_days", 0))),
         "chosen": picked,
         "suggested": pool[:suggest],
         "suggested_total": len(pool),
+        # Never presented as ready work on any surface.
+        "review": review[:suggest],
+        "review_total": len(review),
+        # Questions he marked himself, which are his to answer rather than to "do".
+        "decisions": open_q[:suggest],
+        "decisions_total": len(open_q),
         "waiting": [r for r in live if r["lane"] == LANE_WAITING],
     }

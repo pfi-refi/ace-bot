@@ -672,7 +672,9 @@ async def board_mapping_preview():
             {"id": i["id"], "text": (i.get("text") or "")[:110],
              "now": "Needs a decision (derived)",
              "proposed": "Needs a decision — carried over, not yet reviewed",
-             "never": "not set to Ready, and not described as Brady's choice"}
+             "never": "not set to Ready, and not described as Brady's choice",
+             "clears_when": "he opens it and saves, sets a status, or picks it up for a day "
+                            "— no invented deadline or next step required"}
             for i in carried],
         "possible_duplicates": pairs[:20],
         "reversal": ("Every proposed change is one row with a before and after value, applied "
@@ -726,6 +728,10 @@ class DaybankUpdateReq(BaseModel):
     # use; this replaces the labels after it. None leaves them alone, [] clears them, and an
     # unrecognised tag is REFUSED rather than dropped.
     tags: list | None = None
+    # REVIEWED (2026-09-09). Durably retires the "carried over — not yet reviewed" flag on a
+    # legacy row. True when Brady has actually looked at it — saving the editor, or setting a
+    # status. It must never take a fabricated due date or next step to clear that flag.
+    reviewed: bool | None = None
     # A waiting row or a reference record is not completable by an ordinary checkbox — the
     # other person owns the next move, and a record has a lifecycle rather than an ending.
     # Changing one deliberately is still allowed, but it has to SAY so, so an accidental tap
@@ -1014,7 +1020,7 @@ async def daybank_update(req: DaybankUpdateReq):
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
         (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None),
-        req.next_step, req.followup, req.chosen_on, req.force_close)
+        req.next_step, req.followup, req.chosen_on, req.force_close, req.reviewed)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":

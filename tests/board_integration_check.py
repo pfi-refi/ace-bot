@@ -25,6 +25,7 @@ try:
     from ace2.backend.main import app                       # noqa: E402
     db._init_schema(); db._ready = True; db._trgm_ok = False
 
+    import datetime as _dt
     import json as _j
     import uuid
     from datetime import datetime, timedelta, timezone
@@ -79,7 +80,27 @@ try:
     # RELEASE ONE: clearing a next step must NOT push the row into Needs a decision. That
     # lane is now something Brady chooses; deleting a sentence is not him choosing it.
     assert r['lane'] == classify.LANE_ANYTIME, f'clearing re-derived a decision: {r["lane"]}'
-    assert r['saved']['carried_over'] is True, 'it should still be flagged for review, though'
+    # The REVIEW flag is now bounded to rows that predate release one and stamped durably
+    # once Brady looks at them (Codex, 2026-09-09). This fixture row was created during the
+    # test, i.e. after the boundary, so it is new work and must NOT claim the old board's
+    # history — that false positive is the defect the boundary exists to kill.
+    assert r['saved']['carried_over'] is False, \
+        'a row created after release one claimed to be carried over from the old board'
+    # ...while a row that genuinely predates the boundary is flagged, and stays flagged.
+    _b = _dt.datetime.fromisoformat(db.review_boundary()) - _dt.timedelta(days=2)
+    _legacy = uuid.uuid4().hex[:6]
+    with db._conn() as _cn, _cn.cursor() as _cur:
+        _cur.execute("INSERT INTO daybank_items(id,ts,kind,text,status,tags,entry) "
+                     "VALUES(%s,%s,'todo','a row from the old board','open','[]'::jsonb,"
+                     "'action')", (_legacy, _b))
+    assert next(x for x in c.get('/daybank?all=true').json()['items']
+                if x['id'] == _legacy)['carried_over'] is True, \
+        'a genuinely legacy row lost its review flag'
+    # and saying Ready retires it for good, with no invented date or next step
+    c.post('/daybank/update', json={'id': _legacy, 'reviewed': True})
+    _now = next(x for x in c.get('/daybank?all=true').json()['items'] if x['id'] == _legacy)
+    assert _now['carried_over'] is False and _now['reviewed_at']
+    assert not _now.get('due') and not _now.get('next_step'), 'data was invented to clear it'
     dec = ids['pick a direction on the trailer']
     d = next(x for x in c.get('/daybank').json()['items'] if x['id'] == dec)
     assert d['lane'] == classify.LANE_UNDECIDED, f'an explicit mark must hold: {d["lane"]}'

@@ -1629,9 +1629,16 @@ def _board_stats() -> str:
                         f"not the other party's deadline")
         if (i.get("chosen_on") or "")[:10] == _TODAY_STR():
             bits.append("HE CHOSE THIS FOR TODAY (his pick, not a deadline)")
-        lane = i.get("lane")
-        if lane in ("undecided",):
-            bits.append("no date and no next step recorded — a decision, not a schedule")
+        # READ THE ROW, DO NOT RECITE THE OLD RULE (Codex, 2026-09-09). This described the
+        # retired derived definition — "no date and no next step recorded" — and printed it
+        # even on rows whose next step was sitting one line above it. The brief was
+        # contradicting its own input. Say only what the row actually carries.
+        if i.get("needs_decision"):
+            bits.append("HE MARKED THIS AS A DECISION HE HAS NOT MADE. It is a question to "
+                        "settle, not a job to report as ready or under way")
+        if i.get("carried_over"):
+            bits.append("CARRIED OVER FROM THE OLD BOARD, NOT YET REVIEWED — he has not "
+                        "looked at this since the change. Never present it as agreed work")
         return ("\n      · " + "\n      · ".join(bits)) if bits else ""
     money = [i for i in open_items if cat(i) == "Money"]
     if money:
@@ -1670,10 +1677,31 @@ def _board_stats() -> str:
         lines.append("PARKED ON SOMEONE ELSE (he is NOT the next actor — never list these as "
                      "things for him to do, and never call one finished because time passed):\n"
                      + "\n".join(_line(i, show_cat=True) for i in parked[:10]))
-    ready = [i for i in open_items
-             if i.get("due_days") is None and i.get("lane") in ("anytime", "undecided")
-             and cat(i) not in ("Money", "Bills", "Opportunities", "Goals")
-             and i.get("id") not in {c.get("id") for c in chosen}]
+    # THREE DIFFERENT THINGS, NOT ONE LIST (Codex, 2026-09-09). This selected the anytime
+    # AND undecided lanes into one block called "UNDATED AND READY", so an open question
+    # Brady had explicitly marked — and a legacy row nobody had reviewed — were both handed
+    # to the model as ready work with a spare-time invitation attached.
+    _chosen_ids = {c.get("id") for c in chosen}
+    def _undated(pred):
+        return [i for i in open_items
+                if i.get("due_days") is None
+                and cat(i) not in ("Money", "Bills", "Opportunities", "Goals")
+                and i.get("id") not in _chosen_ids and pred(i)]
+    decisions = _undated(lambda i: i.get("needs_decision"))
+    unreviewed = _undated(lambda i: i.get("carried_over") and not i.get("needs_decision"))
+    ready = _undated(lambda i: i.get("lane") == "anytime"
+                     and not i.get("needs_decision") and not i.get("carried_over"))
+    if decisions:
+        lines.append("OPEN QUESTIONS HE MARKED HIMSELF (these are DECISIONS to settle. Never "
+                     "describe one as ready, under way, or accepted — the underlying job has "
+                     "not been agreed to. Offering to help him decide is useful):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in decisions[:8]))
+    if unreviewed:
+        lines.append("CARRIED OVER FROM THE OLD BOARD, NOT YET REVIEWED (the old rule called "
+                     "these undecided; he has not looked at them since. Mention at most one, "
+                     "and only as something to glance at — NEVER as ready or accepted "
+                     "work):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in unreviewed[:6]))
     if ready:
         lines.append("UNDATED AND READY (real work with no deadline — candidates for spare "
                      "time, NOT things he committed to today):\n"

@@ -36,16 +36,28 @@ try:
         ('Permit sign-off', ['Admin'], None, 'record', 'waiting', 'the county', 'Groundworks', None, soon, None),
         ('Website copy for the new page', ['Business'], None, 'action', None, None, 'Side Work', None, None, today),
         ('Unfiled thought from the truck', ['Business'], None, 'action', None, None, '', None, None, None),
+        ('Sort the trailer registration', ['Admin'], None, 'action', None, None, 'Side Work', None, None, None),
+        ('Draft the Groundworks flyer', ['Business'], None, 'action', None, None, 'Groundworks', None, None, None),
+        ('Email Robin about her own deals', ['Deals'], None, 'action', None, None, 'GFI/PFI', None, None, None),
         ('Whether to keep the trailer', ['Business'], None, 'action', 'decide', None, 'Side Work', None, None, None),
         ('Book the dentist', ['Personal'], None, 'action', None, None, 'Personal', None, None, None),
         ('Ace: fix the voice write path', ['Tech'], None, 'action', None, None, 'Ace', None, None, None),
     ]
+    # WHICH SIDE OF THE BOUNDARY (2026-09-09). _init_schema stamps the release-one boundary
+    # when this database is created, so a row's ts decides whether it counts as old-board work.
+    # The fixture needs BOTH: rows that predate it (which show up under "worth a look" and are
+    # never suggested until reviewed) and rows that do not (ordinary ready work). Dating every
+    # row in the past made the whole board legacy and the suggestion list empty.
+    BOUND = datetime.fromisoformat(db.review_boundary())
+    LEGACY = {'Unfiled thought from the truck', 'Book the dentist'}
     with db._conn() as c, c.cursor() as cur:
         for n, (text, tags, due, entry, state, wait, bucket, nxt, fup, chosen) in enumerate(FIX):
+            ts = (BOUND - timedelta(days=2 + n) if text in LEGACY
+                  else BOUND + timedelta(seconds=60 - n))
             cur.execute("INSERT INTO daybank_items(id,ts,kind,text,status,tags,due,entry,state,"
                         "waiting_on,bucket,next_step,followup,chosen_on) VALUES(%s,%s,'todo',%s,"
                         "'open',%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s)",
-                        (uuid.uuid4().hex[:6], datetime.now(timezone.utc) - timedelta(days=n),
+                        (uuid.uuid4().hex[:6], ts,
                          text, _j.dumps(tags), due, entry, state, wait, bucket, nxt, fup, chosen))
     import uvicorn                                     # noqa: E402
     from ace2.backend.main import app                  # noqa: E402

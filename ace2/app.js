@@ -1178,6 +1178,23 @@
           body6.appendChild(more);
         }
       }
+      // THE SAME GROUPS AS THE COMMAND CENTER (Codex, 2026-09-09). Both surfaces read one
+      // server-computed grouping, so decisions and unreviewed rows have to appear here as
+      // themselves too — otherwise this card silently folds them back into ready work.
+      function noted(label, rows, total, cls, note) {
+        if (!rows || !rows.length) return;
+        var h = document.createElement('div'); h.className = 'db-sect ' + cls;
+        h.textContent = label + ' · ' + rows.length
+                      + (total > rows.length ? ' of ' + total : '');
+        body6.appendChild(h);
+        var n = document.createElement('div'); n.className = 'db-suggest-note';
+        n.textContent = note; body6.appendChild(n);
+        rows.forEach(function (it) { row(it, cls, {}); });
+      }
+      noted('DECISIONS TO MAKE', dt.decisions, dt.decisions_total || 0, 'nodate',
+            'You marked these yourself. Questions to settle, not jobs to start.');
+      noted('WORTH A LOOK', dt.review, dt.review_total || 0, 'nodate',
+            'Carried over from the old board and not reviewed yet — not suggested work.');
       sect('WAITING ON SOMEONE ELSE', dt.waiting, 'parked');
 
       // The full board is the Command Center; this card never becomes one.
@@ -1879,7 +1896,8 @@
       // called decisions on Brady's behalf. Saying so out loud beats moving them.
       +(it.carried_over?'<span class="cmd-carried" title="The old board called this a decision '
         +'because it had no date and no next step. Nothing was changed — it is here for you '
-        +'to look at.">carried over · not yet reviewed</span>':'')
+        +'to look at, and it is never offered as ready work until you do.">'
+        +'carried over · not yet reviewed</span>':'')
       +(it.lane==='waiting'&&it.waiting_on?'<span class="cmd-waitfor">→ '+cmdEsc(it.waiting_on)+'</span>':'')
       +((it.chosen_on&&cmd.today&&it.chosen_on.slice(0,10)===cmd.today)?'<span class="cmd-today">doing today</span>':'')
       // THE LINK, BOTH WAYS (2026-09-06). An action spawned from a record shows where it came
@@ -1890,6 +1908,14 @@
       // FOLLOW-UP ≠ THE TASK (Codex, 2026-09-09). In the prototype one control meant both "I
       // chased them" and "the work is finished", so clearing the chase closed the job. The
       // follow-up gets its own two buttons and the checkbox keeps its single meaning.
+      // REVIEWING IT IS ONE TAP (Codex, 2026-09-09). The flag used to be shakeable only by
+      // giving the row a due date or a next step it did not have — the exact fabricated-data
+      // pressure the derived lane created. This says "I have looked at this" and nothing else.
+      +(it.carried_over && !done
+        ? '<div class="cmd-fuprow"><button class="cmd-rev" data-id="'+it.id+'">'
+          + 'I\'ve looked at this</button><span class="cmd-fuphint">clears the review flag; '
+          + 'nothing else about the item changes</span></div>'
+        : '')
       +(it.followup && !done
         ? '<div class="cmd-fuprow"><button class="cmd-fup" data-fup="clear" data-id="'+it.id+'">'
           + 'Follow-up handled</button><button class="cmd-fup" data-fup="push" data-id="'+it.id+'">'
@@ -1995,6 +2021,17 @@
             body += '<button class="cmd-more" id="cmd-more">Show more · '
                   + (dt.suggested_total - dt.suggested.length) + ' more</button>';
         }
+        if (dt.decisions && dt.decisions.length)
+          grp('DECISIONS TO MAKE' + (dt.decisions_total > dt.decisions.length
+                ? ' · ' + dt.decisions.length + ' of ' + dt.decisions_total : ''),
+              dt.decisions,
+              'You marked these yourself. They are questions to settle, not jobs to start.');
+        if (dt.review && dt.review.length)
+          grp('WORTH A LOOK' + (dt.review_total > dt.review.length
+                ? ' · ' + dt.review.length + ' of ' + dt.review_total : ''),
+              dt.review,
+              'Carried over from the old board and not reviewed yet. Not suggested work — '
+              + 'nothing here has been decided.');
         grp('WAITING ON SOMEONE ELSE', dt.waiting);
         if(!body) body='<div class="cmd-empty">Nothing due and nothing waiting on you. Clear.</div>';
       }
@@ -2029,14 +2066,15 @@
       // Rows Brady MARKED as open questions, plus — listed separately and never mixed in —
       // the ones the old derived rule had been calling decisions for him.
       var u=items.filter(function(x){ return x.needs_decision; }).sort(byAge);
-      var carried=items.filter(function(x){ return x.status==='open' && x.carried_over
+      var carried=items.filter(function(x){ return x.carried_over
                                                  && !x.needs_decision; }).sort(byAge);
       body = u.length ? '<div class="cmd-grp">YOUR OPEN QUESTIONS · '+u.length+'</div>'+u.map(cmdRow).join('')
                       : '<div class="cmd-empty">Nothing marked as needing a decision.</div>';
       if (carried.length) body += '<div class="cmd-grp">CARRIED OVER · '+carried.length+'</div>'
         + '<div class="cmd-note">The old board called these decisions because they had no date '
-        + 'and no next step. Nothing was changed and none of them is set to Ready — they are '
-        + 'here for you to look at when you want to.</div>' + carried.map(cmdRow).join('');
+        + 'and no next step. Nothing was changed, none of them is set to Ready, and none is '
+        + 'offered as suggested work anywhere until you have looked at it.</div>'
+        + carried.map(cmdRow).join('');
     }
     else if(cmd.lens==='areas'){
       // ACTIONS only: a lane answers "whose time does this take", and a record has no ending
@@ -2105,6 +2143,18 @@
 
     // HANDLING A FOLLOW-UP NEVER TOUCHES THE TASK. The endpoint writes `followup` and
     // nothing else; if the answer ever says otherwise, say so rather than showing a tick.
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-rev'), function(b){ b.onclick=function(e){
+      e.stopPropagation();
+      var id=b.getAttribute('data-id'); var was=b.textContent;
+      b.textContent='…'; b.disabled=true;
+      fetch(API+'/daybank/update',{method:'POST',headers:headers(),
+            body:JSON.stringify({id:id, reviewed:true})})
+        .then(function(r){ return r.json(); })
+        .then(function(d){ if(!d||!d.ok) throw ((d&&d.error)||0);
+          return cmdFetch().then(function(){ cmdRender(); }); })
+        .catch(function(why){ b.textContent=was; b.disabled=false;
+          if(typeof why==='string'&&why) boardNotice(why); });
+    }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-fup'), function(b){ b.onclick=function(e){
       e.stopPropagation();
       var id=b.getAttribute('data-id'), act=b.getAttribute('data-fup');
@@ -2223,7 +2273,10 @@
         followup: (row.querySelector('.cmd-efup').value || '').trim(),
         next_step: (row.querySelector('.cmd-enext').value || '').trim(),
         tags: Array.prototype.map.call(row.querySelectorAll('.cmd-etag.on'),
-                                       function(t){ return t.getAttribute('data-tag'); })
+                                       function(t){ return t.getAttribute('data-tag'); }),
+        // Opening a row, setting its status and saving IS looking at it. This is what makes
+        // "Ready" enough to retire the review flag without inventing a date for the row.
+        reviewed: true
       };
       if (!body.text) { ta.style.borderColor = '#ff6b6b'; ta.focus(); return; }   // blank = no-op server-side
       b.textContent = 'SAVING…'; b.disabled = true;

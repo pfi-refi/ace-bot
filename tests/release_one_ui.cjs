@@ -38,16 +38,31 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   const cardToday = await p.evaluate(() =>
     [...document.querySelectorAll('.db-item')].length);
   const dt = (await api('/daybank?suggest=3')).due_today;
-  const expected = dt.deadlines.length + dt.chosen.length + dt.suggested.length + dt.waiting.length;
+  const expected = dt.deadlines.length + dt.chosen.length + dt.suggested.length
+                 + (dt.decisions || []).length + (dt.review || []).length + dt.waiting.length;
   ok('Command Center Today shows exactly the server grouping', cmdToday.length === expected,
      `${cmdToday.length} vs ${expected}`);
   ok('Due Today card shows the same rows', cardToday === expected, `${cardToday} vs ${expected}`);
   ok('suggestions are capped at three', dt.suggested.length === 3, String(dt.suggested.length));
-  ok('the real total is stated, not hidden', dt.suggested_total > dt.suggested.length,
-     `${dt.suggested.length} of ${dt.suggested_total}`);
-  ok('Show more is offered on the card', await p.locator('.db-more').count() === 1);
-  await p.click('.db-more'); await p.waitForTimeout(600);
-  ok('Show more actually loads more', await p.locator('.db-item').count() > cardToday);
+  // UNREVIEWED WORK IS NOT A SUGGESTION (Codex, 2026-09-09): carried-over rows leave the
+  // suggestion pool entirely and appear as their own group on BOTH surfaces.
+  ok('unreviewed rows are not suggested as ready work',
+     dt.suggested.every(x => x.carried_over === false),
+     dt.suggested.map(x => x.text.slice(0, 24)).join(' | '));
+  ok('...they are listed as review instead', (dt.review || []).length > 0,
+     `${(dt.review || []).length} of ${dt.review_total}`);
+  ok('explicit decisions are not suggested either',
+     dt.suggested.every(x => x.needs_decision === false));
+  ok('...they are listed as decisions', (dt.decisions || []).length > 0);
+  ok('the card shows the review group too',
+     (await p.locator('.db-sect').allInnerTexts()).some(t => /WORTH A LOOK/i.test(t)));
+  ok('the card shows the decisions group too',
+     (await p.locator('.db-sect').allInnerTexts()).some(t => /DECISIONS TO MAKE/i.test(t)));
+  if (dt.suggested_total > dt.suggested.length) {
+    ok('Show more is offered on the card', await p.locator('.db-more').count() === 1);
+    await p.click('.db-more'); await p.waitForTimeout(600);
+    ok('Show more actually loads more', await p.locator('.db-item').count() > cardToday);
+  }
   await p.screenshot({ path: `${OUT}/02-due-today-card.png` });
 
   // ── 3. Handling a follow-up leaves the task open
@@ -86,6 +101,29 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   ok('carried-over rows do not claim to be Ready',
      /none of them is set to Ready/i.test(decideTxt));
   await p.screenshot({ path: `${OUT}/03-decide.png` });
+
+  // ── 4b. Reviewing a carried-over row takes one tap and invents nothing
+  await lens('decide');
+  const carried = p.locator('.cmd-row', { hasText: 'Book the dentist' }).first();
+  await carried.scrollIntoViewIfNeeded();
+  ok('a carried-over row offers a review control',
+     await carried.locator('.cmd-rev').count() === 1);
+  const cId = await carried.getAttribute('data-id');
+  const cBefore = (await api('/daybank?all=true')).items.find(i => i.id === cId);
+  ok('...and is not in the suggestion list while unreviewed',
+     !((await api('/daybank?suggest=3')).due_today.suggested || []).some(x => x.id === cId));
+  await carried.locator('.cmd-rev').click();
+  await p.waitForTimeout(1000);
+  const cAfter = (await api('/daybank?all=true')).items.find(i => i.id === cId);
+  ok('one tap retires the review flag', cAfter.carried_over === false);
+  ok('...durably', !!cAfter.reviewed_at, String(cAfter.reviewed_at));
+  ok('...without inventing a deadline or a next step',
+     cAfter.due === cBefore.due && cAfter.next_step === cBefore.next_step);
+  ok('...and the row is otherwise untouched',
+     cAfter.status === cBefore.status && cAfter.text === cBefore.text
+       && cAfter.bucket === cBefore.bucket);
+  ok('a reviewed row becomes ordinary suggestible work',
+     ((await api('/daybank?suggest=9')).due_today.suggested || []).some(x => x.id === cId));
 
   // ── 5. The editor: pickers, states, tags, and the three separate dates
   await lens('all');
