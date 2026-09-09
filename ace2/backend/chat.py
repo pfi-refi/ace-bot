@@ -487,11 +487,28 @@ def _entities_in(fact: str) -> list:
     return out[:4]          # a fact naming half the roster is not about any of them
 
 
-def _fact_date(meta: dict, f: str) -> str:
-    """The stored date for a fact, or '' when unknown. Never guessed."""
+def _fact_ts(meta: dict, f: str) -> str:
+    """Full stored timestamp for SORTING, or '' when unknown. Never guessed.
+
+    Truncating to ten characters lost same-day resolution: a 09:00 note and a 17:00
+    correction both became '2026-09-08', and the stable sort then fell back to the
+    importance order the read path had given them — so the evening correction could print
+    before the morning note it superseded (Codex, 8 Sept).
+    """
     m = (meta or {}).get(f) or {}
-    ts = m.get("ts") or ""
-    return str(ts)[:10]
+    return str(m.get("ts") or "")
+
+
+def _fact_stamp(meta: dict, f: str) -> str:
+    """What the reader sees. Minutes are shown when known, so two updates on the same day
+    are distinguishable. This is when the fact was RECORDED, not when the thing happened —
+    writing down an old event today does not make its content new."""
+    ts = _fact_ts(meta, f)
+    if not ts:
+        return "undated"
+    day, _, rest = ts.partition("T")
+    clock = rest[:5]
+    return f"recorded {day} {clock}".rstrip() if clock and clock != "00:00" else f"recorded {day}"
 
 
 def _group_facts(mem_list: list, min_facts: int = 3, meta: dict = None) -> str:
@@ -532,24 +549,29 @@ def _group_facts(mem_list: list, min_facts: int = 3, meta: dict = None) -> str:
     order.sort(key=lambda e: -len(groups[e]))
     lines = ["HOW TO READ THIS: each heading holds what is known about THAT person or "
              "project. Never carry a detail from one heading to another — a requirement on "
-             "one deal is not a requirement on another. Every line is DATED: the newest date "
-             "in a heading is the current position and it WINS over anything older, "
-             "including anything you believed earlier. Where two dated lines disagree, say "
-             "so and ask — do not pick one silently. An undated line has no known date and "
-             "settles nothing."]
+             "one deal is not a requirement on another.\n"
+             "Each line shows when it was RECORDED, newest last. Recording an old event "
+             "today does not make its content new.\n"
+             "A LATER LINE THAT EXPLICITLY CORRECTS AN EARLIER ONE — Brady saying it is the "
+             "uncle NOT Damon, a figure restated, a date moved — SETTLES it. Use the "
+             "corrected version and do not ask him to confirm a correction he already gave.\n"
+             "ASK only when the disagreement is genuinely unresolved: two sources that never "
+             "referred to each other, a board row and a calendar entry that simply differ, or "
+             "no way to tell which is current. Then name both and ask one short question.\n"
+             "An undated line has no known recording time and settles nothing on its own."]
 
     def _render(items):
         # Sorted by the STORED DATE, not by list position. read_facts() returns core-tier
         # facts first regardless of age, so position told the model a stale line was the
         # newest — the exact reproduction Codex ran with a 1 Sept fact outranking an 8 Sept
         # correction. Undated facts sort first so a dated line always lands last.
-        dated = sorted(items, key=lambda t: (_fact_date(meta, t[0]) or "0000-00-00"))
+        # Sorted on the FULL timestamp (ISO sorts lexically), so same-day updates keep their
+        # real order instead of falling back to the read path's importance ordering.
+        dated = sorted(items, key=lambda t: (_fact_ts(meta, t[0]) or "0000"))
         out = []
         for f, others in dated:
-            d = _fact_date(meta, f)
-            stamp = f"[{d}] " if d else "[undated] "
             tail = f"   [also names: {', '.join(others)}]" if others else ""
-            out.append(f"  - {stamp}{f}{tail}")
+            out.append(f"  - [{_fact_stamp(meta, f)}] {f}{tail}")
         return out
 
     for name in order:

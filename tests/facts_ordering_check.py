@@ -54,7 +54,36 @@ try:
     again = brain.read_memory()
     assert again == raw, 'the store was mutated to make the output look right'
 
+    # SAME DAY, MIXED TIER (Codex, 8 Sept). Truncating to a day string made these two
+    # indistinguishable, and the stable sort then kept the read path's importance order —
+    # the evening correction printing before the morning note it superseded.
+    MORNING = 'Renner pour is booked for Thursday'
+    EVENING = 'Renner correction: the pour moved to Friday, not Thursday'
+    with db._conn() as c, c.cursor() as cur:
+        cur.execute("INSERT INTO facts(text, tier, ts) VALUES(%s,'active','2026-09-08 09:00')",
+                    (MORNING,))
+        cur.execute("INSERT INTO facts(text, tier, ts) VALUES(%s,'core','2026-09-08 17:00')",
+                    (EVENING,))
+    raw2 = brain.read_memory()
+    assert raw2.index(EVENING) < raw2.index(MORNING), 'read path should be importance-first'
+    meta2 = brain.read_memory_meta()
+    out2 = chat._group_facts(raw2, min_facts=2, meta=meta2)
+    block2 = out2.split('RENNER')[1].split(chr(10) + chr(10))[0]
+    rows = [l for l in block2.splitlines() if l.startswith('  - ')]
+    assert 'Thursday' in rows[0] and '09:00' in rows[0], 'morning note must lead: ' + rows[0]
+    assert 'Friday' in rows[-1] and '17:00' in rows[-1], 'evening must land last: ' + rows[-1]
+    assert 'recorded' in rows[0], rows[0]
+
+    # facts.ts is NOT NULL in Postgres, so an undated fact can only arrive from the Drive
+    # fallback or from meta that does not cover it. That is where the [undated] path lives.
+    partial = dict(meta2); partial.pop(MORNING, None)
+    out3 = chat._group_facts(raw2, min_facts=2, meta=partial)
+    assert '[undated]' in out3, 'a fact with no known recording time must say so'
+    rows3 = [l for l in out3.split('RENNER')[1].split(chr(10) + chr(10))[0].splitlines()
+             if l.startswith('  - ')]
+    assert '[undated]' in rows3[0], 'an unknown time sorts first and settles nothing'
+
     print('PASS: the real read path returns core-tier first, the formatter still presents '
-          'the newest DATE last, every line is dated, and the stored order is untouched.')
+          'the newest DATE last, every line is dated, the stored order is untouched, same-day mixed tiers order by minute, and unknown dates stay unknown.')
 finally:
     server.cleanup(); tmp.cleanup()

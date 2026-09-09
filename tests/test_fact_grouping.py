@@ -81,7 +81,7 @@ class GroupingIsLossless(unittest.TestCase):
         f = 'Marlow one'
         out = chat._group_facts([f, 'Marlow two'], min_facts=2,
                                 meta={f: {'ts': '2026-09-02T00:00:00', 'tier': 'active'}})
-        self.assertIn('[2026-09-02]', out)
+        self.assertIn('recorded 2026-09-02', out)
         self.assertIn('[undated]', out, 'a fact with no date must say so, not borrow one')
 
     def test_a_shared_fact_is_printed_once_and_cross_referenced(self):
@@ -95,8 +95,9 @@ class GroupingIsLossless(unittest.TestCase):
     def test_the_reading_instruction_is_present(self):
         out = chat._group_facts(self.FACTS)
         self.assertIn('Never carry a detail from one heading to another', out)
-        self.assertIn('the newest date in a heading is the current position', out)
-        self.assertIn('Where two dated lines disagree, say so and ask', out)
+        self.assertIn('newest last', out)
+        self.assertIn('EXPLICITLY CORRECTS AN EARLIER ONE', out)
+        self.assertIn('ASK only when the disagreement is genuinely unresolved', out)
 
 
 class SweepNarrativesAreNotFacts(unittest.TestCase):
@@ -173,3 +174,51 @@ class TargetedConversationRules(unittest.TestCase):
         p = self.prompt()
         for rule in ('13b.', '13c.', '13d.', '13e.', '13f.', '13g.', 'PLAN MY WEEK'):
             self.assertIn(rule, p)
+
+
+class SameDayPrecision(unittest.TestCase):
+    """A day string could not separate a 09:00 note from a 17:00 correction, and the stable
+    sort then fell back to the read path's importance order."""
+
+    PAIR = {'Renner pour is booked for Thursday': '2026-09-08T09:00:00',
+            'Renner correction: moved to Friday, not Thursday': '2026-09-08T17:00:00'}
+
+    def rendered(self):
+        facts = list(self.PAIR)[::-1]          # importance order, as the read path returns
+        meta = {k: {'ts': v, 'tier': 'core'} for k, v in self.PAIR.items()}
+        out = chat._group_facts(facts, min_facts=2, meta=meta)
+        return [l for l in out.splitlines() if l.startswith('  - ')]
+
+    def test_the_later_time_lands_last(self):
+        self.assertIn('Friday', self.rendered()[-1])
+
+    def test_minutes_are_shown_so_same_day_updates_are_distinguishable(self):
+        rows = self.rendered()
+        self.assertIn('09:00', rows[0])
+        self.assertIn('17:00', rows[-1])
+
+    def test_the_stamp_says_recorded_not_happened(self):
+        """Writing down an old event today does not make its content a new correction."""
+        self.assertIn('recorded', self.rendered()[0])
+
+    def test_midnight_timestamps_do_not_print_a_misleading_time(self):
+        meta = {'a fact': {'ts': '2026-09-08T00:00:00', 'tier': 'active'}}
+        self.assertEqual(chat._fact_stamp(meta, 'a fact'), 'recorded 2026-09-08')
+
+    def test_an_unknown_time_is_never_guessed(self):
+        self.assertEqual(chat._fact_stamp({}, 'anything'), 'undated')
+
+
+class CorrectionVersusConflict(unittest.TestCase):
+    """An explicit correction RESOLVES; only a genuine conflict earns a question. Otherwise
+    Ace makes Brady re-confirm corrections he already gave."""
+
+    def test_an_explicit_correction_settles_it(self):
+        out = chat._group_facts(['x', 'y'], min_facts=99)
+        self.assertIn('SETTLES it', out)
+        self.assertIn('do not ask him to confirm a correction he already gave', out)
+
+    def test_a_genuine_conflict_asks_one_question(self):
+        out = chat._group_facts(['x', 'y'], min_facts=99)
+        self.assertIn('two sources that never referred to each other', out)
+        self.assertIn('ask one short question', out)
