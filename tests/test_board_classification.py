@@ -58,6 +58,8 @@ class Lanes(unittest.TestCase):
         self.assertFalse(classify.carried_over(row(next_step='call Damon Tuesday')))
         self.assertFalse(classify.carried_over(row(entry='record')))
         self.assertFalse(classify.carried_over(row(status='done')))
+        self.assertFalse(classify.carried_over(row(chosen_on='2026-09-09')),
+                         'choosing it for today is reviewing it')
 
     def test_a_recorded_next_step_moves_it_out_of_undecided(self):
         self.assertEqual(classify.lane_of(row(next_step='call Damon Tuesday')),

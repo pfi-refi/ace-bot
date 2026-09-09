@@ -2064,7 +2064,7 @@
       +'<div class="cmd-lens">'+lenses+'</div>'
       +'<div class="cmd-areas">'+areaTabs+'</div><div class="cmd-chips">'+chips+'</div>'
       +'<div class="cmd-list">'+body+'</div>'
-      +'<form class="cmd-add" id="cmd-add"><span class="cmd-plus">+</span><input id="cmd-input" placeholder="Add to '+addCat+'…" autocomplete="off"></form>';
+      +'<form class="cmd-add" id="cmd-add"><span class="cmd-plus">+</span><input id="cmd-input" placeholder="Add to '+(addArea||'Inbox')+'…" autocomplete="off"></form>';
     var _nl=v.querySelector('.cmd-list'); if(_nl&&_keep) _nl.scrollTop=_keep;
     v.querySelector('#cmd-x').onclick=cmdClose;
     v.querySelector('#cmd-min').onclick=function(){ cmd.min=true; cmdRender(); };
@@ -2256,7 +2256,7 @@
       // dedup refusal — ok:true, dup:true, nothing written — looked exactly like a save: the
       // input cleared, the board refetched, nothing appeared. Same idiom as the editor's
       // RETRY SAVE: hand the text back rather than eat it.
-      var addPH = inp.placeholder;   // 'Add to <category>…' — restore the real one, not a guess
+      var addPH = inp.placeholder;   // 'Add to <area>…' — restore the real one, not a guess
       function addFailed(msg){ inp.value = t; inp.placeholder = msg; inp.focus();
         setTimeout(function(){ inp.placeholder = addPH; }, 4000); }
       fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat,bucket:addArea})})

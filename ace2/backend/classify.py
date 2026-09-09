@@ -102,6 +102,10 @@ def carried_over(item: dict) -> bool:
         return False
     if (item.get("entry") or "") == "record":
         return False
+    # Picking it up for today IS looking at it. Leaving the flag on a row he just chose makes
+    # the review list argue with him about work he is doing right now.
+    if (item.get("chosen_on") or "").strip():
+        return False
     return not has_next_step(item)
 
 
