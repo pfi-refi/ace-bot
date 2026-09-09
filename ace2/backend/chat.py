@@ -1561,11 +1561,22 @@ _BRIEF_RULES = (
 
 
 def _board_stats() -> str:
-    """Deterministic business snapshot from Ace's own store — no LLM guessing."""
-    from . import db
+    """Deterministic business snapshot from Ace's own store — no LLM guessing.
+
+    SHARED INTERPRETATION (2026-09-09). This function used to read a row as "a category and
+    maybe a due date", and outside Money/Bills/Opportunities anything undated reached the
+    brief as a bare count. So the board could show a row parked on the county with a next
+    step written on it, and the brief saw a number. Worse, the two disagreed about what a row
+    even was, which is how a brief can contradict the screen and both look right.
+
+    It now decorates rows through `classify` — the same module the Command Center and Due
+    Today use — so a lane, a waiting owner, a next step, a follow-up and a chosen day mean
+    exactly one thing everywhere. Nothing here writes; decoration is additive.
+    """
+    from . import classify, db
     _CATS = ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"]
     try:
-        items = db.read_items(active_only=False)
+        items = [classify.decorate(i) for i in db.read_items(active_only=False)]
     except Exception:
         items = []
     def cat(it):
@@ -1588,6 +1599,9 @@ def _board_stats() -> str:
     # blending unrelated Opportunities rows into things Brady never said ("$200/day angles").
     # Ids ride along so a stale row can be NAMED: this pass has no tools and cannot write to
     # the board, and pointing at [id] beats narrating around it.
+    def _TODAY_STR():
+        return datetime.now(EASTERN).strftime("%Y-%m-%d")
+
     def _line(i, cap=300, show_cat=False):
         t = (i.get("text", "") or "")
         body = t if len(t) <= cap else t[:cap].rstrip() + " …[truncated — ask before quoting]"
@@ -1595,11 +1609,30 @@ def _board_stats() -> str:
         head = f"  - [{i.get('id','?')}] {tag}{body}"
         dd = i.get("due_days")
         if dd is None:
-            return head
+            return head + _state(i)
         when = ("DUE TODAY" if dd == 0 else "DUE TOMORROW" if dd == 1
                 else f"due in {dd} days" if dd > 0 else f"{abs(dd)} days OVERDUE")
         on = i.get("due_on") or ""
-        return f"{head}  [{when}{f' — {on}' if on else ''}]"
+        return f"{head}  [{when}{f' — {on}' if on else ''}]" + _state(i)
+
+    def _state(i):
+        """The structured fields the board carries and the brief was throwing away. Each is
+        STORED — never inferred from the wording — so the brief can say who owns the next
+        move without guessing, and can tell a deadline from a day Brady chose himself."""
+        bits = []
+        if (i.get("waiting_on") or "").strip():
+            bits.append(f"PARKED ON {i['waiting_on'].strip()} — he is NOT the next actor")
+        if (i.get("next_step") or "").strip():
+            bits.append(f"next step (his words): {i['next_step'].strip()[:120]}")
+        if (i.get("followup") or "").strip():
+            bits.append(f"he plans to chase it {i['followup']} — that is HIS reminder, "
+                        f"not the other party's deadline")
+        if (i.get("chosen_on") or "")[:10] == _TODAY_STR():
+            bits.append("HE CHOSE THIS FOR TODAY (his pick, not a deadline)")
+        lane = i.get("lane")
+        if lane in ("undecided",):
+            bits.append("no date and no next step recorded — a decision, not a schedule")
+        return ("\n      · " + "\n      · ".join(bits)) if bits else ""
     money = [i for i in open_items if cat(i) == "Money"]
     if money:
         lines.append("OPEN MONEY ACTIONS (priority — flag anything time-critical):\n"
@@ -1623,6 +1656,29 @@ def _board_stats() -> str:
                      "appointments, deals, personal commitments):\n" + "\n".join(
                          _line(i, show_cat=True)
                          for i in sorted(other, key=lambda x: x.get("due_days", 999))[:14]))
+    # WHAT HE PICKED UP TODAY, and what is ready without a date. Both were invisible: the
+    # brief only ever saw dated rows outside three categories, so the work Brady actually
+    # chose this morning could not appear, and the model filled the gap with the register.
+    chosen = [i for i in open_items
+              if (i.get("chosen_on") or "")[:10] == now.strftime("%Y-%m-%d")]
+    if chosen:
+        lines.append("HE CHOSE THESE FOR TODAY (his own pick — treat as today's plan, and "
+                     "never describe one as a deadline):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in chosen[:10]))
+    parked = [i for i in open_items if i.get("lane") == "waiting"]
+    if parked:
+        lines.append("PARKED ON SOMEONE ELSE (he is NOT the next actor — never list these as "
+                     "things for him to do, and never call one finished because time passed):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in parked[:10]))
+    ready = [i for i in open_items
+             if i.get("due_days") is None and i.get("lane") in ("anytime", "undecided")
+             and cat(i) not in ("Money", "Bills", "Opportunities", "Goals")
+             and i.get("id") not in {c.get("id") for c in chosen}]
+    if ready:
+        lines.append("UNDATED AND READY (real work with no deadline — candidates for spare "
+                     "time, NOT things he committed to today):\n"
+                     + "\n".join(_line(i, show_cat=True) for i in ready[:12]))
+
     # Wins from memory (the win-logger writes "Deal won:" / "Goal reached:" facts)
     try:
         wins = [f for f in db.read_facts_full()
@@ -1777,6 +1833,42 @@ def _brief_thread(turns: list) -> str:
     return _format_thread(_budget_turns(kept, _BRIEF_THREAD_CHARS), per_turn=_BRIEF_TURN_CHARS)
 
 
+def _last_brief_cutoff(kind: str, now):
+    """(cutoff, a line saying what the window actually is).
+
+    deliver_brief writes a receipt row per kind on every delivery, so `summaries.ts` for
+    'brief_<kind>' is when the last one really went out. Anchoring to it means the window
+    matches what Brady was told last time instead of assuming it was twenty hours ago.
+
+    The note is not decoration: on a fallback the brief must not imply it knows what changed
+    since the last one, because it does not.
+    """
+    from . import db
+    fallback = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
+                else now - timedelta(hours=20))
+    try:
+        row = db.latest_summary(f"brief_{kind}")
+        ts = (row or {}).get("ts")
+        if ts:
+            last = datetime.fromisoformat(ts).astimezone(EASTERN)
+            # A stale receipt (days old) would open a window so wide the "change" is the whole
+            # board. Cap it, and say so, rather than quietly reporting a week as "since then".
+            if last < now - timedelta(days=3):
+                return (now - timedelta(days=3),
+                        "(WINDOW: the last %s brief went out %s — more than three days ago, so "
+                        "this covers the last three days only. Do not claim it covers "
+                        "everything since then.)" % (kind, last.strftime("%b %-d")))
+            if last <= now:
+                return (last, "(WINDOW: exactly since the last %s brief, delivered %s.)"
+                        % (kind, last.strftime("%b %-d at %-I:%M %p")))
+    except Exception:
+        pass
+    return (fallback,
+            "(WINDOW: no delivery receipt for a previous %s brief, so this is a fixed "
+            "look-back, not a true since-the-last-brief list. Do not say 'since your last "
+            "brief' as though it were exact.)" % kind)
+
+
 async def compose_brief_prompt(kind: str = "morning") -> str:
     """Everything the brief knows, minus the model call — split out (2026-08-03) so the
     MAX BRIDGE can run the same brief on Brady's Claude Max plan ($0/token); this server
@@ -1815,7 +1907,22 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                 "\n".join(f"- {e.get('time','')} {e.get('title','')}" for e in tom)
                 or "(nothing scheduled yet)")
         mem_all = await asyncio.to_thread(brain.read_memory)
-        goals = [f for f in mem_all if "goal" in f.lower() and not f.startswith("ACE SELF-NOTE")][:6]
+        # HIS ACTUAL GOALS, not the first six memory strings containing the word "goal"
+        # (2026-09-09 audit). That string match pulled in any sentence mentioning a goal —
+        # including Ace's own notes about goals — while the rows Brady deliberately files
+        # under Goals, which is his real current selection, were never consulted.
+        try:
+            _goal_rows = [i.get("text", "") for i in await asyncio.to_thread(db.read_items, True)
+                          if i.get("status") == "open"
+                          and "Goals" in (i.get("tags") or [])]
+        except Exception:
+            _goal_rows = []
+        goals = _goal_rows[:6] or [f for f in mem_all
+                                   if "goal" in f.lower() and not f.startswith("ACE SELF-NOTE")][:6]
+        # THE CURRENT PROFILE. Updating Ace's identity through update_profile changed how he
+        # talks in chat and did nothing to the brief, because the brief never read it — which
+        # is why the brief still sounded like a phase Brady had moved on from.
+        profile_now = await asyncio.to_thread(load_profile)
         self_notes = [f for f in mem_all if f.startswith("ACE SELF-NOTE")][-3:]
         # Brief feedback steering — Brady's 👍/👎 votes tune tomorrow's brief
         fb = await asyncio.to_thread(db.latest_summary, "brief_feedback")
@@ -1833,8 +1940,13 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             all_items = await asyncio.to_thread(db.read_items, False)
         except Exception:
             all_items = []
-        cutoff = (now.replace(hour=4, minute=0, second=0, microsecond=0) if kind == "eod"
-                  else now - timedelta(hours=20))
+        # ANCHOR THE WINDOW TO THE LAST BRIEF THAT ACTUALLY WENT OUT (2026-09-09).
+        # "Since the last brief" was a fixed 20 hours, which is not the last brief — it is a
+        # guess about when the last brief was. deliver_brief already writes a receipt row per
+        # kind, and that row's own ts is the real delivery instant, so use it. The fixed
+        # window stays as the fallback for a first run or a missing receipt, and the label
+        # below SAYS which one is in force rather than implying a precision it does not have.
+        cutoff, window_note = _last_brief_cutoff(kind, now)
         _CATS = ("Money", "Bills", "Opportunities", "Goals", "Personal", "Deals",
                  "Agents", "Admin", "Networking", "Business", "Tech")
         def _cat_of(it):
@@ -1851,6 +1963,12 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
                        if i.get("status") == "done" and _after_cutoff(i.get("done_ts"))]
         new_recent = [i for i in all_items
                       if i.get("status") == "open" and _after_cutoff(i.get("ts"))]
+        # EDITS COUNT AS CHANGE. Only creations and completions were counted, so the evening
+        # Brady spent moving deadlines, naming who he was waiting on and writing next steps
+        # registered as nothing happening — and the brief told him so.
+        _seen = {i.get("id") for i in done_recent} | {i.get("id") for i in new_recent}
+        edited = [i for i in all_items
+                  if i.get("id") not in _seen and _after_cutoff(i.get("updated_at"))]
         dl = []
         if done_recent:
             dl.append("KNOCKED OUT since the last brief:")
@@ -1859,28 +1977,41 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             dl.append("NEW on the board since the last brief:")
             dl += [f"  + {i['text'][:160]}" + (f"  [{c}]" if (c := _cat_of(i)) else "")
                    for i in new_recent[:8]]
-        delta_block = "\n".join(dl) or "(nothing closed or added since the last brief)"
+        if edited:
+            dl.append("CHANGED since the last brief (he edited these — a changed deadline, "
+                      "a next step, who it is parked on. NOT finished work):")
+            dl += [f"  ~ {i['text'][:140]}" for i in edited[:8]]
+        delta_block = ("\n".join(dl) or "(nothing closed, added or changed since then)") \
+            + "\n" + window_note
         # PIVOT (2026-08-10): Brady stepped back from GFI/PFI to dig out financially. The brief
         # leads with the RECOVERY — money/tax deadlines, bills due, income moves — NOT the old
         # EMD/business chase. Never mention EMD. Keep the Gabby situation OUT of the pushed text
         # (this lands on his lock screen where she might see) unless he himself raised it today.
         if kind == "morning":
             ask = (
-                "You are Ace, Brady's chief of staff, writing his MORNING BRIEF for his FINANCIAL "
-                "RECOVERY. This is NOT a template to fill — it's a SYNTHESIS. Read the CHANGE SINCE "
-                "THE LAST BRIEF, the recent thread, his REAL schedule, and the board data below, "
-                "then tell him the true shape of today in your own words, woven naturally (never as "
-                "labeled sections): a one-line human open with the weather beat; then — only if "
-                "there's something real — what he moved since the last brief and what's new; then "
-                "the 1-3 things that GENUINELY matter today, led by anything time-critical from the "
-                "money/bills data (a tax/IRS deadline, a bill due within ~3 days, an income move) "
-                "blended with his actual appointments; then one honest, steadying line on where the "
-                "recovery stands. HARD RULES: surface only what's IMMINENT or decision-worthy — do "
-                "NOT list every bill or open item; the board data is REFERENCE to pull from, never "
-                "to recite. Vary it day to day — never open the same way twice. On a quiet day, say "
-                "so plainly instead of manufacturing urgency. ~130 words. No EMD, no old business "
-                "goals. Gabby is fully in the loop on the money, so referencing it is fine — keep "
-                "the tone steady, not heavy. Plain text, short lines, no markdown, no section labels."
+                # HIS DAY, NOT A FIXED NARRATIVE (2026-09-09 audit). This asked for a "FINANCIAL
+                # RECOVERY brief" led by money and bills every single morning, which is how a
+                # brief written forty minutes after Brady laid out his plan could spend itself on
+                # the register and omit the plan. Money leads when the sheet says something is
+                # actually imminent — not because the template says so.
+                "You are Ace, Brady's chief of staff, writing his MORNING BRIEF. This is NOT a "
+                "template to fill — it's a SYNTHESIS, and its subject is HIS DAY. Read what he "
+                "himself said, the CHANGE SINCE THE LAST BRIEF, his REAL schedule, and the board "
+                "data below, then tell him the true shape of today in your own words, woven "
+                "naturally (never as labeled sections): a one-line human open with the weather "
+                "beat; then — only if there's something real — what moved since the last brief; "
+                "then the 1-3 things that GENUINELY matter today. Those come FIRST from what he "
+                "said he is doing and what he chose for today, then from anything time-critical "
+                "in the money data (a tax/IRS deadline, a bill due within ~3 days), blended with "
+                "his actual appointments; then one honest, steadying line. If money is not "
+                "actually urgent today, do not lead with it — a bill due in nine days is not "
+                "today's news, and generic bill repetition must never crowd out something he "
+                "just committed to. HARD RULES: surface only what's IMMINENT or decision-worthy "
+                "— do NOT list every bill or open item; the board data is REFERENCE to pull "
+                "from, never to recite. Vary it day to day — never open the same way twice. On a "
+                "quiet day, say so plainly instead of manufacturing urgency. ~130 words. No EMD. "
+                "Gabby is fully in the loop on the money, so referencing it is fine — keep the "
+                "tone steady, not heavy. Plain text, short lines, no markdown, no section labels."
             )
         else:
             ask = (
@@ -1896,7 +2027,10 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
             )
         ask += _BRIEF_RULES
         return (
-            f"{ask}\n\nCURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
+            f"{ask}\n\nWHO HE IS RIGHT NOW — his current profile, which he edits. This is the\n"
+            f"standing context for everything below; if it disagrees with an older habit of\n"
+            f"this brief, the profile wins:\n{profile_now}\n\n"
+            f"CURRENT TIME: {now.strftime('%A, %B %d, %Y — %-I:%M %p')} ET\n\n"
             f"WEATHER: {_format_weather(ok(wx, {}))}\n\nTODAY'S SCHEDULE:\n{sched}{tomorrow_block}\n\n"
             f"CHANGE SINCE THE LAST BRIEF:\n{delta_block}\n\n"
             f"MONEY DUE IN THE NEXT 10 DAYS — from Brady's budget sheet, the ONLY trustworthy\n"

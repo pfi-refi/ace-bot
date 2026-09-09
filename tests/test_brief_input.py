@@ -252,3 +252,144 @@ class VerbatimMeansComplete(unittest.TestCase):
                 et('user', 'Actually, do the new thing instead.', 30)]
         today, _ = chat._commitment_lines(rows, now=NOW, total_chars=200)
         self.assertIn('do the new thing instead', today)
+
+
+# ── THE REMAINING AUDIT GAPS (2026-09-09) ──────────────────────────────────────
+# Gaps 1, 3 and 4 of ACE-MORNING-BRIEF-AUDIT-2026-09-09.md: outdated framing, board fields
+# omitted, and a "since last brief" delta that was not anchored to the last brief.
+
+class TheBoardReachesTheBriefWholeNotFlattened(unittest.TestCase):
+    """Gap 3. The brief read a row as a category and maybe a date, so who owns the next move,
+    what the next move IS, and what Brady picked up today were all invisible."""
+
+    def _stats(self, rows):
+        from unittest.mock import patch
+        with patch.object(chat, 'datetime', chat.datetime):
+            with patch('backend.db.read_items', return_value=rows), \
+                 patch('backend.db.read_facts_full', return_value=[]):
+                return chat._board_stats()
+
+    def _row(self, **kw):
+        base = {'id': 'r1', 'text': 'a thing', 'status': 'open', 'tags': ['Deals'],
+                'entry': 'action', 'state': None, 'due': None, 'due_days': None,
+                'due_on': None, 'waiting_on': None, 'next_step': None, 'followup': None,
+                'chosen_on': None, 'bucket': 'GFI/PFI'}
+        base.update(kw); return base
+
+    def test_the_waiting_owner_reaches_the_brief(self):
+        out = self._stats([self._row(entry='record', state='waiting',
+                                     waiting_on='the county', text='Permit sign-off')])
+        self.assertIn('the county', out)
+        self.assertIn('NOT the next actor', out)
+
+    def test_the_next_step_reaches_the_brief_in_his_words(self):
+        out = self._stats([self._row(next_step='call two shops before noon')])
+        self.assertIn('call two shops before noon', out)
+
+    def test_a_follow_up_is_not_presented_as_a_deadline(self):
+        out = self._stats([self._row(followup='2026-09-15')])
+        self.assertIn('2026-09-15', out)
+        self.assertIn("not the other party's deadline", out)
+
+    def test_work_chosen_for_today_is_named_as_his_plan(self):
+        today = chat.datetime.now(chat.EASTERN).strftime('%Y-%m-%d')
+        out = self._stats([self._row(text='Website copy for the new page', chosen_on=today)])
+        self.assertIn('HE CHOSE THESE FOR TODAY', out)
+        self.assertIn('Website copy for the new page', out)
+        self.assertIn('never describe one as a deadline', out)
+
+    def test_undated_work_outside_three_categories_is_no_longer_a_bare_count(self):
+        # This is the shape of the 9 Sept failure: Nick/Josh and the website work had no
+        # dates and were not Money/Bills/Opportunities, so the brief could not see them and
+        # filled the space with the bill register.
+        out = self._stats([self._row(text='Lock in Nick’s Thursday time', tags=['Networking']),
+                           self._row(id='r2', text='Website copy', tags=['Business'])])
+        self.assertIn('Lock in Nick', out)
+        self.assertIn('Website copy', out)
+        self.assertIn('UNDATED AND READY', out)
+
+    def test_undated_work_is_not_presented_as_a_commitment(self):
+        out = self._stats([self._row(text='Website copy', tags=['Business'])])
+        self.assertIn('NOT things he committed to today', out)
+
+
+class TheChangeWindowIsAnchoredToTheLastBrief(unittest.TestCase):
+    """Gap 4. A fixed 20-hour look-back is a guess about when the last brief was."""
+
+    def _cutoff(self, receipt_ts, now):
+        from unittest.mock import patch
+        row = {'ts': receipt_ts, 'text': 'x'} if receipt_ts else {}
+        with patch('backend.db.latest_summary', return_value=row):
+            return chat._last_brief_cutoff('morning', now)
+
+    def test_it_anchors_to_the_actual_delivery(self):
+        now = datetime(2026, 9, 9, 9, 0, tzinfo=chat.EASTERN)
+        last = datetime(2026, 9, 8, 7, 30, tzinfo=chat.EASTERN)
+        cut, note = self._cutoff(last.isoformat(), now)
+        self.assertEqual(cut, last)
+        self.assertIn('exactly since the last', note)
+
+    def test_a_missing_receipt_says_so_instead_of_pretending(self):
+        now = datetime(2026, 9, 9, 9, 0, tzinfo=chat.EASTERN)
+        cut, note = self._cutoff(None, now)
+        self.assertEqual(cut, now - timedelta(hours=20))
+        self.assertIn('not a true since-the-last-brief list', note)
+
+    def test_a_stale_receipt_is_capped_and_labelled(self):
+        now = datetime(2026, 9, 9, 9, 0, tzinfo=chat.EASTERN)
+        last = datetime(2026, 9, 1, 7, 30, tzinfo=chat.EASTERN)
+        cut, note = self._cutoff(last.isoformat(), now)
+        self.assertEqual(cut, now - timedelta(days=3))
+        self.assertIn('three days', note)
+        self.assertIn('Do not claim', note)
+
+
+class EditsCountAsChange(unittest.TestCase):
+    """Gap 4, second half. Brady's cleanup — moved deadlines, next steps, waiting owners —
+    was neither a creation nor a completion, so it registered as nothing happening."""
+
+    def test_the_store_records_when_a_row_was_edited(self):
+        from backend import db
+        self.assertIn('updated_at TIMESTAMPTZ', Path(db.__file__).read_text())
+
+    def test_the_read_path_returns_it(self):
+        from backend import db
+        src = Path(db.__file__).read_text()
+        self.assertIn('it["updated_at"]', src)
+
+    def test_every_edit_stamps_it(self):
+        from backend import db
+        self.assertIn('sets.append("updated_at = now()")', Path(db.__file__).read_text())
+
+
+class TheBriefKnowsWhoHeIsNow(unittest.TestCase):
+    """Gap 1. The composer asked for a FINANCIAL RECOVERY brief every morning and never read
+    the editable profile, so updating Ace's identity did nothing to the briefing."""
+
+    def test_the_composer_reads_the_current_profile(self):
+        src = Path(chat.__file__).read_text()
+        self.assertIn('profile_now = await asyncio.to_thread(load_profile)', src)
+        self.assertIn('WHO HE IS RIGHT NOW', src)
+
+    def test_the_fixed_recovery_framing_is_gone(self):
+        src = Path(chat.__file__).read_text()
+        self.assertNotIn('writing his MORNING BRIEF for his FINANCIAL', src)
+
+    def test_money_no_longer_leads_by_default(self):
+        src = Path(chat.__file__).read_text()
+        self.assertIn('If money is not', src)
+        self.assertIn('a bill due in nine days is not', src)
+
+    def test_his_plan_outranks_the_register(self):
+        src = Path(chat.__file__).read_text()
+        self.assertIn('come FIRST from what he', src)
+        self.assertIn('must never crowd out something he', src)
+
+    def test_goals_come_from_the_rows_he_files_not_a_word_match(self):
+        src = Path(chat.__file__).read_text()
+        self.assertIn('"Goals" in (i.get("tags") or [])', src)
+
+    def test_the_sheet_is_still_authoritative_for_money(self):
+        src = Path(chat.__file__).read_text()
+        self.assertIn('the ONLY trustworthy', src)
+        self.assertIn('NEVER quote a', src)
