@@ -81,6 +81,19 @@ def shelves_of(item: dict) -> list:
     return [s for s in SHELVES if s in tags]
 
 
+def carried_over(item: dict) -> bool:
+    """True for a row that WOULD have been Needs a decision under the old derivation but was
+    never marked by Brady. Used by the migration preview and shown as "carried over — not yet
+    reviewed", so nothing silently becomes Ready and nothing claims he chose it."""
+    if (item.get("status") or "open") != "open":
+        return False
+    if (item.get("state") or "") in ("waiting", "settled", "decide"):
+        return False
+    if (item.get("entry") or "") == "record":
+        return False
+    return not has_next_step(item)
+
+
 def has_next_step(item: dict) -> bool:
     """Is the next move recorded anywhere? `next_step` is the additive field; a due date or
     an explicit waiting_on also answers 'what happens next', so neither counts as undecided."""
@@ -110,9 +123,16 @@ def lane_of(item: dict) -> str:
         if dd == 0:
             return LANE_TODAY
         return LANE_UPCOMING
+    # EXPLICIT, NOT DERIVED (release one, 2026-09-09). This used to read "undated action with
+    # no next step" as Needs a decision. Brady asked for one authoritative meaning: he marks
+    # it. Rows that were only ever in this lane BY DERIVATION are not silently reclassified —
+    # the migration proposal carries them over with a marker (see carried_over below), and
+    # until that is applied and confirmed they keep showing as Needs a decision.
+    if (item.get("state") or "") == "decide":
+        return LANE_UNDECIDED
     if (item.get("entry") or "") == "record":
         return LANE_REFERENCE
-    return LANE_ANYTIME if has_next_step(item) else LANE_UNDECIDED
+    return LANE_ANYTIME
 
 
 def decorate(item: dict) -> dict:
@@ -121,6 +141,7 @@ def decorate(item: dict) -> dict:
     return {
         **item,
         "lane": lane,
+        "carried_over": carried_over(item),
         "lane_label": LANE_LABELS[lane],
         "area": area_of(item),
         "shelves": shelves_of(item),

@@ -618,7 +618,98 @@ def _waiting_on(text: str) -> str:
 # only COMPARES against it. Keyword matching cannot separate what a row is ABOUT from what it
 # MENTIONS. Ship the field, keep the 11 categories doing their job, and let a judgment pass
 # (the dedup judge pattern) or Brady correct these before anything is grouped by bucket.
-BUCKETS = ("GFI/PFI", "Groundworks", "Side Work", "Personal", "Ace")
+# INBOX (release one, 2026-09-09). Previously there were five areas and `derive_bucket`
+# defaulted anything it could not place to "Personal" — so unclassified captures quietly
+# piled into a real area of Brady's life. Inbox is where genuinely unassigned work goes, and
+# it is the DEFAULT for a row nothing else matches. Existing rows are untouched: a stored
+# bucket always wins, and nothing is re-bucketed by this change.
+INBOX = "Inbox"
+BUCKETS = (INBOX, "GFI/PFI", "Groundworks", "Side Work", "Personal", "Ace")
+
+# Custom lists Brady adds himself. Stored, not hardcoded, so a list survives a restart and
+# renaming it keeps every item — the rows reference the area by NAME, so a rename is a
+# single update and no row moves.
+def custom_lists() -> list:
+    """Extra areas Brady created. [] when the store is unavailable."""
+    try:
+        row = latest_summary("board_lists")
+        import json as _json
+        return [x for x in _json.loads(row.get("text") or "[]") if isinstance(x, str)]
+    except Exception:
+        return []
+
+
+def area_renames() -> dict:
+    """{canonical built-in name: what Brady calls it now}.
+
+    The keyword filing in `derive_bucket` returns canonical names. Without this map, renaming
+    Groundworks to "Concrete" would keep filing new concrete work into a "Groundworks" that no
+    longer appears anywhere — the item would vanish from the board without being deleted.
+    """
+    try:
+        row = latest_summary("board_list_renames")
+        import json as _json
+        got = _json.loads(row.get("text") or "{}")
+        return {k: v for k, v in got.items() if k in BUCKETS and isinstance(v, str) and v}
+    except Exception:
+        return {}
+
+
+def area_name(canonical: str) -> str:
+    """The name Brady sees for a built-in slot."""
+    return area_renames().get(canonical, canonical)
+
+
+def all_areas() -> list:
+    ren = area_renames()
+    shown = [ren.get(b, b) for b in BUCKETS]
+    return shown + [a for a in custom_lists() if a not in shown]
+
+
+def set_custom_lists(names: list) -> bool:
+    import json as _json
+    clean, seen = [], set()
+    for n in (names or []):
+        n = (n or "").strip()[:40]
+        if n and n not in BUCKETS and n.lower() not in seen:
+            seen.add(n.lower()); clean.append(n)
+    return add_summary(_json.dumps(clean[:20]), "board_lists")
+
+
+def rename_area(old_name: str, new_name: str) -> tuple:
+    """Rename a list. Every item and link follows it — the rows are updated in place, so
+    ids, history, parents and dates are all preserved."""
+    old_name = (old_name or "").strip(); new_name = (new_name or "").strip()[:40]
+    if not old_name or not new_name:
+        return False, "both names are required"
+    if new_name in all_areas() and new_name != old_name:
+        return False, f"'{new_name}' already exists"
+    ren = area_renames()
+    lists = custom_lists()
+    # A built-in is a SLOT, not a label: renaming it records what he calls it now and leaves
+    # the slot itself in place, so keyword filing keeps landing in the same area.
+    canonical = next((b for b in BUCKETS if ren.get(b, b) == old_name), None)
+    if canonical is None and old_name not in lists:
+        return False, f"no list named '{old_name}'"
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("UPDATE daybank_items SET bucket = %s WHERE bucket = %s",
+                        (new_name, old_name))
+            moved = cur.rowcount or 0
+    except Exception as e:
+        return False, f"rename failed: {e}"
+    if canonical is not None:
+        ren[canonical] = new_name
+        _set_area_renames({k: v for k, v in ren.items() if v != k})
+    else:
+        set_custom_lists([new_name if x == old_name else x for x in lists])
+    return True, f"renamed; {moved} item(s) stayed with it"
+
+
+def _set_area_renames(mapping: dict) -> bool:
+    import json as _json
+    return bool(add_summary(_json.dumps(mapping), "board_list_renames"))
 # Personal time wins first: an errand is his own hours whoever the occasion belongs to.
 # "birthday" was here and cost the Morgan row: "sitting on it until his birthday, Oct 21" is a
 # DATE, not an errand. Only unambiguous errand nouns survive.
@@ -633,6 +724,11 @@ _B_SIDE = _re.compile(r"\b(damon|woody|concrete|pour(?:s|ing)?|ready\s*mix|green
 
 
 def derive_bucket(text: str, cat: str) -> str:
+    return area_name(_derive_bucket_slot(text, cat))
+
+
+def _derive_bucket_slot(text: str, cat: str) -> str:
+    """The canonical slot, before Brady's own naming is applied."""
     t = text or ""
     if _B_ERRAND.search(t):                      # his own hours, whoever it is for
         return "Personal"
@@ -644,7 +740,8 @@ def derive_bucket(text: str, cat: str) -> str:
         return "Groundworks"
     if _B_SIDE.search(t):
         return "Side Work"
-    return "Personal"
+    # Unrecognised no longer means Personal — it means nobody has decided yet.
+    return INBOX
 
 
 def _derive_entry(it) -> str:
@@ -1390,7 +1487,10 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("closed_by = %s"); args.append(closed_by.strip()[:20])
             if entry in ("action", "record"):
                 sets.append("entry = %s"); args.append(entry)
-            if state in ("active", "waiting", "settled"):
+            # 'decide' joins the stored states (release one). It is set by Brady, never
+            # derived — see classify.lane_of, where the old "undated and no next step"
+            # inference was removed.
+            if state in ("active", "waiting", "settled", "decide"):
                 sets.append("state = %s"); args.append(state)
             if waiting_on is not None:
                 sets.append("waiting_on = %s"); args.append((waiting_on.strip() or None))
@@ -1405,8 +1505,14 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("followup = %s"); args.append((pin_due(followup) or None))
             if chosen_on is not None:
                 sets.append("chosen_on = %s"); args.append((pin_due(chosen_on) or None))
-            if bucket in BUCKETS:
-                sets.append("bucket = %s"); args.append(bucket)
+            # all_areas(), not BUCKETS: a list Brady made himself is a real destination, and
+            # a renamed built-in answers to its new name. Membership was checked against the
+            # frozen tuple, so a move to any other area was dropped without a word — and when
+            # it was the only field, the caller got "nothing to update" instead of a reason.
+            if bucket is not None and str(bucket).strip():
+                if str(bucket).strip() not in all_areas():
+                    return False, f"unknown area '{bucket}'"
+                sets.append("bucket = %s"); args.append(str(bucket).strip())
             if not sets:
                 return False, "nothing to update"
             args.append(item_id)

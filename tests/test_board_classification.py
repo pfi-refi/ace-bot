@@ -28,8 +28,21 @@ class Lanes(unittest.TestCase):
         self.assertEqual(classify.lane_of(row(due_days=-1)), classify.LANE_OVERDUE)
         self.assertEqual(classify.lane_of(row(due_days=0)), classify.LANE_TODAY)
 
-    def test_undated_action_without_a_next_step_needs_a_decision(self):
-        self.assertEqual(classify.lane_of(row()), classify.LANE_UNDECIDED)
+    def test_needs_a_decision_is_explicit_and_never_derived(self):
+        # RELEASE ONE (2026-09-09, Brady): "Make Needs a decision an explicit choice with one
+        # authoritative meaning — undated should not automatically mean undecided." Undated
+        # work with nothing written down is not a decision he made; it is work he has not
+        # looked at, which the review flag below reports without changing its lane.
+        self.assertEqual(classify.lane_of(row()), classify.LANE_ANYTIME)
+        self.assertEqual(classify.lane_of(row(state='decide')), classify.LANE_UNDECIDED)
+
+    def test_the_review_flag_is_separate_from_the_lane(self):
+        self.assertTrue(classify.carried_over(row()))
+        self.assertFalse(classify.carried_over(row(state='decide')),
+                         'a row he marked himself was never "carried over"')
+        self.assertFalse(classify.carried_over(row(next_step='call Damon Tuesday')))
+        self.assertFalse(classify.carried_over(row(entry='record')))
+        self.assertFalse(classify.carried_over(row(status='done')))
 
     def test_a_recorded_next_step_moves_it_out_of_undecided(self):
         self.assertEqual(classify.lane_of(row(next_step='call Damon Tuesday')),
@@ -97,8 +110,15 @@ class NothingIsSilentlyHidden(unittest.TestCase):
     def test_undated_work_is_counted_in_full(self):
         rows = [row(id=str(i)) for i in range(23)]
         s = classify.summarise(rows)
-        self.assertEqual(s['counts'][classify.LANE_UNDECIDED], 23,
+        self.assertEqual(s['counts'][classify.LANE_ANYTIME], 23,
                          'the old panel showed 6 of 23 with no total')
+        self.assertEqual(sum(s['counts'].values()), 23, 'undated work must not go missing')
+
+    def test_marked_decisions_are_counted_on_their_own(self):
+        rows = [row(id='a', state='decide'), row(id='b'), row(id='c')]
+        s = classify.summarise(rows)
+        self.assertEqual(s['counts'][classify.LANE_UNDECIDED], 1)
+        self.assertEqual(s['counts'][classify.LANE_ANYTIME], 2)
 
     def test_needs_you_excludes_waiting_and_reference(self):
         rows = [row(id='a', due_days=0), row(id='b', state='waiting'),

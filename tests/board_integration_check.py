@@ -33,6 +33,9 @@ try:
         ('waiting on the county for the permit', ['Business'], '2026-09-20', 'record', 'waiting', 'the county', 'Side Work'),
         ('a record that is settled', ['Money'], None, 'record', 'settled', None, 'GFI/PFI'),
         ('parent record for the deal', ['Deals'], None, 'record', None, None, 'GFI/PFI'),
+        # release one: the decision lane is a CHOICE Brady makes, never derived from
+        # "undated and no next step". Only this row should ever read Needs a decision.
+        ('pick a direction on the trailer', ['Business'], None, 'action', 'decide', None, 'Side Work'),
     ]
     ids = {}
     with db._conn() as c, c.cursor() as cur:
@@ -68,12 +71,19 @@ try:
     # 4. next_step: create, correct, clear — through the route, verified by readback.
     r = c.post('/daybank/update', json={'id': target, 'next_step': 'call two shops'}).json()
     assert r['ok'] and r['next_step'] == 'call two shops', r
-    assert r['lane'] == classify.LANE_ANYTIME, f"a recorded next step must leave Needs a decision: {r['lane']}"
+    assert r['lane'] == classify.LANE_ANYTIME, r['lane']
     r = c.post('/daybank/update', json={'id': target, 'next_step': 'call three shops'}).json()
     assert r['next_step'] == 'call three shops', 'correction did not persist'
     r = c.post('/daybank/update', json={'id': target, 'next_step': ''}).json()
     assert r['next_step'] is None, f'clearing must null it, got {r["next_step"]!r}'
-    assert r['lane'] == classify.LANE_UNDECIDED, 'clearing returns it to Needs a decision'
+    # RELEASE ONE: clearing a next step must NOT push the row into Needs a decision. That
+    # lane is now something Brady chooses; deleting a sentence is not him choosing it.
+    assert r['lane'] == classify.LANE_ANYTIME, f'clearing re-derived a decision: {r["lane"]}'
+    assert r['saved']['carried_over'] is True, 'it should still be flagged for review, though'
+    dec = ids['pick a direction on the trailer']
+    d = next(x for x in c.get('/daybank').json()['items'] if x['id'] == dec)
+    assert d['lane'] == classify.LANE_UNDECIDED, f'an explicit mark must hold: {d["lane"]}'
+    assert d['carried_over'] is False, 'a row he marked himself is not "carried over"'
 
     # 5. followup is Brady's date and is NOT the obligation's due date.
     r = c.post('/daybank/update', json={'id': target, 'followup': '2026-09-19'}).json()

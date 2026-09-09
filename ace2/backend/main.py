@@ -35,7 +35,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import (
@@ -546,6 +546,137 @@ async def daybank_read(all: bool = False):
     return await board_payload(all_items=all)
 
 
+# ── RELEASE ONE: lists, follow-ups, and a read-only mapping preview ────────────
+class ListReq(BaseModel):
+    name: str = ""
+    rename_to: str = ""
+
+
+@app.get("/board/lists", dependencies=[Depends(require_auth)])
+async def board_lists():
+    return {"areas": await asyncio.to_thread(db.all_areas),
+            "builtin": list(db.BUCKETS),
+            "custom": await asyncio.to_thread(db.custom_lists)}
+
+
+@app.post("/board/lists", dependencies=[Depends(require_auth)])
+async def board_lists_add(req: ListReq):
+    """Add or rename a custom list. Renaming updates every row in place, so ids, history,
+    parent links and dates all stay exactly as they were."""
+    name = (req.name or "").strip()
+    if not name:
+        return {"ok": False, "error": "a name is required"}
+    if req.rename_to:
+        ok, msg = await asyncio.to_thread(db.rename_area, name, req.rename_to)
+        return {"ok": ok, "message": msg,
+                "areas": await asyncio.to_thread(db.all_areas), **(await board_payload())}
+    existing = await asyncio.to_thread(db.custom_lists)
+    if name in await asyncio.to_thread(db.all_areas):
+        return {"ok": False, "error": f"'{name}' already exists"}
+    ok = await asyncio.to_thread(db.set_custom_lists, existing + [name])
+    return {"ok": bool(ok), "areas": await asyncio.to_thread(db.all_areas)}
+
+
+class FollowupReq(BaseModel):
+    id: str = ""
+    action: str = "clear"        # "clear" | "push"
+    days: int = 7
+
+
+@app.post("/board/followup", dependencies=[Depends(require_auth)])
+async def board_followup(req: FollowupReq):
+    """Handle a FOLLOW-UP without touching the task.
+
+    A follow-up is when Brady chases something; it is not the work. In the prototype the
+    follow-up occurrence shared the completion control and closing it closed the whole task.
+    This endpoint only ever writes `followup` — status, due date and everything else are left
+    exactly as they are, and the response says so.
+    """
+    rows = await asyncio.to_thread(daybank.read_items, False)
+    it = next((x for x in rows if x.get("id") == req.id), None)
+    if not it:
+        return {"ok": False, "error": f"no item {req.id}"}
+    before = {"status": it.get("status"), "due": it.get("due"), "followup": it.get("followup")}
+    if req.action == "push":
+        base = it.get("followup") or datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
+        try:
+            nxt = (datetime.strptime(base[:10], "%Y-%m-%d")
+                   + timedelta(days=max(1, min(int(req.days or 7), 90)))).strftime("%Y-%m-%d")
+        except Exception:
+            return {"ok": False, "error": "could not read the current follow-up date"}
+        value = nxt
+    else:
+        value = ""
+    ok, msg = await asyncio.to_thread(daybank.update_item, req.id, followup=value)
+    payload = await board_payload()
+    after = next((x for x in payload["items"] if x.get("id") == req.id), {})
+    return {"ok": bool(ok), "message": msg,
+            "before": before,
+            "after": {"status": after.get("status"), "due": after.get("due"),
+                      "followup": after.get("followup")},
+            "task_still_open": (after.get("status") == "open"),
+            **payload}
+
+
+@app.get("/board/mapping_preview", dependencies=[Depends(require_auth)])
+async def board_mapping_preview():
+    """READ-ONLY. What release one would change, computed from the CURRENT records.
+
+    Nothing here writes. It exists so Brady can see, before anything is applied: how many
+    rows stay exactly where they are, which rows are genuinely unassigned, which rows were
+    only ever "Needs a decision" by derivation, and which look similar enough to be worth a
+    human glance — never an automatic merge.
+    """
+    from . import classify
+    items = await asyncio.to_thread(daybank.read_items, False)
+    live = [i for i in items if (i.get("status") or "open") == "open"]
+    by_area = {}
+    for i in live:
+        by_area[classify.area_of(i)] = by_area.get(classify.area_of(i), 0) + 1
+    # "Genuinely unassigned" is narrower than "no bucket column". A row with no stored area
+    # whose wording still files it confidently (a permit → Groundworks) is already sitting in
+    # the right place and stays there; only a row nobody and nothing has placed is proposed
+    # for Inbox. That is what keeps Inbox from becoming the mass destination Brady rejected.
+    unassigned = [i for i in live
+                  if not i.get("bucket_set") and classify.area_of(i) == db.INBOX]
+    carried = [i for i in live if classify.carried_over(i)]
+
+    # similar-looking pairs, reported ONLY — never merged, and never across different
+    # people: "Sienna" and "Syanna" are not assumed to be the same person.
+    import difflib
+    pairs = []
+    for a in range(len(live)):
+        for b in range(a + 1, len(live)):
+            ta, tb = (live[a].get("text") or ""), (live[b].get("text") or "")
+            if not ta or not tb:
+                continue
+            r = difflib.SequenceMatcher(None, ta.lower(), tb.lower()).ratio()
+            if r >= 0.72:
+                pairs.append({"a": live[a]["id"], "b": live[b]["id"],
+                              "a_text": ta[:90], "b_text": tb[:90], "similarity": round(r, 3),
+                              "action": "review only — no merge proposed"})
+    return {
+        "generated_at": datetime.now(chat.EASTERN).isoformat(),
+        "read_only": True,
+        "applies_anything": False,
+        "open_items": len(live),
+        "staying_in_place": {k: v for k, v in sorted(by_area.items(), key=lambda x: -x[1])},
+        "proposed_for_inbox": [{"id": i["id"], "text": (i.get("text") or "")[:110],
+                                "why": "no area stored on the row"} for i in unassigned],
+        "carried_over_decisions": [
+            {"id": i["id"], "text": (i.get("text") or "")[:110],
+             "now": "Needs a decision (derived)",
+             "proposed": "Needs a decision — carried over, not yet reviewed",
+             "never": "not set to Ready, and not described as Brady's choice"}
+            for i in carried],
+        "possible_duplicates": pairs[:20],
+        "reversal": ("Every proposed change is one row with a before and after value, applied "
+                     "in batches Brady confirms, each individually undoable. Review markers "
+                     "are separate from task status. Ids, history, dates, waiting information "
+                     "and parent links are never rewritten."),
+    }
+
+
 def _canon_category(raw: str) -> tuple:
     """('Deals', '') for a category the board knows; ('', why) for one it does not.
 
@@ -586,6 +717,10 @@ class DaybankUpdateReq(BaseModel):
     # "I'm doing this today" — Brady's choice, never a deadline. Accepting one of Ace's
     # suggestions writes THIS, so a suggestion can never silently create a due date.
     chosen_on: str | None = None
+    # SECONDARY TAGS (release one). `category` sets the one primary label the board columns
+    # use; this replaces the labels after it. None leaves them alone, [] clears them, and an
+    # unrecognised tag is REFUSED rather than dropped.
+    tags: list | None = None
     # A waiting row or a reference record is not completable by an ordinary checkbox — the
     # other person owns the next move, and a record has a lifecycle rather than an ending.
     # Changing one deliberately is still allowed, but it has to SAY so, so an accidental tap
@@ -825,27 +960,46 @@ async def daybank_update(req: DaybankUpdateReq):
     if req.entry and req.entry not in ("action", "record"):
         return {"ok": False, **(await board_payload()),
                 "error": "unknown entry '%s' — use action or record" % req.entry}
-    if req.state and req.state not in ("active", "waiting", "settled"):
+    if req.state and req.state not in ("active", "waiting", "settled", "decide"):
         return {"ok": False, **(await board_payload()),
-                "error": "unknown state '%s' — use active, waiting or settled" % req.state}
-    if req.bucket and req.bucket not in db.BUCKETS:
+                "error": "unknown state '%s' — use active, waiting, settled or decide" % req.state}
+    _areas = await asyncio.to_thread(db.all_areas)
+    if req.bucket and req.bucket not in _areas:
         return {"ok": False, **(await board_payload()),
-                "error": "unknown bucket '%s' — use one of: %s"
-                         % (req.bucket, ", ".join(db.BUCKETS))}
-    if req.state and req.entry == "action":
+                "error": "unknown area '%s' — use one of: %s" % (req.bucket, ", ".join(_areas))}
+    # "Needs a decision" is a state an ACTION carries — it is the one open question Brady has
+    # not answered yet. Only the record lifecycle (active/waiting/settled) needs entry=record.
+    if req.state and req.state != "decide" and req.entry == "action":
         return {"ok": False, **(await board_payload()),
                 "error": "state applies to records, not actions — set entry='record' too"}
     status = req.status or None
     text = req.text.strip() or None
     tags = None
-    if cat:
+    if cat or req.tags is not None:
         it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
                    if x.get("id") == req.id), None)
-        # Canonicalise BEFORE filtering, so a legacy lowercase 'deals' tag is recognised as
-        # the category it is and replaced — not kept alongside the new one as a second column.
-        keep = [t for t in db.canon_tags((it.get("tags") if it else None) or [])
-                if t not in _CATS]
-        tags = [cat] + keep
+        cur_tags = db.canon_tags((it.get("tags") if it else None) or [])
+        primary = cat or (cur_tags[0] if cur_tags else "")
+        if req.tags is None:
+            # Canonicalise BEFORE filtering, so a legacy lowercase 'deals' tag is recognised
+            # as the category it is and replaced — not kept alongside the new one as a
+            # second column.
+            secondary = [t for t in cur_tags if t not in _CATS]
+        else:
+            asked = db.canon_tags([str(t).strip() for t in req.tags if str(t).strip()])
+            # canon_tags lets an unrecognised string through unchanged, so the vocabulary
+            # check has to be its own step — otherwise a typo becomes a phantom filter that
+            # matches nothing and the route still answers ok:true.
+            unknown = [a for a in asked if a not in _CATS]
+            if unknown:
+                return {"ok": False, **(await board_payload()),
+                        "error": "unknown tag(s) %s — use one of: %s"
+                                 % (", ".join(repr(u) for u in unknown), ", ".join(db.CATEGORIES))}
+            # Legacy non-category labels already on the row (e.g. 'migrated') are bookkeeping,
+            # not something Brady chose here; keep them rather than making him retype them.
+            legacy = [t for t in cur_tags if t not in _CATS]
+            secondary = [t for t in asked if t != primary] + legacy
+        tags = ([primary] if primary else []) + secondary
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
         (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None),
