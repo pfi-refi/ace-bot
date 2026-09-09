@@ -126,6 +126,15 @@ async def call(name: str, arguments: dict) -> str:
             if text:
                 parts.append(text)
         out = "\n".join(parts).strip() or "(no content returned)"
+        # SAY WHEN THE TOOL FAILED (2026-09-09). MCP reports a tool-level failure by setting
+        # isError on an otherwise ordinary result, and this function ignored it — so a
+        # provider refusal came back looking exactly like content, and the model narrated it
+        # as progress. That is how Brady was told a spreadsheet was "built and populated"
+        # when Google had no such file. The marker is the same one an exception uses, so
+        # every caller that already checks for it now catches both.
+        if getattr(result, "isError", False):
+            logger.warning("MCP %s returned isError: %s", real, out[:200])
+            return f"\u26a0\ufe0f MCP {real} reported an error: {out}"[:24000]
         return out[:24000]
     except Exception as e:
         logger.error("MCP call %s failed: %s", real, e)

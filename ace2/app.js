@@ -638,13 +638,175 @@
   function connectWS() {
     var ws; try { ws = new WebSocket(wsURL()); } catch (e) { setLink(false); scheduleReconnect(); return; }
     state.ws = ws;
-    ws.onopen = function () { state.wsReady = true; state.reconnectDelay = 1000; setLink(true); };
+    ws.onopen = function () { state.wsReady = true; state.reconnectDelay = 1000; setLink(true); syncTaskCards(); };
     ws.onclose = function (ev) { state.wsReady = false; state.busy = false; setLink(false); if (ev && ev.code === 4401) { toLogin(); return; } scheduleReconnect(); };
     ws.onerror = function () { setLink(false); };
     ws.onmessage = function (ev) { try { handleWSEvent(JSON.parse(ev.data)); } catch (e) {} };
   }
   function scheduleReconnect() { setTimeout(connectWS, state.reconnectDelay); state.reconnectDelay = Math.min(15000, state.reconnectDelay * 1.7); }
-  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && !state.wsReady) { state.reconnectDelay = 1000; connectWS(); } });
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { syncTaskCards(); if (!state.wsReady) { state.reconnectDelay = 1000; connectWS(); } } });
+
+
+  /* ══════════════════════════════════════════════════════ TASK PROGRESS CARDS
+     A task Brady started by voice is running on the SERVER. These cards are only a
+     window onto it: closing one, hiding the page or dropping the socket changes who is
+     watching, never whether the work runs. Nothing here decides a state — every card is
+     rendered from the server's own card payload, so the toast, the phone card and the
+     activity list cannot disagree about what happened.
+
+     Replaces the old build_on_screen behaviour, which opened the chat panel and ran the
+     work as a typed turn — and which dropped the request entirely if the page was hidden.
+     (2026-09-09) */
+  var taskCards = {};        // task_id → { el, timer, state }
+  var TASK_LABELS = { queued: 'Queued', working: 'Working', needs_approval: 'Needs approval',
+                      completed: 'Done', failed: "Didn't work", cancelled: 'Cancelled' };
+
+  function taskLayer() {
+    var l = document.getElementById('task-layer');
+    if (!l) { l = document.createElement('div'); l.id = 'task-layer'; document.body.appendChild(l); }
+    return l;
+  }
+
+  /* KEEP CLEAR OF THE CONTROLS. On a phone the dock is in normal flow, the page does not
+     scroll, and the composer sits under it — so the band between them is about 70px, which
+     is smaller than a card. A hardcoded offset would silently start covering the dock the
+     first time that layout changed, so the gap is MEASURED: the card is parked just above
+     whichever essential control sits highest. Recomputed on resize and before each render. */
+  function taskSafeBottom() {
+    var top = window.innerHeight;
+    ['#quick', '#chat-input', '#mic-btn', '.composer', '.dock'].forEach(function (sel) {
+      Array.prototype.forEach.call(document.querySelectorAll(sel), function (el) {
+        var r = el.getBoundingClientRect();
+        if (r.height > 0 && r.width > 0 && r.top < top) top = r.top;
+      });
+    });
+    var gap = Math.max(12, Math.round(window.innerHeight - top) + 10);
+    document.documentElement.style.setProperty('--task-safe-bottom', gap + 'px');
+  }
+  window.addEventListener('resize', taskSafeBottom);
+
+  function renderTaskCard(card) {
+    if (!card || !card.task_id) return;
+    var id = card.task_id, prev = taskCards[id];
+    taskSafeBottom();
+    // TERMINAL IS TERMINAL. A retried delivery or a second tab's echo of an earlier state
+    // must not walk a finished card backwards into "working".
+    if (prev && (prev.state === 'completed' || prev.state === 'failed' || prev.state === 'cancelled')
+        && card.state !== prev.state) return;
+    if (prev && prev.timer) { clearTimeout(prev.timer); prev.timer = null; }
+
+    var el = prev && prev.el;
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'task-card';
+      el.setAttribute('data-task', id);
+      taskLayer().appendChild(el);
+    }
+    el.setAttribute('data-state', card.state);
+    el.replaceChildren();
+
+    var head = document.createElement('div'); head.className = 'tc-head';
+    var dot = document.createElement('span'); dot.className = 'tc-dot'; head.appendChild(dot);
+    var ttl = document.createElement('span'); ttl.className = 'tc-title';
+    ttl.textContent = card.title || 'Task'; head.appendChild(ttl);
+    var st = document.createElement('span'); st.className = 'tc-state';
+    st.textContent = TASK_LABELS[card.state] || card.state; head.appendChild(st);
+    // An approval or a failure is Brady's to dismiss. A pending approval has NO close
+    // button at all: dismissing one would look like answering it.
+    if (card.state !== 'needs_approval') {
+      var x = document.createElement('button'); x.className = 'tc-x'; x.type = 'button';
+      x.setAttribute('aria-label', 'Dismiss'); x.textContent = '✕';
+      x.onclick = function () { dropTaskCard(id); };
+      head.appendChild(x);
+    }
+    el.appendChild(head);
+
+    var msg = card.error || card.detail || '';
+    if (card.state === 'completed' && !card.error) {
+      msg = card.detail || 'Verified and ready.';
+    }
+    if (msg) { var m = document.createElement('div'); m.className = 'tc-msg'; m.textContent = msg; el.appendChild(m); }
+    (card.warnings || []).forEach(function (w) {
+      var wn = document.createElement('div'); wn.className = 'tc-warn'; wn.textContent = w; el.appendChild(wn);
+    });
+
+    var row = document.createElement('div'); row.className = 'tc-row';
+    // Only a completed task carries an action, and the server only puts one there when it
+    // has read the file back and built the link from the id the provider gave it.
+    if (card.action && card.action.url) {
+      var a = document.createElement('a'); a.className = 'tc-go';
+      a.href = card.action.url; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = card.action.label || 'Open';
+      a.onclick = function () { dropTaskCard(id); };
+      row.appendChild(a);
+    }
+    if (card.state === 'needs_approval') {
+      var rv = document.createElement('button'); rv.className = 'tc-go'; rv.type = 'button';
+      rv.textContent = 'Review it';
+      rv.onclick = function () { var b = document.getElementById('review-open'); if (b) b.click(); };
+      row.appendChild(rv);
+      var no = document.createElement('button'); no.className = 'tc-no'; no.type = 'button';
+      no.textContent = 'No, don’t';
+      no.onclick = function () {
+        no.disabled = true;
+        fetch(API + '/actions/' + id + '/deny', { method: 'POST', headers: headers() })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (d && d.card) renderTaskCard(d.card); })
+          .catch(function () { no.disabled = false; });
+      };
+      row.appendChild(no);
+    }
+    if (card.state === 'queued' || card.state === 'working') {
+      var cx = document.createElement('button'); cx.className = 'tc-no'; cx.type = 'button';
+      cx.textContent = 'Stop';
+      cx.onclick = function () {
+        cx.disabled = true;
+        fetch(API + '/actions/' + id + '/cancel', { method: 'POST', headers: headers() })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d && d.card) renderTaskCard(d.card);
+            // Refusing to cancel finished work is not an error — say what actually is.
+            if (d && d.card && d.card.cancel_refused) boardNotice(d.card.cancel_reason);
+          })
+          .catch(function () { cx.disabled = false; });
+      };
+      row.appendChild(cx);
+    }
+    if (row.childNodes.length) el.appendChild(row);
+
+    taskCards[id] = { el: el, state: card.state, timer: null };
+    // Success clears itself; the result stays reachable under More → Recent activity.
+    // Approvals and failures wait for Brady, and a pending approval is never auto-dismissed.
+    if (card.auto_dismiss_ms && !card.sticky) {
+      taskCards[id].timer = setTimeout(function () { dropTaskCard(id); }, card.auto_dismiss_ms);
+    }
+  }
+
+  function dropTaskCard(id) {
+    var c = taskCards[id]; if (!c) return;
+    if (c.timer) clearTimeout(c.timer);
+    if (c.el && c.el.parentNode) { c.el.classList.add('tc-out');
+      setTimeout(function () { if (c.el.parentNode) c.el.parentNode.removeChild(c.el); }, 180); }
+    delete taskCards[id];
+  }
+
+  /* RECONNECT AND NEW TABS read the server's state rather than replaying events they may
+     have missed. This is also what makes a second tab correct instead of duplicating: it
+     shows the same task ids, because the task is a row, not a message. */
+  function syncTaskCards() {
+    fetch(API + '/actions?limit=20', { headers: headers() })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d) return;
+        (d.live || []).forEach(renderTaskCard);
+        // A card that finished while this tab was away is shown briefly, then behaves
+        // exactly like any other success.
+        (d.cards || []).filter(function (c) {
+          return (c.state === 'needs_approval' || c.state === 'failed') && !taskCards[c.task_id];
+        }).forEach(renderTaskCard);
+      })
+      .catch(function () {});
+  }
 
   var streamMsg = null, activeTool = null;
   function handleWSEvent(msg) {
@@ -652,6 +814,7 @@
       case 'start': removeTyping(); setOrbState('speaking'); streamMsg = beginAceStream(); break;
       case 'delta': if (!streamMsg) streamMsg = beginAceStream(); appendToStream(streamMsg, msg.text); break;
       case 'tool': renderTool(msg); break;
+      case 'task': renderTaskCard(msg); break;
       case 'card': materializeCard(msg.panel, msg.data, msg.where); break;
       case 'brief':   // proactive brief pushed live — spoken like JARVIS unless in silent chat mode
         addAceMessage(msg.text);
@@ -689,19 +852,16 @@
      typed brain and the on-screen confirm flow — while Ace tells Brady, out loud, to
      watch his screen. Open the chat panel so he sees the work and any confirm question.
      If a turn is already in flight, wait for it rather than dropping the handoff. */
-  var _hudQueue = [];
+  /* RETIRED 2026-09-09. This ran a voice request as a typed turn: it opened the chat panel,
+     needed a connected screen, and — because of the document.hidden guard below — silently
+     dropped the request when the page was not visible. Work now runs on the server through
+     /actions and reports itself with a progress card. A stale schema that still emits
+     run_on_hud gets a card saying nothing was built, rather than a takeover. */
   function runOnHud(text) {
-    text = (text || '').trim();
-    if (!text) return;
-    if (document.hidden) return;   // only the focused HUD runs a handoff — avoids duplicate turns across open devices/tabs
-    setChat(true);
-    if (state.busy) { _hudQueue.push(text); setTimeout(drainHudQueue, 1000); return; }
-    sendMessage(text);
-  }
-  function drainHudQueue() {
-    if (!_hudQueue.length) return;
-    if (state.busy) { setTimeout(drainHudQueue, 1000); return; }
-    runOnHud(_hudQueue.shift());
+    renderTaskCard({ task_id: 'legacy-handoff', state: 'failed', title: 'Not started',
+                     error: 'That went down an old path and nothing was made. Ask once more '
+                          + 'and it will run properly in the background.', sticky: true,
+                     auto_dismiss_ms: 0 });
   }
 
   function sendMessage(text) {

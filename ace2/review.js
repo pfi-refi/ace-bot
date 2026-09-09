@@ -72,6 +72,48 @@
       }
     } catch (e) { body.replaceChildren(); text('p', e.message, body); }
   }
+  /* RECENT ACTIVITY (2026-09-09). Where a progress card's result stays reachable after the
+     card dismisses itself. Reuses this tray rather than adding a surface: approvals already
+     live here, and a task that needs approval is the same thing seen from the other side. */
+  async function activity() {
+    heading.textContent = 'Recent activity';
+    body.replaceChildren(); if (!dialog.open) dialog.showModal();
+    text('p', 'Loading…', body);
+    try {
+      const data = await api('/actions?limit=25');
+      body.replaceChildren();
+      const cards = data.cards || [];
+      if (!cards.length) {
+        text('p', 'Nothing yet. Ask Ace to build something and it will show up here.', body);
+        return;
+      }
+      text('p', 'Everything Ace has run for you, newest first. A link here is the same '
+              + 'verified link the card showed — it is only recorded once the file has been '
+              + 'read back.', body);
+      const LABEL = {queued: 'Queued', working: 'Working', needs_approval: 'Needs approval',
+                     completed: 'Done', failed: 'Did not work', cancelled: 'Cancelled'};
+      for (const c of cards) {
+        const card = document.createElement('article'); body.append(card);
+        text('small', (LABEL[c.state] || c.state)
+                    + (c.created_at ? ' · ' + new Date(c.created_at).toLocaleString() : ''), card);
+        text('h3', c.title || 'Task', card);
+        if (c.detail) text('p', c.detail, card);
+        if (c.error) text('p', c.error, card);
+        for (const w of (c.warnings || [])) text('p', w, card);
+        if (c.action && c.action.url) {
+          const a = document.createElement('a');
+          a.href = c.action.url; a.target = '_blank'; a.rel = 'noopener';
+          a.textContent = c.action.label || 'Open';
+          card.append(a);
+        }
+        if (c.state === 'needs_approval') {
+          text('p', 'Waiting on you in Review actions. It has not run.', card);
+        }
+      }
+    } catch (e) { body.replaceChildren(); text('p', e.message, body); }
+  }
+  const actBtn = document.getElementById('activity-open');
+  if (actBtn) actBtn.onclick = () => activity();
   document.getElementById('review-open').onclick = () => open('review');
   document.getElementById('draft-open').onclick = () => open('plan');
 })();

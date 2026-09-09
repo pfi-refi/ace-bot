@@ -51,7 +51,8 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from .public_assets import PublicAssets
 from pydantic import BaseModel, StrictBool
 
-from . import chat, daybank, db, history, memory_db, voice
+from . import capabilities, chat, daybank, db, history, memory_db, taskrunner, voice
+from . import tasks as task_store   # `tasks` is taken by the Google Tasks route
 from .brain import (
     google_ready,
     read_memory,
@@ -271,6 +272,18 @@ async def _prime_voice_ctx():
         except Exception as e:
             logger.warning("op sweep at startup failed: %s", type(e).__name__)
     asyncio.create_task(_bg())
+
+    # TASK EVENTS REACH EVERY TAB (2026-09-09). The runner broadcasts a card on each state
+    # change; this is the only bridge to the sockets. Registered once, and deliberately
+    # nothing more than a relay — a surface that misses an event re-reads GET /actions/{id},
+    # so a dropped socket costs a repaint, never the work.
+    async def _relay(card: dict):
+        await publish_stage_event("task", card)
+    taskrunner.subscribe(_relay)
+    try:
+        await asyncio.to_thread(task_store.ready)
+    except Exception as e:
+        logger.warning("task table not ready: %s", type(e).__name__)
 
     # SEMANTIC DEDUP (Phase 4, 2026-09-05). db keeps no model dependency; the judge is handed
     # in here. If this line is ever removed, dedup silently reverts to lexical-only — which is
@@ -682,6 +695,62 @@ async def board_mapping_preview():
                      "are separate from task status. Ids, history, dates, waiting information "
                      "and parent links are never rewritten."),
     }
+
+
+# ── VOICE-TO-ACTION: tasks live on the server, not in a panel ───────────────────
+# Every route here is addressed by task id, and none of them executes anything a surface
+# has not already accepted. A closed card, a hidden page or a dropped socket changes who is
+# watching, never whether the work runs.
+class TaskStartReq(BaseModel):
+    capability: str = ""
+    args: dict = {}
+    origin: str = "typed"
+    title: str = ""
+
+
+@app.post("/actions/start", dependencies=[Depends(require_auth)])
+async def tasks_start(req: TaskStartReq):
+    """Accept a task and start it in the background. Returns the card to show NOW —
+    queued, or the real state of an identical request already under way."""
+    card = await taskrunner.dispatch(req.capability, req.args or {},
+                                     origin=(req.origin or "typed"), title=req.title)
+    return {"ok": card.get("state") != task_store.FAILED or bool(card.get("task_id")), "card": card}
+
+
+@app.get("/actions", dependencies=[Depends(require_auth)])
+async def tasks_list(limit: int = 20, live: bool = False):
+    """Recent activity. The lightweight surface a dismissed success is retrievable from."""
+    rows = await asyncio.to_thread(task_store.recent, limit, live)
+    return {"cards": [task_store.card(t) for t in rows],
+            "live": [task_store.card(t) for t in rows if t["state"] in task_store.LIVE]}
+
+
+@app.get("/actions/{task_id}", dependencies=[Depends(require_auth)])
+async def tasks_get(task_id: str):
+    """Authoritative state for one task. This is what a reconnecting tab reads instead of
+    replaying events it may have missed."""
+    t = await asyncio.to_thread(task_store.get, task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="no such task")
+    return {"card": task_store.card(t), "task": t}
+
+
+@app.post("/actions/{task_id}/cancel", dependencies=[Depends(require_auth)])
+async def tasks_cancel(task_id: str):
+    """Cancel if it has not finished. If it HAS finished, say so — never report a
+    cancellation of something that already happened."""
+    if not await asyncio.to_thread(task_store.get, task_id):
+        raise HTTPException(status_code=404, detail="no such task")
+    card = await taskrunner.cancel(task_id, "cancelled by Brady")
+    return {"ok": not card.get("cancel_refused"), "card": card}
+
+
+@app.post("/actions/{task_id}/deny", dependencies=[Depends(require_auth)])
+async def tasks_deny(task_id: str):
+    """Brady declined an approval. A finished ending, not a retryable failure."""
+    if not await asyncio.to_thread(task_store.get, task_id):
+        raise HTTPException(status_code=404, detail="no such task")
+    return {"ok": True, "card": await taskrunner.deny(task_id, "You said no, so I did not do it.")}
 
 
 def _canon_category(raw: str) -> tuple:

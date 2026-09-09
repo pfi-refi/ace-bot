@@ -554,6 +554,10 @@ TOOLS = [
 # Slides deck, mint a shareable link — the mcp_-only surface voice doesn't carry) to the
 # on-screen assistant, which runs it as a normal typed turn with the full MCP toolset and the
 # usual confirm flow. Keeps voice fast (native-only) without ever losing heavy action.
+# SUPERSEDED 2026-09-09 by START_TASK. Kept only so an in-flight cached voice schema that
+# still names it resolves to something honest instead of an unknown tool. Do not re-add it to
+# VOICE_TOOLS: it required a connected screen, ran the work inside a chat turn, and reported
+# whatever the model said rather than what happened.
 BUILD_ON_SCREEN = {
     "name": "build_on_screen",
     "description": (
@@ -579,6 +583,57 @@ BUILD_ON_SCREEN = {
             },
         },
         "required": ["request"],
+    },
+}
+
+# VOICE-TO-ACTION (2026-09-09). Replaces build_on_screen. The work no longer needs a screen,
+# does not run inside a chat turn, and cannot be reported as done from prose: this tool hands
+# the request to shared background execution and comes back with a task id and a state. Voice
+# and typing call the same handler with the same approval rules, so "create a spreadsheet"
+# means one thing however Brady asks for it.
+START_TASK = {
+    "name": "start_task",
+    "description": (
+        "Start a longer Google Workspace task that runs in the BACKGROUND while you keep "
+        "talking. Use it when Brady asks you to CREATE a Google Spreadsheet. He does not need "
+        "a screen open and you must not tell him to watch one — a small progress card appears "
+        "wherever he is. You get back a task id and a state, which will be 'queued'. "
+        "ACKNOWLEDGE IT IN ONE SHORT SENTENCE AND SAY NOTHING ABOUT THE RESULT: it has not run "
+        "yet. Never say it is built, populated, ready or open, and never invent or read out a "
+        "link — the card carries the real link once the file has been read back and verified, "
+        "and you will be told the outcome separately. Do not use this for calendar, tasks, "
+        "email, Drive search, memory, recall or the data bank; you do those yourself."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "capability": {
+                "type": "string",
+                "enum": ["create_spreadsheet"],
+                "description": "The supported task. Only create_spreadsheet today.",
+            },
+            "title": {
+                "type": "string",
+                "description": "The document title exactly as Brady asked for it.",
+            },
+            "rows": {
+                "type": "array",
+                "description": (
+                    "The spreadsheet contents as rows of cells, header row FIRST. Include real "
+                    "content — never placeholder text. If Brady has not said what goes in it, "
+                    "ask him before calling this rather than inventing data."
+                ),
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+            "bold_header": {
+                "type": "boolean",
+                "description": (
+                    "True if he asked for header formatting. It is reported as unsupported "
+                    "rather than attempted — say so only if the card says so."
+                ),
+            },
+        },
+        "required": ["capability", "title", "rows"],
     },
 }
 

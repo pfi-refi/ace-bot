@@ -59,6 +59,73 @@ try:
                         "'open',%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s)",
                         (uuid.uuid4().hex[:6], ts,
                          text, _j.dumps(tags), due, entry, state, wait, bucket, nxt, fup, chosen))
+    # VOICE-TO-ACTION fixtures: a fake provider so the progress cards can be exercised end
+    # to end without a Google connection, plus one card of each state to photograph.
+    from ace2.backend import capabilities as _cp, tasks as _tasks, taskrunner as _tr
+    _tasks.ready()
+    _cp.EXPECTED_USER = "brady@example.com"
+    _sheet = {}
+
+    async def _fake(tool, args):
+        import asyncio as _a, json as _jj
+        await _a.sleep(0.4)          # visible "working" state
+        if tool == "mcp_create_spreadsheet":
+            return _jj.dumps({"spreadsheetId": "1DemoSheetIdAbCdEfGhIjKlMnOpQrStUvWx"})
+        if tool == "mcp_modify_sheet_values":
+            _sheet[args.get("range")] = args.get("values"); return '{"updatedCells": 9}'
+        if tool == "mcp_read_sheet_values":
+            return _jj.dumps({"values": _sheet.get(args.get("range"), [])})
+        if tool.startswith("mcp_get_drive_file"):
+            return _jj.dumps({"owners": [{"emailAddress": "brady@example.com"}]})
+        return "(no content returned)"
+
+    import ace2.backend.taskrunner as _trm
+    _trm._provider = _fake            # the demo server never reaches a real provider
+
+    from fastapi import Body          # noqa: E402
+    from ace2.backend.main import app as _app
+
+    _demo_n = [0]
+
+    @_app.post("/demo/task")
+    async def _demo_task(body: dict = Body(default={})):
+        """Fixture-only: raise one card in a chosen state so both layouts can be seen."""
+        kind = (body or {}).get("kind", "success")
+        rows = [["Assistant", "Pricing model", "Monthly"],
+                ["Northwind Helper", "flat", "$20"],
+                ["Cedar Assist", "per-request", "$0.004"]]
+        if kind == "success":
+            # A distinct title per call: an identical request correctly returns the finished
+            # task instead of building a second copy, which is the right behaviour and the
+            # wrong fixture for photographing a fresh card.
+            _demo_n[0] += 1
+            name = ("Sample Assistant Pricing (fictional)" if _demo_n[0] == 1
+                    else f"Sample Assistant Pricing (fictional) {_demo_n[0]}")
+            return {"card": await _tr.dispatch(
+                "create_spreadsheet", {"title": name, "rows": rows},
+                origin="voice", title=name, call=_fake)}
+        if kind == "failure":
+            v, t = _tasks.accept("create_spreadsheet", {"title": "Q4 figures", "rows": rows})
+            out = _tasks.failed(t["id"], "The provider refused to create it: 403 permission "
+                                         "denied. Nothing was made.")
+            await _tr._broadcast(out)
+            return {"card": _tasks.card(out)}
+        if kind == "approval":
+            v, t = _tasks.accept("create_spreadsheet",
+                                 {"title": "Share with Chris", "rows": rows})
+            out = _tasks.needs_approval(t["id"], "rev-demo",
+                                        "Sharing this outside your account needs your OK.")
+            await _tr._broadcast(out)
+            return {"card": _tasks.card(out)}
+        v, t = _tasks.accept("create_spreadsheet", {"title": "Working demo", "rows": rows})
+        out = _tasks.working(t["id"], "Writing the rows")
+        await _tr._broadcast(out)
+        return {"card": _tasks.card(out)}
+
+    # main.py mounts the frontend at "/", and a mount swallows every path registered after
+    # it — so a route added here lands behind the catch-all and 404s. Move it in front.
+    _app.router.routes.insert(0, _app.router.routes.pop())
+
     import uvicorn                                     # noqa: E402
     from ace2.backend.main import app                  # noqa: E402
     print('READY http://127.0.0.1:%d/' % PORT, flush=True)

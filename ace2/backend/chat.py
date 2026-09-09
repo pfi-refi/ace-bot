@@ -40,6 +40,7 @@ import pytz
 from anthropic import AsyncAnthropic
 
 from . import brain, daybank, history, tools
+from . import tasks as tasks_mod
 from . import ops
 from .integrations.calendar_api import (
     get_events_structured,
@@ -2986,7 +2987,13 @@ def _dup_judge(new_text: str, candidates: list) -> str:
         return ""
 
 
-VOICE_TOOLS = [t for t in tools.TOOLS if t["name"] not in _VOICE_TOOL_DENY] + [tools.BUILD_ON_SCREEN]
+# ONE HANDLER FOR BOTH MOUTHS (2026-09-09). start_task replaces build_on_screen, and the
+# TYPED loop gets it too — "create a spreadsheet" has to mean the same thing, run the same
+# code and obey the same approval rules whether Brady says it or types it. The typed path
+# keeps its MCP surface for everything else; it just stops being the only place authoring can
+# happen, and stops being where a task's truth is decided.
+VOICE_TOOLS = ([t for t in tools.TOOLS if t["name"] not in _VOICE_TOOL_DENY]
+               + [tools.START_TASK])
 # Picking which card to show is a simple call — run it on Haiku, not Opus, so the stage
 # pass adds minimal cost/latency on top of every voice turn.
 STAGE_MODEL = os.environ.get("ACE2_STAGE_MODEL", "claude-haiku-4-5-20251001")
@@ -3187,7 +3194,13 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             # NOTE: 1-hour cache TTL needs the anthropic-beta: extended-cache-ttl-2025-04-11
             # header; passing ttl without it broke every call (2026-08-03). Reverted to the
             # standard 5-min ephemeral cache — safe. Re-add 1h WITH the header, verified.
-            typed_tools = [dict(t) for t in tools.TOOLS] + list(mcp_schemas) + [dict(tools.WEB_SEARCH)]
+            # start_task on the TYPED loop too, so an equivalent request runs the same
+            # verified handler under the same rules whichever way Brady asks. The MCP sheet
+            # tools stay available for the small edits typing is good at; what changes is
+            # that creating a spreadsheet is a task with an id either way, rather than an
+            # unjournalled call whose only record was the model's own sentence about it.
+            typed_tools = ([dict(t) for t in tools.TOOLS] + [dict(tools.START_TASK)]
+                           + list(mcp_schemas) + [dict(tools.WEB_SEARCH)])
             typed_tools[-1]["cache_control"] = _cc()
             # THREE BLOCKS, TWO BREAKPOINTS (Phase 6 step 1, 2026-09-06). The cache is a
             # PREFIX over tools → system → messages, so each breakpoint extends the cached
@@ -3298,6 +3311,49 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     await emit("el_tool", {"name": block.name, "args": dict(block.input), "id": block.id})
                     passthrough_called = True
                     continue
+                if block.name == "start_task":
+                    # SHARED BACKGROUND EXECUTION. No screen required, nothing run inside
+                    # this turn, and no outcome available to narrate: the tool result says
+                    # only that the task was accepted and what state it is in. Ace is told
+                    # explicitly not to describe a result, because on 9 September he
+                    # described one that did not exist.
+                    from . import taskrunner
+                    a = dict(block.input)
+                    cap = (a.get("capability") or "").strip()
+                    rows = a.get("rows") or []
+                    if not cap:
+                        result = ("No task type came through. Ask Brady what he wants in one "
+                                  "short sentence.")
+                    elif not (a.get("title") or "").strip() or not rows:
+                        result = ("A title and the contents are both required, and I will not "
+                                  "make either up. Ask Brady for whichever is missing.")
+                    else:
+                        card = await taskrunner.dispatch(
+                            cap,
+                            {"title": a.get("title"), "rows": rows,
+                             "bold_header": bool(a.get("bold_header"))},
+                            origin=("voice" if fast else "typed"),
+                            title=(a.get("title") or "").strip()[:120])
+                        await emit("task", card)
+                        st = card.get("state")
+                        if st == tasks_mod.FAILED and not card.get("task_id"):
+                            result = ("NOT STARTED — " + (card.get("error") or "it could not "
+                                      "be accepted") + " Tell Brady plainly; do not say it is "
+                                      "being made.")
+                        elif st == tasks_mod.COMPLETED:
+                            result = ("He already asked for exactly this and it is DONE — the "
+                                      "card is on his screen with the link. Say it is already "
+                                      "made; do NOT make a second one.")
+                        else:
+                            result = (f"ACCEPTED as task {card.get('task_id','')[:8]} and now "
+                                      f"{st}. NOTHING HAS BEEN CREATED YET. In ONE short "
+                                      f"sentence tell Brady you are on it and that a card will "
+                                      f"show when it is done. Do NOT say it is built, ready or "
+                                      f"open. Do NOT give a link. Then carry on the "
+                                      f"conversation normally.")
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id,
+                                         "content": result})
+                    continue
                 if block.name == "build_on_screen":
                     # Voice can't author Docs/Sheets/Slides itself — hand the task to the HUD,
                     # which runs it as a normal typed turn with the full MCP toolset (and the
@@ -3320,12 +3376,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                                       "Brady in one short sentence to open the Ace app on a screen, "
                                       "then ask again. Do NOT say it's being built — it isn't.")
                         else:
+                            # RETIRED PATH. If a cached schema still calls this, do not hand
+                            # anything to a screen and do not claim a build — say to ask again
+                            # so the request goes through start_task and gets a real task id.
                             handed_off = True
-                            result = ("Sent to the on-screen assistant — it's building this on the "
-                                      "screen now with the full Workspace tools. In ONE short "
-                                      "sentence, tell Brady to watch his screen, and that if it "
-                                      "asks him to confirm anything, to okay it there. Don't do it "
-                                      "yourself or read the request back.")
+                            result = ("This route is retired and NOTHING was built. Ask Brady to "
+                                      "say what he wants once more so it runs as a proper "
+                                      "background task. Do NOT tell him to watch his screen and "
+                                      "do NOT say anything is being made.")
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 is_ui = block.name in tools.UI_TOOLS

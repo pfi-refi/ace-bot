@@ -1172,3 +1172,79 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   background: rgba(167,139,250,.07); }
 .cmd-rev:disabled { opacity: .5; }
 @media (max-width: 560px) { .cmd-rev { min-height: 44px; } }
+
+/* ══════════════════════════════════════════════ TASK PROGRESS CARDS (2026-09-09)
+   A voice request runs on the server; this is the window onto it. Deliberately small and
+   out of the way: a compact toast stack top-right on desktop, a compact card at the bottom
+   on a phone. It must never cover the mic, the composer, or the board's own controls —
+   which is why the phone layout sits ABOVE the input bar rather than over it. */
+#task-layer { position: fixed; z-index: 70; display: flex; flex-direction: column; gap: 8px;
+  top: 64px; right: 16px; width: min(340px, calc(100vw - 32px)); pointer-events: none; }
+#task-layer > * { pointer-events: auto; }
+
+.task-card { border-radius: 12px; padding: 10px 12px; backdrop-filter: blur(10px);
+  background: rgba(6,14,18,.92); border: 1px solid rgba(140,160,175,.24);
+  box-shadow: 0 10px 28px rgba(0,0,0,.45); color: #dce8e4;
+  font-size: 12.5px; line-height: 1.45;
+  animation: tc-in .18s ease-out; }
+.task-card.tc-out { opacity: 0; transform: translateY(-4px); transition: opacity .18s, transform .18s; }
+@keyframes tc-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .task-card { animation: none; } .task-card.tc-out { transition: none; }
+}
+
+.tc-head { display: flex; align-items: center; gap: 8px; }
+.tc-title { font-weight: 600; color: #eef7f3; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-state { font-family: var(--mono); font-size: 9px; letter-spacing: .1em;
+  text-transform: uppercase; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.tc-x { background: none; border: 0; color: #7d8f8b; cursor: pointer; font-size: 13px;
+  line-height: 1; padding: 4px; min-width: 28px; min-height: 28px; }
+.tc-x:hover { color: #eef7f3; }
+.tc-msg { margin-top: 5px; color: #a9bcb7; }
+.tc-warn { margin-top: 5px; color: #ffb020; font-size: 11.5px; }
+.tc-row { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
+.tc-go, .tc-no { font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 7px 11px; min-height: 32px; border-radius: 7px;
+  cursor: pointer; border: 1px solid transparent; text-decoration: none;
+  display: inline-flex; align-items: center; }
+.tc-go { background: #45ffa6; color: #04120b; font-weight: 700; }
+.tc-no { background: transparent; color: #8fa4a0; border-color: rgba(120,200,170,.24); }
+.tc-no:disabled { opacity: .5; }
+
+/* The state is the one thing that must read at a glance, so it carries the colour. */
+.tc-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.task-card[data-state="queued"]   .tc-dot { background: #8091a8; }
+.task-card[data-state="working"]  .tc-dot { background: #53e7ff; animation: tc-pulse 1.4s ease-in-out infinite; }
+.task-card[data-state="needs_approval"] .tc-dot { background: #ffb020; }
+.task-card[data-state="completed"] .tc-dot { background: #45ffa6; }
+.task-card[data-state="failed"]   .tc-dot { background: #ff6b6b; }
+.task-card[data-state="cancelled"] .tc-dot { background: #6f7d95; }
+@keyframes tc-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .task-card[data-state="working"] .tc-dot { animation: none; }
+}
+.task-card[data-state="queued"]   .tc-state { color: #8091a8; background: rgba(128,145,168,.12); }
+.task-card[data-state="working"]  .tc-state { color: #53e7ff; background: rgba(83,231,255,.12); }
+.task-card[data-state="needs_approval"] .tc-state { color: #ffb020; background: rgba(255,176,32,.14); }
+.task-card[data-state="completed"] .tc-state { color: #45ffa6; background: rgba(69,255,166,.14); }
+.task-card[data-state="failed"]   .tc-state { color: #ff6b6b; background: rgba(255,107,107,.14); }
+.task-card[data-state="cancelled"] .tc-state { color: #6f7d95; background: rgba(111,125,149,.12); }
+.task-card[data-state="needs_approval"], .task-card[data-state="failed"] {
+  border-color: rgba(255,176,32,.4);
+}
+
+/* PHONE: a bottom card, stacked above the composer and the mic — never over them. The
+   composer is ~86px tall with the dock below it, so the layer stops clear of both. */
+@media (max-width: 560px) {
+  /* --task-safe-bottom is measured in app.js from the real position of the dock and the
+     composer, so the card parks above them instead of over them whatever the layout does.
+     The fallback only applies before the first measurement. */
+  #task-layer { top: auto;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--task-safe-bottom, 348px));
+    left: 12px; right: 12px; width: auto; flex-direction: column-reverse; }
+  .task-card { font-size: 13.5px; padding: 12px 13px; }
+  .tc-go, .tc-no { min-height: 44px; padding: 10px 14px; }
+  .tc-x { min-width: 44px; min-height: 44px; }
+  @keyframes tc-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+}
