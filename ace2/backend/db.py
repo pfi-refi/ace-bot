@@ -724,7 +724,38 @@ _B_SIDE = _re.compile(r"\b(damon|woody|concrete|pour(?:s|ing)?|ready\s*mix|green
 
 
 def derive_bucket(text: str, cat: str) -> str:
-    return area_name(_derive_bucket_slot(text, cat))
+    """The area to SHOW for a row that has none stored. Legacy display, unchanged.
+
+    This deliberately still falls back to Personal. Changing it to Inbox looked right in
+    isolation and was wrong in practice: 28 of Brady's 63 open rows have no stored area and
+    have been sitting under Personal for weeks, so the new fallback would have relocated a
+    third of his board the moment this deployed — with no migration, no preview and no
+    approval, which is the one thing he asked not to happen. New capture lands in Inbox via
+    `derive_bucket_for_capture`; these rows move only when he says so.
+    """
+    return area_name(_derive_bucket_slot(text, cat) or "Personal")
+
+
+def derive_bucket_for_capture(text: str, cat: str) -> str:
+    """Where NEW work files itself. Unrecognised means nobody has decided yet — which is
+    what Inbox is for — rather than Personal quietly absorbing it."""
+    return area_name(_derive_bucket_slot(text, cat) or INBOX)
+
+
+def unfiled(item: dict) -> bool:
+    """True when a row's area is only a fallback: nothing stored, and nothing in the wording
+    files it either. These are the genuinely unassigned rows the Inbox proposal is about.
+
+    RECORDS ARE NOT UNFILED WORK. Run against the real board this matched 29 rows, and most
+    were the bill register and Brady's goals — things that live on a shelf, are release-two
+    surfaces, and would have been swept into Inbox as though nobody had placed them. Inbox is
+    for captured WORK nobody has filed; a record already has a home.
+    """
+    if item.get("bucket_set"):
+        return False
+    if (item.get("entry") or "") == "record":
+        return False
+    return not _derive_bucket_slot(item.get("text") or "", _item_cat(item))
 
 
 def _derive_bucket_slot(text: str, cat: str) -> str:
@@ -740,8 +771,7 @@ def _derive_bucket_slot(text: str, cat: str) -> str:
         return "Groundworks"
     if _B_SIDE.search(t):
         return "Side Work"
-    # Unrecognised no longer means Personal — it means nobody has decided yet.
-    return INBOX
+    return ""   # nothing matched; the caller decides what an unrecognised row means
 
 
 def _derive_entry(it) -> str:
@@ -1182,6 +1212,8 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
             _bkt = (bucket or "").strip() or None
             if _bkt and _bkt not in all_areas():
                 return False, f"unknown area '{bucket}'"
+            if not _bkt:
+                _bkt = derive_bucket_for_capture(text, in_cat or "")
             item["bucket"] = _bkt
             cur.execute(
                 "INSERT INTO daybank_items (id, ts, kind, text, status, tags, due, done_ts, "

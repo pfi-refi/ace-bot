@@ -40,7 +40,9 @@ try:
          'the county', 'Groundworks', None, SOON),
         ('order concrete for the pour', ['Business'], TODAY, 'action', None,
          None, 'Groundworks', None, None),
-        ('unfiled thought from the truck', ['Business'], None, 'action', None, None, '', None, None),
+        # no stored area and nothing in the wording files it: this is the one row the Inbox
+        # proposal is about, and it keeps DISPLAYING where it always has until Brady approves.
+        ('a thought with no obvious home', ['Business'], None, 'action', None, None, '', None, None),
         ('decide whether to keep the trailer', ['Business'], None, 'action', 'decide',
          None, 'Side Work', None, None),
         ('undated with no next step', ['Business'], None, 'action', None, None, 'Side Work', None, None),
@@ -203,7 +205,7 @@ try:
     assert fingerprint == after_fp, 'the preview changed live records'
 
     inbox_ids = {x['id'] for x in prev['proposed_for_inbox']}
-    assert inbox_ids == {ids['unfiled thought from the truck']}, \
+    assert inbox_ids == {ids['a thought with no obvious home']}, \
         f'only genuinely unassigned work belongs in Inbox, got {inbox_ids}'
     for text, i in ids.items():
         if i not in inbox_ids:
@@ -224,6 +226,30 @@ try:
     for pair in prev['possible_duplicates']:
         assert pair['action'] == 'review only — no merge proposed'
     assert 'reversal' in prev and 'never rewritten' in prev['reversal']
+
+    # ── 8b. DEPLOYING THIS MUST NOT RELOCATE ANYTHING ───────────────────────────
+    # 28 of Brady's 63 open rows have no stored area and have been displaying under Personal.
+    # An Inbox fallback on the READ path would have moved a third of his board the instant
+    # this shipped — no migration, no preview, no approval. New capture goes to Inbox; a
+    # legacy row keeps showing exactly where it has been showing.
+    assert db.derive_bucket('something nobody has filed', '') == 'Personal', \
+        'an existing unfiled row would move on deploy'
+    assert db.derive_bucket_for_capture('something nobody has filed', '') == 'Inbox', \
+        'new capture should land in Inbox'
+    assert db.derive_bucket('paramed exam for the annuity', 'Deals') == 'GFI/PFI', \
+        'a recognised row still files by its wording'
+    assert db.derive_bucket_for_capture('paramed exam for the annuity', 'Deals') == 'GFI/PFI'
+    cap = c.post('/daybank/add', json={'text': 'quote the fence job for the neighbour'}).json()
+    cap_row = next(x for x in cap['items'] if x['text'] == 'quote the fence job for the neighbour')
+    assert cap_row['bucket'] == 'Inbox' and cap_row['bucket_set'] is True, \
+        f'new capture must be STORED in Inbox, got {cap_row["bucket"]}/{cap_row["bucket_set"]}'
+    # ...and it is therefore not "unassigned" any more — Inbox proposals stay about legacy rows
+    prev2 = c.get('/board/mapping_preview').json()
+    assert cap_row['id'] not in {x['id'] for x in prev2['proposed_for_inbox']}, \
+        'a row already filed to Inbox should not be proposed for Inbox again'
+    for e in prev2['proposed_for_inbox']:
+        assert e.get('showing_now'), 'the preview must say where a row shows TODAY'
+    c.post('/daybank/update', json={'id': cap_row['id'], 'status': 'drop'})
 
     # ── 9. THE EXISTING GUARDS STILL HOLD UNDER THE NEW SURFACE ─────────────────
     w = ids['waiting on the county for the permit']

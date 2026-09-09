@@ -640,9 +640,9 @@ async def board_mapping_preview():
     # "Genuinely unassigned" is narrower than "no bucket column". A row with no stored area
     # whose wording still files it confidently (a permit → Groundworks) is already sitting in
     # the right place and stays there; only a row nobody and nothing has placed is proposed
-    # for Inbox. That is what keeps Inbox from becoming the mass destination Brady rejected.
-    unassigned = [i for i in live
-                  if not i.get("bucket_set") and classify.area_of(i) == db.INBOX]
+    # for Inbox. Those rows currently DISPLAY as Personal by fallback and keep doing so until
+    # Brady approves this — the preview proposes the move, it does not perform it.
+    unassigned = [i for i in live if db.unfiled(i)]
     carried = [i for i in live if classify.carried_over(i)]
 
     # similar-looking pairs, reported ONLY — never merged, and never across different
@@ -666,7 +666,8 @@ async def board_mapping_preview():
         "open_items": len(live),
         "staying_in_place": {k: v for k, v in sorted(by_area.items(), key=lambda x: -x[1])},
         "proposed_for_inbox": [{"id": i["id"], "text": (i.get("text") or "")[:110],
-                                "why": "no area stored on the row"} for i in unassigned],
+                                "why": "no area stored, and nothing in the wording files it",
+                                "showing_now": classify.area_of(i)} for i in unassigned],
         "carried_over_decisions": [
             {"id": i["id"], "text": (i.get("text") or "")[:110],
              "now": "Needs a decision (derived)",
