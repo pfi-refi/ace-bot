@@ -71,20 +71,38 @@ async def _execute(task_id: str, call=None) -> dict:
         out = await asyncio.to_thread(tasks.checkpoint, task_id, patch)
         return bool(out)
 
+    # WHICH TOOLS ACTUALLY RAN (2026-09-10, Codex). The connector inventory inferred "tested"
+    # from a capability completing, so ONE finished spreadsheet marked every Google read tool
+    # on the connector as tested — Gmail, Calendar, Drive, Docs, none of which had been
+    # touched. The inventory exists precisely to stop that kind of claim, so it cannot be the
+    # thing making it. Receipts are recorded per tool instead: a name lands here only when
+    # that tool was called and answered without an error.
+    used = {}
+
+    async def recording_call(name, arguments):
+        out = await (call or _provider)(name, arguments)
+        if not capabilities._looks_like_error(out):
+            used[name] = datetime.now(timezone.utc).isoformat()
+        return out
+
     async def should_stop():
         # Read fresh each time: the request arrives from another request handler while this
         # coroutine is mid-flight, so a cached value would miss it.
         return await asyncio.to_thread(tasks.is_cancel_requested, task_id)
 
     try:
-        result = await spec["handler"](t.get("args") or {}, call or _provider, progress,
+        result = await spec["handler"](t.get("args") or {}, recording_call, progress,
                                        t.get("result") or {}, checkpoint, should_stop)
     except capabilities.Cancelled as e:
+        if used:
+            await asyncio.to_thread(tasks.checkpoint, task_id, {"tools_used": used})
         # Stopped at a boundary, carrying what already happened. Settled here — with the
         # receipt — rather than by the cancel request, which is why "cancelled" can no longer
         # be displayed while a file quietly exists.
         return tasks.cancelled_with_receipt(task_id, e.result, e.message)
     except capabilities.Failed as e:
+        if used:
+            await asyncio.to_thread(tasks.checkpoint, task_id, {"tools_used": used})
         # A named, explainable failure. Any partial artefact rides along so Brady is told
         # what DOES exist rather than left to guess.
         return tasks.failed(task_id, e.message, e.result)
@@ -99,6 +117,8 @@ async def _execute(task_id: str, call=None) -> dict:
     detail = ""
     if result.get("warnings"):
         detail = result["warnings"][0]
+    if used:
+        result = {**result, "tools_used": used}
     return tasks.completed(task_id, result, detail)
 
 

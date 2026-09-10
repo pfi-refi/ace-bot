@@ -708,18 +708,17 @@ async def connectors_inventory(probe: bool = False):
     from . import connectors as cn
     from .integrations import mcp_client
 
-    # TESTED comes from real verified runs, not from a claim in a table: a capability that
-    # has completed here marks the tools its connector uses.
+    # TESTED MEANS THIS EXACT TOOL ANSWERED (2026-09-10, Codex). This used to mark every READ
+    # tool on a connector the moment any capability completed, so one finished spreadsheet
+    # made Gmail, Calendar, Drive and Docs reads all look exercised when none had been called.
+    # An inventory built to stop unearned claims must not make one. Only tools the runner
+    # recorded a successful call against count, with the time of that call.
     tested = {}
     try:
         for t in await asyncio.to_thread(task_store.recent, 100):
-            if t["state"] != task_store.COMPLETED:
-                continue
-            spec = capabilities.REGISTRY.get(t["capability"]) or {}
-            conn = cn.get(spec.get("connector") or "")
-            for tool, a in (conn.get("actions") or {}).items():
-                if a.get("via_capability") == t["capability"] or a.get("kind") == cn.READ:
-                    tested.setdefault(tool, t.get("settled_at") or t.get("created_at"))
+            for tool, when in ((t.get("result") or {}).get("tools_used") or {}).items():
+                if when > tested.get(tool, ""):
+                    tested[tool] = when
     except Exception as e:
         logger.warning("connector inventory: tested lookup failed: %s", type(e).__name__)
 

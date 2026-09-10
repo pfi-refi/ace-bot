@@ -213,7 +213,8 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
 
       configured — the settings this connector needs are present
       reachable  — it answered a read within its timeout, and when
-      tested     — a real action of that kind has completed WITH VERIFICATION here
+      tested     — THIS EXACT TOOL was called here and answered without an error. Never
+                   inferred from a sibling tool or from a capability completing.
 
     Contains no secrets. Environment variables appear by NAME with a set/not-set flag; their
     values are never read into the response.
@@ -267,6 +268,7 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
             },
         })
     return {"connectors": out,
-            "note": ("Configured means the settings are present. Reachable means it answered. "
-                     "Tested means an action of that kind has actually completed here with "
-                     "its result verified — a green connection is not a working action.")}
+            "note": ("Configured means the settings are present. Reachable means the connector "
+                     "answered. Tested means THIS tool was called here and answered — it is "
+                     "never inferred from another tool or from a task completing, so an "
+                     "untested row means nobody has actually tried it.")}

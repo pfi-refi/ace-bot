@@ -570,7 +570,23 @@ class TheInventoryTellsTheTruthAndKeepsSecrets(unittest.TestCase):
         self.assertTrue(created["tested"])
         untested = next(a for a in g["actions"] if a["tool"] == "mcp_send_gmail_message")
         self.assertFalse(untested["tested"], 'an untried action must not read as tested')
-        self.assertIn("green connection is not a working action", self.inv["note"])
+        self.assertIn("never inferred from another tool", self.inv["note"])
+
+    def test_one_finished_task_does_not_mark_unrelated_tools_tested(self):
+        """Codex, 2026-09-10: a single completed spreadsheet marked every Google READ tool as
+        tested — Gmail, Calendar, Drive, Docs — none of which had been called. An inventory
+        built to stop unearned claims must not make one."""
+        only_sheets = self.cn.inventory(
+            tested={"mcp_create_spreadsheet": "2026-09-09T10:00:00-04:00"})
+        g = next(c for c in only_sheets["connectors"] if c["name"] == "google_workspace")
+        by_tool = {a["tool"]: a["tested"] for a in g["actions"]}
+        self.assertTrue(by_tool["mcp_create_spreadsheet"])
+        for untouched in ("mcp_search_gmail_messages", "mcp_get_events",
+                          "mcp_search_drive_files", "mcp_get_doc_content",
+                          "mcp_read_sheet_values"):
+            self.assertFalse(by_tool[untouched],
+                             f"{untouched} was never called but reads as tested")
+        self.assertEqual(g["counts"]["tested"], 1)
 
     def test_no_credential_value_is_ever_returned(self):
         import json
@@ -804,3 +820,34 @@ class AgainstTheRealProviderContract(unittest.TestCase):
     def test_parsing_never_executes_anything(self):
         # ast.literal_eval cannot call. If this ever regressed to eval, this would raise.
         self.assertEqual(cp._cells("Row  1: [__import__('os').system('true')]"), [])
+
+
+class TestedComesFromRealReceipts(unittest.TestCase):
+    """The runner records which tools actually answered, so the inventory reports evidence
+    rather than inference (Codex, 2026-09-10)."""
+
+    def test_a_run_records_every_tool_that_answered(self):
+        f = LiveReplay()
+        out = run(cp.create_spreadsheet({"title": "T", "rows": LIVE_ROWS}, f))
+        self.assertTrue(out["url"])
+        called = {t for t, _ in f.calls}
+        self.assertIn("mcp_create_spreadsheet", called)
+        self.assertIn("mcp_read_sheet_values", called)
+        # ...and tools it never touched are simply absent
+        self.assertNotIn("mcp_search_gmail_messages", called)
+        self.assertNotIn("mcp_get_events", called)
+
+    def test_the_runner_wraps_the_provider_to_record_them(self):
+        from backend import taskrunner
+        src = Path(taskrunner.__file__).read_text()
+        self.assertIn("recording_call", src)
+        self.assertIn("tools_used", src)
+        # a tool that ERRORED must not be recorded as working
+        self.assertIn("if not capabilities._looks_like_error(out)", src)
+
+    def test_receipts_survive_a_failure(self):
+        # A create that answered, then a write that failed: the create still happened.
+        from backend import taskrunner
+        src = Path(taskrunner.__file__).read_text()
+        self.assertIn('except capabilities.Failed as e:\n        if used:', src)
+        self.assertIn('except capabilities.Cancelled as e:\n        if used:', src)
