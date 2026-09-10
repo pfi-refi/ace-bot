@@ -173,3 +173,47 @@ class VoiceContextBudget(unittest.TestCase):
 
     def test_default_per_turn_cap_is_unchanged_for_other_callers(self):
         self.assertIn('per_turn: int = 280', (ROOT / 'ace2' / 'backend' / 'chat.py').read_text())
+
+
+class AnInterruptedVoiceTurnLeavesAnHonestRecord(unittest.TestCase):
+    """10 September, on the iPad: Brady talked for a minute, finished with "take those down
+    first", and Ace went silent. The writes DID land — a record updated, an item captured —
+    but no assistant turn was ever saved, so the next turn read his statement with no reply
+    beneath it and no idea any of it had been done."""
+
+    SRC = Path(chat.__file__).read_text()
+
+    def _cancel_block(self):
+        """The CancelledError handler in stream_turn — the LAST one in the file.
+        _dispatch_write has its own, and asserting against that one would pass for the
+        wrong reason."""
+        return self.SRC.rsplit("except asyncio.CancelledError:", 1)[1]
+
+    def test_completed_writes_reach_history_when_the_turn_is_cancelled(self):
+        seg = self._cancel_block()
+        self.assertIn("INTERRUPTED", seg)
+        self.assertIn('history.append', seg,
+                      'an interrupted turn must leave a record, not only a planning draft')
+
+    def test_the_record_is_shielded_so_the_cancel_cannot_eat_it(self):
+        seg = self._cancel_block()
+        self.assertIn("asyncio.shield(asyncio.to_thread(history.append", seg)
+
+    def test_failed_writes_are_not_reported_as_done(self):
+        seg = self._cancel_block()
+        # ⚠-prefixed tool results are refusals/failures and must be excluded.
+        self.assertIn('startswith("\\u26a0")', seg)
+
+    def test_it_is_never_presented_as_a_finished_answer(self):
+        seg = self._cancel_block()
+        self.assertIn("cut off before I answered", seg)
+
+    def test_a_working_turn_is_given_time_to_finish_before_cancelling(self):
+        from backend import main
+        # Two seconds killed a turn mid tool-loop. The audio is already delivered by then,
+        # so waiting costs no latency — it only decides how much gets recorded.
+        self.assertGreaterEqual(main._TURN_FINISH_GRACE, 15)
+
+    def test_the_user_half_is_still_saved_up_front(self):
+        # Unchanged, and the reason Brady's words survived this failure at all.
+        self.assertIn("_persist_user", self.SRC)

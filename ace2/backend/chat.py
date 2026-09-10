@@ -3533,6 +3533,29 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 await asyncio.shield(asyncio.to_thread(planning.capture, "assistant", "INTERRUPTED DRAFT — not confirmed complete.\n" + partial))
             except Exception:
                 logger.warning("interrupted draft could not be saved")
+        # WHAT HE ACTUALLY DID, BEFORE THE LINE DROPPED (2026-09-10).
+        #
+        # Brady talked for a minute on his iPad, finished with "take those down first", and
+        # Ace went silent. The writes DID happen — a record updated at 15:33:49, an item
+        # captured at 15:39:06 — because _dispatch_write shields them and they settle on
+        # their own. But this handler only ever saved the partial prose to the planning
+        # notebook, so NOTHING reached the conversation history: no assistant turn at all.
+        #
+        # The next turn therefore reads his long statement with no reply beneath it and no
+        # idea any of it was done. That is how you get a duplicate capture, or Ace claiming
+        # he never heard something he acted on. The receipts exist — they are right here in
+        # `confirmations` — so an interrupted turn now leaves an honest record of what
+        # completed, marked as interrupted so nothing reads as a finished answer.
+        try:
+            done = [c for c in (confirmations if "confirmations" in locals() else [])
+                    if c and not str(c).lstrip().startswith("\u26a0")]
+            if done:
+                note = ("\u26a0 INTERRUPTED — the call cut off before I answered, but these "
+                        "did go through:\n" + "\n".join(f"  \u2022 {str(c)[:180]}"
+                                                       for c in done[:8]))
+                await asyncio.shield(asyncio.to_thread(history.append, "assistant", note))
+        except Exception:
+            logger.warning("interrupted-turn receipts could not be saved")
         raise
     except Exception as e:
         logger.error("stream_turn error: %s", e)

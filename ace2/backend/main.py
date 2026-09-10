@@ -231,6 +231,10 @@ _SPOKEN_STATUS = {
 # The single in-flight live-voice turn (one user, one call): a new /v1/chat/completions
 # request cancels the previous turn's task so a retry/barge-in can't double-execute tools.
 _active_voice_task = {"task": None}
+# How long a finished stream waits for its turn to stop working before cancelling it. The
+# audio is already out, so this is not latency Brady feels — it is only how much of what he
+# asked for gets recorded properly.
+_TURN_FINISH_GRACE = float(os.environ.get("ACE2_TURN_FINISH_GRACE", "25"))
 
 
 async def publish_stage_event(event_type: str, payload: dict) -> int:
@@ -2222,10 +2226,22 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
             # Give the turn a short grace to finish persisting to history (a bail/hang path
             # may leave it a beat behind the stream) — a blind cancel left holes in the
             # RECENT THREAD that read as Ace "forgetting" the exchange.
+            # A TURN THAT IS STILL WORKING IS NOT A TURN TO KILL (2026-09-10).
+            #
+            # Two seconds is fine for a turn that only talks, and far too short for one Brady
+            # ended with "take those down first": several captures is several tool calls, and
+            # this cancelled mid-loop. The writes survived — _dispatch_write shields them —
+            # so the cancel never prevented anything, it only threw away the bookkeeping and
+            # left Ace with no memory of what he had just done.
+            #
+            # The audio is already delivered by this point, so waiting costs Brady nothing.
+            # The cap is a backstop against a genuinely hung turn, not a deadline.
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                await asyncio.wait_for(asyncio.shield(task), timeout=_TURN_FINISH_GRACE)
             except BaseException:
-                pass
+                logger.warning("voice turn still running after %ss — cancelling; its writes "
+                               "settle independently and are recorded as interrupted",
+                               _TURN_FINISH_GRACE)
         finally:
             task.cancel()
 
