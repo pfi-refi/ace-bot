@@ -214,7 +214,8 @@ def result_check(kind: str) -> str:
 
 
 # ── INVENTORY ──────────────────────────────────────────────────────────────────
-def inventory(reachable: dict = None, tested: dict = None, identity: dict = None) -> dict:
+def inventory(reachable: dict = None, tested: dict = None, identity: dict = None,
+              published: dict = None) -> dict:
     """What Ace is connected to, as three SEPARATE claims.
 
     Configured, reachable and tested are not the same thing, and collapsing them is how a
@@ -230,14 +231,25 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
     values are never read into the response.
     """
     reachable, tested, identity = reachable or {}, tested or {}, identity or {}
+    published = published or {}
     out = []
     for name, c in CONNECTORS.items():
+        pub = published.get(name)          # None = not checked this request
         acts = []
         for tool, a in (c.get("actions") or {}).items():
+            published_set = pub
             acts.append({
                 "tool": tool,
                 "kind": a.get("kind"),
-                "enabled": a.get("approval") != NEVER,
+                # FOUR DIFFERENT CLAIMS, NOT ONE (Codex, 2026-09-10). "13 reads live" counted
+            # REGISTRY ENTRIES — what Ace is permitted to call — which is not the same as
+            # what the connector publishes, nor what has ever been called, nor what returned
+            # something we actually checked. The live inventory had
+            # mcp_get_drive_file_metadata registered and NOT published, which is exactly the
+            # gap that wording hid.
+            "allowed": a.get("approval") != NEVER,
+            "published": (None if published_set is None else (tool in published_set)),
+            "enabled": a.get("approval") != NEVER,
                 "approval": a.get("approval"),
                 "approval_when": a.get("approval_when", ""),
                 "via_capability": a.get("via_capability", ""),
@@ -268,7 +280,10 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
             "cost_note": c.get("cost_note"),
             "actions": acts,
             "counts": {
+                "allowed_read": sum(1 for a in acts if a["kind"] == READ and a["enabled"]),
                 "read": sum(1 for a in acts if a["kind"] == READ and a["enabled"]),
+                "registered_but_not_published": sum(
+                    1 for a in acts if a["published"] is False),
                 "write": sum(1 for a in acts
                              if a["kind"] in (CREATE, EDIT, SEND, DELETE, SHARE)
                              and a["enabled"]),
@@ -279,6 +294,8 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
         })
     return {"connectors": out,
             "note": ("Configured means the settings are present. Reachable means the connector "
-                     "answered. Tested means THIS tool was called here and answered — it is "
-                     "never inferred from another tool or from a task completing, so an "
-                     "untested row means nobody has actually tried it.")}
+                     "answered. Published means the connector actually offers the tool. "
+                     "Allowed means Ace is permitted to call it — that is a REGISTRY fact, "
+                     "not proof it exists or works. Tested means THIS tool was called here "
+                     "and answered, never inferred from another tool; and answering is "
+                     "weaker evidence than an artefact we read back and compared.")}

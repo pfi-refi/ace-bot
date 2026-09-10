@@ -726,7 +726,7 @@ async def connectors_inventory(probe: bool = False):
     except Exception as e:
         logger.warning("connector inventory: tested lookup failed: %s", type(e).__name__)
 
-    reachable, identity = {}, {}
+    reachable, identity, published = {}, {}, {}
     if probe:
         try:
             reachable["google_workspace"] = bool(mcp_client.enabled()
@@ -734,8 +734,16 @@ async def connectors_inventory(probe: bool = False):
         except Exception:
             reachable["google_workspace"] = False
         reachable["web_research"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        # What the connector ACTUALLY publishes, so a registry entry the provider does not
+        # offer shows up as a gap rather than as an available action.
+        try:
+            published["google_workspace"] = {t["name"] for t in
+                                             await mcp_client.tool_schemas()}
+        except Exception:
+            pass
     identity["google_workspace"] = capabilities.EXPECTED_USER or ""
-    return cn.inventory(reachable=reachable, tested=tested, identity=identity)
+    return cn.inventory(reachable=reachable, tested=tested, identity=identity,
+                        published=published)
 
 
 # ── MCP PROBE: settle the two unknowns without spending a model call ────────────

@@ -3100,6 +3100,56 @@ async def _dispatch_write(name: str, args: dict) -> str:
         raise
 
 
+# ── WHAT A TOOL RESULT ACTUALLY MEANS ──────────────────────────────────────────
+# Sniffing prose for a warning glyph is not classification. The MCP branch answers a refusal
+# with "NOT AVAILABLE — …" and a redirect with "USE start_task INSTEAD…", neither of which
+# starts with the glyph — so both survived the filter and were listed to Brady under "these
+# did go through". A handler whose entire job is honesty was manufacturing completion claims.
+# (Codex, 2026-09-10.)
+OP_DONE, OP_FAILED, OP_QUEUED, OP_READ = "done", "failed", "queued", "read"
+
+# Exact openings this codebase uses to mean "this did not happen". Matched at the start, so a
+# result that merely mentions one of these words in passing is not misread as a refusal.
+_REFUSAL_OPENINGS = (
+    "\u26a0", "NOT AVAILABLE", "USE start_task INSTEAD", "NOT COMPLETED", "STOP:",
+    "NOT STARTED", "Review storage unavailable", "Already done moments ago",
+    "No task text came through", "Already sent that to the screen",
+)
+
+
+def classify_result(name: str, text: str, is_read: bool = False) -> str:
+    """What one tool call actually achieved, from the SHAPE of the codebase's own answers."""
+    t = (text or "").strip()
+    if not t:
+        return OP_FAILED
+    if any(t.startswith(x) for x in _REFUSAL_OPENINGS):
+        return OP_FAILED
+    if name == "start_task":
+        # A dispatched task is accepted work, NOT finished work — the whole point of the
+        # task system. It must never be reported as something that went through.
+        return OP_QUEUED
+    return OP_READ if is_read else OP_DONE
+
+
+def interrupted_note(ops: list) -> str:
+    """The history line an interrupted turn leaves behind, or '' if there is nothing true
+    to say. Separated out so it can be tested on real tool output rather than by reading
+    the source."""
+    done = [o for o in (ops or []) if o.get("state") == OP_DONE]
+    queued = [o for o in (ops or []) if o.get("state") == OP_QUEUED]
+    if not done and not queued:
+        return ""
+    lines = ["\u26a0 INTERRUPTED — the call cut off before I answered."]
+    if done:
+        lines.append("These DID go through:")
+        lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in done[:8]]
+    if queued:
+        lines.append("Started and still running (NOT finished):")
+        lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in queued[:4]]
+    lines.append("Anything else he asked for was not done — check before saying otherwise.")
+    return "\n".join(lines)
+
+
 async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
@@ -3160,6 +3210,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
 
     full_reply = []
     confirmations = []
+    turn_ops = []          # structured per-tool outcomes, for an honest interrupted record
     handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
     blocked_counts: dict = {}   # per-tool confirm-gate blocks THIS turn (2nd+ gets the STOP message)
     passthrough = {t["name"] for t in (extra_tools or [])}
@@ -3479,6 +3530,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 if not is_ui:
                     await emit("confirmation", {"text": result})
                     confirmations.append(result)
+                # Classified HERE, where the tool and its answer are both in hand — not
+                # re-derived from prose later.
+                _is_read = connectors.action(
+                    connectors.connector_of(block.name), block.name).get("kind") == "read"
+                turn_ops.append({"tool": block.name, "text": result,
+                                 "state": classify_result(block.name, result, _is_read)})
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -3547,12 +3604,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         # `confirmations` — so an interrupted turn now leaves an honest record of what
         # completed, marked as interrupted so nothing reads as a finished answer.
         try:
-            done = [c for c in (confirmations if "confirmations" in locals() else [])
-                    if c and not str(c).lstrip().startswith("\u26a0")]
-            if done:
-                note = ("\u26a0 INTERRUPTED — the call cut off before I answered, but these "
-                        "did go through:\n" + "\n".join(f"  \u2022 {str(c)[:180]}"
-                                                       for c in done[:8]))
+            note = interrupted_note(turn_ops if "turn_ops" in locals() else [])
+            if note:
                 await asyncio.shield(asyncio.to_thread(history.append, "assistant", note))
         except Exception:
             logger.warning("interrupted-turn receipts could not be saved")

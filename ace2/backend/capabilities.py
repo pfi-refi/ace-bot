@@ -435,13 +435,18 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
                      {**receipt, "partial": True, "mismatches": mismatches[:20]})
 
     warnings = []
+    # NEVER NAME A PLACE WE DID NOT CONFIRM (Codex, 2026-09-10). A failed lookup used to
+    # fall through to "the root of My Drive" — inventing a location, next to a warning saying
+    # the location was unknown. Root is only ever claimed when no folder was asked for.
     placed_in = ""
     if folder_id:
         if await _in_folder(file_id, folder_id, call):
             placed_in = folder_name or args.get("folder") or folder_id
         else:
-            warnings.append("I asked for this to go in that folder but Drive does not list it "
-                            "there, so check where it landed before relying on the location.")
+            placed_in = "not confirmed"
+            warnings.append(f"I asked for this to go in {folder_name or 'that folder'} but "
+                            f"Drive does not list it there, so I do not know where it "
+                            f"ended up. Open the link to see.")
     if formulas:
         warnings.append("Formulas were sent as text and the provider returns their computed "
                         "value, so " + ", ".join(formulas[:4]) + " could not be checked.")
@@ -480,7 +485,9 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
         "link_kind": "owner-access URL — no sharing permission was created or changed",
         # Said out loud: without a folder this connector can only put things in the root of
         # My Drive, and Brady should not have to go hunting for what Ace just made.
-        "placed_in": placed_in or "the root of My Drive",
+        # Root is a CLAIM, so it is only made when nothing else was asked for.
+        "placed_in": placed_in or ("the root of My Drive" if not folder_id else "not confirmed"),
+        "requested_folder": args.get("folder") or "",
         "warnings": warnings,
     }
 
@@ -493,7 +500,7 @@ async def _find_created(title: str, marker: str, call) -> dict:
     as a candidate for him to resolve, never as a confirmed id.
     """
     try:
-        out = await call("mcp_search_drive_files", {"query": f"name = '{title}'"})
+        out = await call("mcp_search_drive_files", {"query": f"name = '{q(title)}'"})
     except Exception:
         return {}
     if not out or _looks_like_error(out):
@@ -568,7 +575,7 @@ async def _owner_of(file_id: str, call, title_hint: str = "") -> tuple:
     # record, and labelled as what it is rather than promoted to "you own it".
     try:
         found = await call("mcp_search_drive_files",
-                           {"query": f"trashed = false and name = '{title_hint}'"}) \
+                           {"query": f"trashed = false and name = '{q(title_hint)}'"}) \
             if title_hint else ""
     except Exception:
         found = ""
@@ -916,8 +923,10 @@ async def create_doc(args: dict, call, progress=None, known=None,
         if await _in_folder(file_id, _folder_id, call):
             placed_in = args.get("folder") or _folder_id
         else:
-            warnings.append("I asked for this to go in that folder but Drive does not list it "
-                            "there, so check where it landed.")
+            placed_in = "not confirmed"
+            warnings.append(f"I asked for this to go in {args.get('folder') or 'that folder'} "
+                            f"but Drive does not list it there, so I do not know where it "
+                            f"ended up. Open the link to see.")
     owner, access, how = await _owner_of(file_id, call, title)
     if access == "no_access":
         raise Failed(f"the document exists and is correct, but {how}, so the link will not "
@@ -929,7 +938,9 @@ async def create_doc(args: dict, call, progress=None, known=None,
         warnings.append("Headings, bold and layout are not something this connection can "
                         "apply — the text is all in, the formatting is not.")
     return {**receipt, "action_label": "Open document", "title": title,
-            "placed_in": placed_in or "the root of My Drive",
+            "placed_in": placed_in or ("the root of My Drive" if not _folder_id
+                                       else "not confirmed"),
+            "requested_folder": args.get("folder") or "",
             "blocks_written": len(blocks), "blocks_verified": len(blocks),
             "owner": owner or "", "access": access, "access_evidence": how,
             "link_kind": "owner-access URL — no sharing permission was created or changed",
@@ -950,6 +961,33 @@ async def create_folder(args: dict, call, progress=None, known=None,
             raise Failed("I could not record what I was about to do, so I did not do it.")
 
     file_id = str(known.get("file_id") or "").strip()
+    # THE SAME GUARD THE OTHER TWO HAVE (Codex, 2026-09-10). This handler was missing it, so a
+    # create whose response was lost would be dispatched a SECOND time on the next attempt.
+    # A folder is cheap to duplicate and confusing to find twice, and "it probably never
+    # reached the provider" is exactly the assumption that has been wrong every other time.
+    if not file_id and str(known.get("create_state") or "") == "unknown":
+        if progress:
+            await progress("Checking whether the earlier attempt already made it")
+        found = await call("mcp_search_drive_files",
+                           {"query": "mimeType = 'application/vnd.google-apps.folder' "
+                                     f"and trashed = false and name = '{q(name)}'"})
+        ids = []
+        if found and not _looks_like_error(found):
+            for m in re.finditer(r"ID:\s*([A-Za-z0-9_-]{25,80})", str(found)):
+                if m.group(1) not in ids:
+                    ids.append(m.group(1))
+        if len(ids) == 1:
+            file_id = ids[0]
+            await mark({"file_id": file_id, "create_state": "confirmed",
+                        "reconciled": "found the folder the lost attempt made"})
+        else:
+            raise Failed(
+                f"An earlier attempt to make '{name}' never came back, and I cannot tell "
+                + (f"which of the {len(ids)} folders with that name it made"
+                   if ids else "whether it was made at all")
+                + ". I have NOT made another one. Look in Drive and tell me which way to go.",
+                {"create_state": "unknown", "candidates": ids[:5]})
+
     if not file_id:
         if should_stop and await should_stop():
             raise Cancelled("Stopped before anything was created.", {})
@@ -979,7 +1017,7 @@ async def create_folder(args: dict, call, progress=None, known=None,
     if progress:
         await progress("Checking it is really there")
     found = await call("mcp_search_drive_files",
-                       {"query": f"trashed = false and name = '{name}'"})
+                       {"query": f"trashed = false and name = '{q(name)}'"})
     if _looks_like_error(found) or file_id not in str(found):
         raise Failed("the folder was created but does not come back in a Drive search, so it "
                      "is not verified", {"file_id": file_id, "partial": True})
@@ -1017,6 +1055,16 @@ REGISTRY["create_folder"] = {
 # that way instead. Same verification either way: a real id, the artefact re-read, and the
 # link built from the id — plus a check that it really landed in the folder asked for.
 
+def q(value: str) -> str:
+    """Escape a value for a Drive query string.
+
+    Drive queries are single-quoted, so a name like "Brady's Projects" closed the literal
+    early and produced a malformed query — which fails, or worse, matches something else.
+    Backslash first so an escaped backslash is not un-escaped by the quote pass.
+    """
+    return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
 async def resolve_folder(folder: str, call) -> tuple:
     """(folder_id, human_name). Resolves a name to exactly one folder, or refuses.
 
@@ -1031,7 +1079,7 @@ async def resolve_folder(folder: str, call) -> tuple:
         return f, f            # already an id
     out = await call("mcp_search_drive_files",
                      {"query": "mimeType = 'application/vnd.google-apps.folder' "
-                               f"and trashed = false and name = '{f}'"})
+                               f"and trashed = false and name = '{q(f)}'"})
     if _looks_like_error(out):
         raise Failed(f"I could not look up a folder called '{f}', so I did not create "
                      f"anything: {str(out)[:140]}")

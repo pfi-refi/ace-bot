@@ -176,44 +176,76 @@ class VoiceContextBudget(unittest.TestCase):
 
 
 class AnInterruptedVoiceTurnLeavesAnHonestRecord(unittest.TestCase):
-    """10 September, on the iPad: Brady talked for a minute, finished with "take those down
-    first", and Ace went silent. The writes DID land — a record updated, an item captured —
-    but no assistant turn was ever saved, so the next turn read his statement with no reply
-    beneath it and no idea any of it had been done."""
+    """10 September: Brady talked for a minute, finished with "take those down first", and Ace
+    went silent. The writes landed but no assistant turn was ever saved.
 
-    SRC = Path(chat.__file__).read_text()
+    These EXECUTE the classifier and the note builder on the codebase's real tool output.
+    The previous versions grepped the source, which passed while the filter was letting
+    refusals through as completions (Codex, 2026-09-10)."""
 
-    def _cancel_block(self):
-        """The CancelledError handler in stream_turn — the LAST one in the file.
-        _dispatch_write has its own, and asserting against that one would pass for the
-        wrong reason."""
-        return self.SRC.rsplit("except asyncio.CancelledError:", 1)[1]
+    CAPTURED = "\u25c6 Captured: Pick up prescription"
+    NOT_AVAIL = ("NOT AVAILABLE — mcp_create_doc is deliberately not enabled. Nothing ran. "
+                 "Tell Brady plainly and do not describe this as done.")
+    REDIRECT = ("USE start_task INSTEAD. mcp_create_spreadsheet creates something without "
+                "checking it afterwards. NOTHING HAS BEEN CREATED by this call.")
+    BLOCKED = ("NOT COMPLETED — that row is waiting on the county; do not tell him it is done.")
+    GLYPH = "\u26a0\ufe0f MCP create_spreadsheet reported an error: quota exceeded"
+    QUEUED = "ACCEPTED as task ab12cd34 and now queued. NOTHING HAS BEEN CREATED YET."
 
-    def test_completed_writes_reach_history_when_the_turn_is_cancelled(self):
-        seg = self._cancel_block()
-        self.assertIn("INTERRUPTED", seg)
-        self.assertIn('history.append', seg,
-                      'an interrupted turn must leave a record, not only a planning draft')
+    def ops(self, *pairs):
+        return [{"tool": t, "text": x, "state": chat.classify_result(t, x)} for t, x in pairs]
 
-    def test_the_record_is_shielded_so_the_cancel_cannot_eat_it(self):
-        seg = self._cancel_block()
+    def test_a_real_completion_is_reported(self):
+        note = chat.interrupted_note(self.ops(("capture_item", self.CAPTURED)))
+        self.assertIn("DID go through", note)
+        self.assertIn("Pick up prescription", note)
+
+    def test_a_refusal_is_never_reported_as_done(self):
+        for text in (self.NOT_AVAIL, self.REDIRECT, self.BLOCKED, self.GLYPH):
+            note = chat.interrupted_note(self.ops(("mcp_create_doc", text)))
+            self.assertEqual(note, "", f"a refusal was written to history: {text[:40]}")
+
+    def test_a_refusal_beside_a_success_does_not_ride_along(self):
+        note = chat.interrupted_note(self.ops(
+            ("capture_item", self.CAPTURED), ("mcp_create_doc", self.NOT_AVAIL),
+            ("mcp_create_spreadsheet", self.REDIRECT)))
+        self.assertIn("Pick up prescription", note)
+        self.assertNotIn("NOT AVAILABLE", note)
+        self.assertNotIn("USE start_task", note)
+
+    def test_a_dispatched_task_is_running_not_finished(self):
+        note = chat.interrupted_note(self.ops(("start_task", self.QUEUED)))
+        self.assertIn("still running", note)
+        self.assertNotIn("DID go through", note)
+
+    def test_nothing_done_means_nothing_written(self):
+        self.assertEqual(chat.interrupted_note([]), "")
+        self.assertEqual(chat.interrupted_note(self.ops(("send_email", self.GLYPH))), "")
+
+    def test_it_warns_that_the_rest_was_not_done(self):
+        note = chat.interrupted_note(self.ops(("capture_item", self.CAPTURED)))
+        self.assertIn("was not done", note)
+
+    def test_a_read_is_not_a_completed_mutation(self):
+        self.assertEqual(
+            chat.classify_result("mcp_read_sheet_values", "Row  1: ['a']", is_read=True),
+            chat.OP_READ)
+        note = chat.interrupted_note([{"tool": "mcp_read_sheet_values", "text": "rows",
+                                       "state": chat.OP_READ}])
+        self.assertEqual(note, "", 'a read is not something that "went through"')
+
+    def test_an_empty_result_is_a_failure_not_a_success(self):
+        self.assertEqual(chat.classify_result("capture_item", ""), chat.OP_FAILED)
+
+    def test_the_handler_uses_the_builder_and_shields_it(self):
+        src = Path(chat.__file__).read_text()
+        seg = src.rsplit("except asyncio.CancelledError:", 1)[1]
+        self.assertIn("interrupted_note(", seg)
         self.assertIn("asyncio.shield(asyncio.to_thread(history.append", seg)
-
-    def test_failed_writes_are_not_reported_as_done(self):
-        seg = self._cancel_block()
-        # ⚠-prefixed tool results are refusals/failures and must be excluded.
-        self.assertIn('startswith("\\u26a0")', seg)
-
-    def test_it_is_never_presented_as_a_finished_answer(self):
-        seg = self._cancel_block()
-        self.assertIn("cut off before I answered", seg)
 
     def test_a_working_turn_is_given_time_to_finish_before_cancelling(self):
         from backend import main
-        # Two seconds killed a turn mid tool-loop. The audio is already delivered by then,
-        # so waiting costs no latency — it only decides how much gets recorded.
         self.assertGreaterEqual(main._TURN_FINISH_GRACE, 15)
 
     def test_the_user_half_is_still_saved_up_front(self):
-        # Unchanged, and the reason Brady's words survived this failure at all.
-        self.assertIn("_persist_user", self.SRC)
+        self.assertIn("_persist_user", Path(chat.__file__).read_text())

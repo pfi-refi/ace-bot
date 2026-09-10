@@ -1107,3 +1107,144 @@ class TheProbeWorksOnAColdProcess(unittest.TestCase):
         self.assertLess(seg.index("_PROBE_READS"),
                         seg.index("await mcp_client.tool_schemas()"),
                         'a tool off the allow-list must be refused without touching MCP')
+
+
+class PlacementIsNeverInvented(unittest.TestCase):
+    """Codex, 2026-09-10: when the parent lookup failed, placed_in fell through to
+    'the root of My Drive' — naming a location right beside a warning saying the location
+    was unknown."""
+
+    FOLDER = 'Found 1 files:\n- Name: "Deals" (ID: 1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA) x'
+
+    def _sheet(self, lands):
+        import json as _j
+
+        def search(a):
+            if "in parents" in str(a.get("query") or ""):
+                return ('Found 1 files:\n- Name: "T" (ID: 1SheetAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) x'
+                        if lands else "Found 0 files")
+            return self.FOLDER
+        return Fake(mcp_search_drive_files=search,
+                    mcp_import_to_google_sheets="Imported. ID: 1SheetAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    mcp_read_sheet_values=_j.dumps({"values": ROWS}))
+
+    def test_a_failed_placement_check_does_not_claim_root(self):
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"},
+                                        self._sheet(lands=False)))
+        self.assertNotEqual(out["placed_in"], "the root of My Drive")
+        self.assertEqual(out["placed_in"], "not confirmed")
+        self.assertEqual(out["requested_folder"], "Deals")
+        self.assertTrue(any("do not know where it ended up" in w for w in out["warnings"]))
+
+    def test_a_confirmed_placement_names_the_folder(self):
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"},
+                                        self._sheet(lands=True)))
+        self.assertEqual(out["placed_in"], "Deals")
+
+    def test_root_is_claimed_only_when_no_folder_was_asked_for(self):
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, Fake()))
+        self.assertEqual(out["placed_in"], "the root of My Drive")
+        self.assertEqual(out["requested_folder"], "")
+
+    def test_the_same_holds_for_a_document(self):
+        body = "\n\n".join(DOC_BLOCKS)
+
+        def search(a):
+            return "Found 0 files" if "in parents" in str(a.get("query") or "") else self.FOLDER
+        f = Fake(mcp_search_drive_files=search, mcp_get_doc_content=body,
+                 mcp_import_to_google_doc="Imported. ID: 1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        out = run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS, "folder": "Deals"}, f))
+        self.assertEqual(out["placed_in"], "not confirmed")
+        self.assertEqual(out["requested_folder"], "Deals")
+
+
+class FolderCreationHasTheSameRetryGuard(unittest.TestCase):
+    """It was the one create handler without the unknown-outcome guard, so a lost response
+    would dispatch a second create (Codex, 2026-09-10)."""
+
+    def test_a_lost_response_does_not_create_a_second_folder(self):
+        f = Fake(mcp_create_drive_folder="Created. ID: 1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                 mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
+        self.assertIn("have NOT made another one", str(e.exception))
+
+    def test_it_resumes_from_the_one_the_lost_attempt_made(self):
+        found = 'Found 1 files:\n- Name: "Deals" (ID: 1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB) x'
+        f = Fake(mcp_create_drive_folder="should not be called",
+                 mcp_search_drive_files=found)
+        out = run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
+        self.assertTrue(out["url"].endswith("1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
+
+    def test_two_candidates_refuse_to_be_guessed_between(self):
+        two = ('Found 2 files:\n- Name: "Deals" (ID: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) x\n'
+               '- Name: "Deals" (ID: 1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB) x')
+        f = Fake(mcp_create_drive_folder="should not be called", mcp_search_drive_files=two)
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertIn("which of the 2 folders", str(e.exception))
+
+
+class DriveQueriesAreEscaped(unittest.TestCase):
+    """A name like "Brady's Projects" closed the single-quoted literal early and produced a
+    malformed query — which fails, or matches the wrong thing (Codex, 2026-09-10)."""
+
+    def test_an_apostrophe_is_escaped(self):
+        self.assertEqual(cp.q("Brady's Projects"), "Brady\\'s Projects")
+
+    def test_a_backslash_is_escaped_before_the_quote(self):
+        self.assertEqual(cp.q("a\\b'c"), "a\\\\b\\'c")
+
+    def test_resolve_folder_sends_an_escaped_query(self):
+        seen = {}
+
+        def search(a):
+            seen["q"] = a.get("query")
+            return "Found 0 files"
+        f = Fake(mcp_search_drive_files=search)
+        with self.assertRaises(cp.Failed):
+            run(cp.resolve_folder("Brady's Projects", f))
+        self.assertIn("Brady\\'s Projects", seen["q"])
+        self.assertNotIn("name = 'Brady's", seen["q"], 'the literal closed early')
+
+    def test_an_id_is_passed_through_untouched(self):
+        f = Fake()
+        fid, name = run(cp.resolve_folder("1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA", f))
+        self.assertEqual(fid, "1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        self.assertEqual(f.calls, [], 'an id needs no lookup')
+
+
+class TheInventoryDistinguishesFourClaims(unittest.TestCase):
+    """Codex, 2026-09-10: "13 reads live" counted REGISTRY entries — what Ace is permitted to
+    call — which is not what the connector publishes, nor what has been called, nor what
+    returned something we checked. mcp_get_drive_file_metadata was registered and NOT
+    published, and that wording hid it."""
+
+    def test_a_registered_tool_the_provider_does_not_offer_is_flagged(self):
+        from backend import connectors as cn
+        live = {"mcp_read_sheet_values", "mcp_create_spreadsheet"}
+        inv = cn.inventory(published={"google_workspace": live})
+        g = next(c for c in inv["connectors"] if c["name"] == "google_workspace")
+        by = {a["tool"]: a for a in g["actions"]}
+        self.assertTrue(by["mcp_read_sheet_values"]["published"])
+        self.assertFalse(by["mcp_get_drive_file_metadata"]["published"],
+                         'this one is registered but not offered by the live server')
+        self.assertGreater(g["counts"]["registered_but_not_published"], 0)
+
+    def test_unchecked_publication_is_none_not_false(self):
+        from backend import connectors as cn
+        g = next(c for c in cn.inventory()["connectors"] if c["name"] == "google_workspace")
+        self.assertTrue(all(a["published"] is None for a in g["actions"]),
+                        'not asking is not the same as answering no')
+
+    def test_allowed_is_stated_as_a_registry_fact(self):
+        from backend import connectors as cn
+        note = cn.inventory()["note"]
+        self.assertIn("REGISTRY fact", note)
+        self.assertIn("not proof it exists or works", note)
+
+    def test_answering_is_called_weaker_than_verification(self):
+        from backend import connectors as cn
+        self.assertIn("weaker evidence than an artefact", cn.inventory()["note"])
