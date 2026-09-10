@@ -11,5 +11,6 @@ sleep 1
 for i in {1..40}; do grep -q READY "$LOG" 2>/dev/null && break; sleep 0.5; done
 grep -q READY "$LOG" || { echo "server did not start"; tail -20 "$LOG"; exit 1; }
 cd "$ROOT" && "$NODE" tests/voice_actions_ui.cjs; rc=$?
+if [ $rc -eq 0 ]; then "$NODE" tests/phone_fit_ui.cjs; rc=$?; fi
 pkill -f "tests/ui_server.py" 2>/dev/null || true
 exit $rc

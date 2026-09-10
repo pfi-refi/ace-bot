@@ -94,6 +94,12 @@ body {
 
 /* ---------- App frame ---------- */
 #app { position: relative; z-index: 2; height: 100dvh; display: grid;
+  /* minmax(0,1fr), not the implicit `auto` column. An auto track sizes to its widest child's
+     MIN-CONTENT, so one long word or a wide card pushed the whole column past the viewport —
+     the card's right edge measured 403px inside a 375px screen. The page never showed a
+     scrollbar because overflow is hidden, which is why a scrollWidth assertion missed it and
+     Brady just saw a clipped card. (2026-09-10) */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0,1fr) auto auto; gap: 12px;
   padding: 18px 22px calc(16px + env(safe-area-inset-bottom));
   transition: padding-right .34s var(--ease-out); }
@@ -138,7 +144,10 @@ body {
 #upnext .un-then { color: var(--text-faint); }
 
 /* ---------- The stage: the orb is the star ---------- */
-#stage { position: relative; min-height: 0; display: grid; place-items: center; }
+/* min-width:0 lets the grid item actually shrink; without it the default min-width:auto
+   keeps it at min-content and it overflows its own track. */
+#stage { position: relative; min-height: 0; min-width: 0; max-width: 100%;
+  display: grid; place-items: center; }
 
 #orb-wrap { position: relative; width: var(--orb-size); height: var(--orb-size); display: grid; place-items: center; }
 /* Ambient halo behind the galaxy — grounds it in the space instead of floating on black */
@@ -255,6 +264,7 @@ body {
 
 /* ---------- Panels flanking the orb ---------- */
 .card-slot { position: absolute; top: 6px; width: min(332px, 88vw);
+  min-width: 0; max-width: 100%;
   display: flex; flex-direction: column; gap: 14px; z-index: 5; max-height: 82%; overflow-y: auto;
   padding-bottom: 8px; }
 .card-slot:empty { display: none; }
@@ -263,6 +273,7 @@ body {
 .card-slot::-webkit-scrollbar { width: 0; }
 
 .card { position: relative; border-radius: var(--r-lg); overflow: hidden;
+  min-width: 0; max-width: 100%;
   border: 1px solid transparent;
   background: var(--panel-fill) padding-box, var(--panel-edge) border-box;
   box-shadow: var(--panel-shadow);
@@ -789,15 +800,17 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
               skyHue 48s linear infinite; }
 @keyframes skyHue { 0% { filter: hue-rotate(0deg); } 50% { filter: hue-rotate(70deg); } 100% { filter: hue-rotate(0deg); } }
 /* Windows: wide size + pin styling */
-.card.card-wide { width: min(560px, 92vw); align-self: flex-end; }
+/* 92vw is wider than the parent once the page has padding, so on a phone these measured
+   past the screen edge. Bounded by the parent as well as the viewport. */
+.card.card-wide { width: min(560px, 92vw); max-width: 100%; align-self: flex-end; }
 .card.card-wide .card-body { max-height: 420px; }
 .card-pin { filter: grayscale(1); opacity: .5; font-size: 11px; }
 .card-pin.on { filter: none; opacity: 1; }
 .card-head .card-x { margin-left: 2px; }
 
 /* ============================== v38: WINDOW MANAGER ===== */
-.card-free { position: absolute; width: min(340px, 88vw); z-index: 6; }
-.card-free.card-wide { width: min(560px, 92vw); }
+.card-free { position: absolute; width: min(340px, 88vw); max-width: 100%; z-index: 6; }
+.card-free.card-wide { width: min(560px, 92vw); max-width: 100%; }
 .card-free .card-head { cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; }
 .card-free .card-head:active { cursor: grabbing; }
 .card-free .card-body { max-height: 340px; }
@@ -1263,4 +1276,22 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 @media (max-width: 560px) {
   .tc-answer { font-size: 13.5px; max-height: 160px; }
   .tc-srclink { font-size: 12.5px; padding: 4px 0; }
+}
+
+
+/* PHONE CARD FIT (2026-09-10). Brady's clipped right edge. The dashboard card shell — not
+   the Command Center and not the task cards — was overflowing its grid track: measured
+   right edge 403px inside a 375px viewport, invisible to a scrollWidth check because the
+   page hides overflow. The grid column and the stage above now allow shrinking; these keep
+   the cards themselves inside the parent and stop a long word or URL forcing the track wide
+   again. Familiar design, desktop floating behaviour and board logic are untouched. */
+@media (max-width: 760px) {
+  #stage, .card-slot, .card, .card-free { max-width: 100%; min-width: 0; }
+  /* On a narrow screen a "wide" card is simply the full column — a viewport-based width
+     ignores the page padding it sits inside. */
+  .card.card-wide, .card-free.card-wide { width: 100%; }
+  .card-free { position: static; }
+  /* Long unbroken content (a URL, an id, a long name) is what makes min-content wide. */
+  .card, .card-body, .card-head, .db-item, .db-meta, .cmd-row {
+    overflow-wrap: anywhere; word-break: break-word; }
 }
