@@ -596,3 +596,46 @@ class TheInventoryTellsTheTruthAndKeepsSecrets(unittest.TestCase):
         self.assertTrue(w["daily_task_cap"])
         self.assertTrue(w["max_calls_per_task"])
         self.assertTrue(w["timeout_seconds"])
+
+
+class WhenTheConnectorHasNoMetadataTool(unittest.TestCase):
+    """Brady's live MCP server publishes 25 tools and NONE of them is a file-metadata tool,
+    so the permission check cannot run there. Found by testing against it (2026-09-10)."""
+
+    def setUp(self):
+        self._was = cp.EXPECTED_USER
+        cp.EXPECTED_USER = "brady@example.com"
+
+    def tearDown(self):
+        cp.EXPECTED_USER = self._was
+
+    def _no_meta(self, **extra):
+        return Fake(mcp_get_drive_file_metadata="⚠️ MCP tool unavailable",
+                    mcp_get_drive_file_info="⚠️ MCP tool unavailable", **extra)
+
+    def test_it_falls_back_to_whether_the_file_can_be_found(self):
+        f = self._no_meta(mcp_search_drive_files=lambda a: __import__("json").dumps(
+            {"files": [{"id": "1FakeSheetIdAbCdEfGhIjKlMnOpQrStUv"}]}))
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["access"], "reachable")
+        self.assertIn("exists and is not orphaned", out["access_evidence"])
+
+    def test_reachable_is_never_upgraded_to_a_promise(self):
+        f = self._no_meta(mcp_search_drive_files=lambda a: __import__("json").dumps(
+            {"files": [{"id": "1FakeSheetIdAbCdEfGhIjKlMnOpQrStUv"}]}))
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertNotEqual(out["access"], "ok")
+        self.assertTrue(any("cannot tell me which Google account" in w
+                            for w in out["warnings"]))
+
+    def test_a_file_that_cannot_be_found_stays_unknown(self):
+        f = self._no_meta(mcp_search_drive_files='{"files": []}')
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["access"], "unknown")
+
+    def test_it_never_fails_the_task_over_a_missing_metadata_tool(self):
+        # A connector without metadata tools must not make every spreadsheet a failure.
+        f = self._no_meta(mcp_search_drive_files="⚠️ MCP tool unavailable")
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertTrue(out["url"])
+        self.assertEqual(out["access"], "unknown")

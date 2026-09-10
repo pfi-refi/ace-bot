@@ -374,7 +374,11 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
             f"shared with you — so the link will read as 'file does not exist'. Nothing was "
             f"shared to work around that.",
             {**receipt, "owner": owner})
-    if access == "unknown":
+    if access == "reachable":
+        warnings.append("The file exists and my own connection can see it. This connector "
+                        "cannot tell me which Google account that is, so if the link does not "
+                        "open for you, that is the reason — not a missing file.")
+    elif access == "unknown":
         warnings.append("I could not confirm from the provider who owns this or whether your "
                         "account can see it, so I cannot promise the link opens for you.")
 
@@ -469,6 +473,25 @@ async def _owner_of(file_id: str, call) -> tuple:
             return owner, "no_access", "you are not in the file's permission list"
         # An owner with no permission list proves nothing about whether he can open it.
         return owner, "unknown", "the provider returned no permission list to check against"
+    # NO METADATA TOOL ON THIS CONNECTION (found by testing against Brady's live server,
+    # 2026-09-10). It publishes 25 tools and neither get_drive_file_metadata nor
+    # get_drive_file_info is among them, so the permission-based check above can never run
+    # here and every sheet would carry "I could not confirm anything".
+    #
+    # What CAN be established is weaker but real: whether the connection can find the file it
+    # just made. That proves the file exists and is reachable by the account Ace is connected
+    # as — which is exactly the thing that was NOT true on 9 September, when the link resolved
+    # to nothing. It does not prove the connected account is Brady's, so it is reported as its
+    # own finding and never upgraded to "ok".
+    try:
+        found = await call("mcp_search_drive_files", {"query": f"'{file_id}' in parents or "
+                                                               f"name != ''"})
+    except Exception:
+        found = ""
+    if found and not _looks_like_error(found) and file_id in str(found):
+        return "", "reachable", ("Ace's own connection can see this file, so it exists and is "
+                                 "not orphaned — but this connector cannot tell me which "
+                                 "Google account that is, so I cannot promise it opens for you")
     return "", "unknown", "the provider exposes no file-metadata tool on this connection"
 
 
