@@ -674,6 +674,23 @@ START_TASK = {
 # WHAT EACH NATIVE TOOL DOES, DECLARED (2026-09-10, Codex). An interrupted turn has to say
 # which operations actually changed something, and inferring that from a tool's ANSWER is how
 # a calendar read ended up listed as a completed mutation. These are stated, not guessed.
+#
+# THE PARTITION (pinned by tests/test_conversation_context.py, 2026-09-10). Every name in
+# TOOLS belongs to EXACTLY ONE of four disjoint sets, and each set means something different
+# about what an interrupted turn may say:
+#
+#   UI_TOOLS          paints a screen; mutates nothing, so it is never in the receipts
+#   NATIVE_READS      answers a question; not a mutation, so it is never in the receipts
+#   ops.JOURNALLED    a write with a durable verdict — the only route to "this DID go through"
+#   NATIVE_MUTATIONS  a write with NO journal verdict available here, so it is UNKNOWN
+#
+# NATIVE_MUTATIONS is therefore NOT "all the writes" — it is the writes whose outcome this
+# process cannot evidence, and that is exactly why it is listed separately from JOURNALLED.
+# send_email and delete_calendar_event execute from the Review tray (durable and single-use
+# by construction, but settled outside this turn); set_privacy flips a local flag. All three
+# are reported as outcome-not-confirmed rather than as done, and chat._dispatch_write reads
+# this set to decide that. A native tool in NEITHER set is treated as a possible mutation
+# with an unknown outcome — the safe default — and logged as an undeclared gap.
 NATIVE_READS = frozenset({
     "get_calendar_range", "read_gmail", "read_personal_gmail", "search_gmail",
     "search_personal_gmail", "search_drive", "recall", "read_own_code",

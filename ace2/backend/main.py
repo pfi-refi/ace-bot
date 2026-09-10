@@ -832,8 +832,19 @@ class TaskStartReq(BaseModel):
 @app.post("/actions/start", dependencies=[Depends(require_auth)])
 async def tasks_start(req: TaskStartReq):
     """Accept a task and start it in the background. Returns the card to show NOW —
-    queued, or the real state of an identical request already under way."""
-    card = await taskrunner.dispatch(req.capability, req.args or {},
+    queued, or the real state of an identical request already under way.
+
+    ARGS ARE ALLOWLISTED (2026-09-10, adversarial review). `req.args` used to reach the
+    capability handler untouched, which made a request body an authorisation channel it was
+    never meant to be: `start_fresh` forced the duplicate create the lost-create guard exists
+    to prevent, `use_existing_folder_id` adopted an arbitrary Drive folder as a task's output,
+    and — the part that survived removing those reads — ANY unrecognised key changed
+    tasks.request_key and orphaned the unresolved-create row entirely, so the guard was not
+    bypassed so much as never consulted. chat.py's start_task branch has always allowlisted
+    the model's arguments; this route was the caller that did not. Holding the bearer token is
+    not the same thing as Brady deciding something, and the HUD holds the bearer token."""
+    card = await taskrunner.dispatch(req.capability,
+                                     capabilities.sanitize_args(req.capability, req.args or {}),
                                      origin=(req.origin or "typed"), title=req.title)
     return {"ok": card.get("state") != task_store.FAILED or bool(card.get("task_id")), "card": card}
 

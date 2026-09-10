@@ -47,6 +47,17 @@ STALE_WORKING_SECONDS = int(os.environ.get("ACE2_TASK_STALE_SECONDS", "600"))
 # transcript, a double-tap, or two tabs sending the same thing must not make two documents.
 DEDUP_WINDOW_SECONDS = int(os.environ.get("ACE2_TASK_DEDUP_SECONDS", "900"))
 
+# EVERY create_state THAT MEANS "a file may already exist out there" (2026-09-10, adversarial
+# review). This list and capabilities._LOST_CREATE_STATES have to be the SAME list, and they
+# were not: capabilities was widened to guard "dispatched" — the crash between the
+# pre-dispatch checkpoint and the provider call, which leaves exactly the same uncertainty as
+# a lost response — but the query below still looked only for "unknown". So a create killed in
+# that window was carried forward for fifteen minutes and then forgotten, and the sixteenth
+# minute's re-ask made the second folder. The constant that widened could not help, because
+# nothing ever handed it a "dispatched" row to guard. Reproduced against a real Postgres;
+# pinned equal to the handler's list by tests/test_voice_actions.py.
+MAYBE_CREATED_STATES = ("unknown", "dispatched")
+
 
 def enabled() -> bool:
     return db.enabled()
@@ -168,10 +179,12 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
             # AN UNRESOLVED CREATE OUTLIVES THE DEDUP WINDOW. If an earlier attempt dispatched
             # a create and never learned the outcome, that protection must not expire fifteen
             # minutes later — that is precisely when a re-ask would make the second document.
-            # Searched by request_key with no time bound, newest first.
+            # Searched by request_key with no time bound, newest first — and across EVERY
+            # state that means "a file may already exist", not just "unknown" (see
+            # MAYBE_CREATED_STATES above; "dispatched" was silently excluded).
             cur.execute(f"SELECT {_COLS} FROM ace_tasks WHERE request_key = %s AND "
-                        f"result->>'create_state' = 'unknown' ORDER BY created_at DESC LIMIT 1",
-                        (key,))
+                        f"result->>'create_state' = ANY(%s) ORDER BY created_at DESC LIMIT 1",
+                        (key, list(MAYBE_CREATED_STATES)))
             unresolved = cur.fetchone()
             if unresolved and not prior:
                 prior = unresolved

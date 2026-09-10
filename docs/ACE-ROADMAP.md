@@ -8,7 +8,9 @@
 
 ## 01 · Where Ace is today
 
-**Already built & live:** unified voice+chat on one thread; compounding tiered/bi-temporal memory (reconcile: skip/supersede/add); background learning+triage sweep (Opus) that auto-files facts + routes to-dos; Plan-my-Week ritual + one-tap button; Google Calendar/Tasks/Gmail/Drive/Docs/Sheets; confirm-gates on send/delete. 17 native tools, ~66 durable facts, Opus deep brain + Haiku live voice.
+**Already built & live:** unified voice+chat on one thread; compounding tiered/bi-temporal memory (reconcile: skip/supersede/add); background learning+triage sweep (Opus) that auto-files facts + routes to-dos; Plan-my-Week ritual + one-tap button; Google Calendar/Tasks/Gmail/Drive/Docs/Sheets; confirm-gates on send/delete. 21 native tools, ~66 durable facts, Opus deep brain + Haiku live voice.
+
+<sub>Tool counts, measured 2026-09-10 rather than remembered. **21** native schemas in `tools.TOOLS`, partitioning exactly into 2 UI (`UI_TOOLS`), 8 declared reads (`NATIVE_READS`), 3 non-journalled mutations (`NATIVE_MUTATIONS`) and 8 journalled writes (`ops.JOURNALLED`). Separately, the Google Workspace connector registry holds **26** entries of which the connector publishes **25** — the one it does not publish is `mcp_get_drive_file_metadata`. "Registered" means Ace is permitted to call it; it is not evidence the tool exists.</sub>
 
 **The gaps = the roadmap:** retrieval is keyword-ish (no semantic layer — #1 gap); interface has no graph/canvas/command-palette/live-views; proactivity is timer-only (no event triggers, no phone push); reach is PWA-only (no telephony); no photo/PDF/voice-memo/call-transcript capture; facts are flat (no people↔deals↔agents graph).
 

@@ -53,7 +53,24 @@ CONNECTORS = {
             # reads
             "mcp_search_drive_files": {"kind": READ, "approval": NONE},
             "mcp_get_drive_file_content": {"kind": READ, "approval": NONE},
-            "mcp_get_drive_file_metadata": {"kind": READ, "approval": NONE},
+            # REGISTERED, BUT THIS CONNECTOR DOES NOT PUBLISH IT (measured 2026-09-10 against
+            # the captured live schema dump: 25 tools published, 26 registered here, and this
+            # is the only difference). It stayed in the table reading exactly like a working
+            # read, and the inventory counted it among the live ones — the same overstatement
+            # the "13 reads live" line was corrected for. Being permitted to call something is
+            # not the same as it existing.
+            #
+            # It is kept listed rather than deleted so the gap is visible instead of merely
+            # absent, and so a connector that DOES publish it needs no code change. Marked
+            # unavailable, excluded from the read counts, and reported with the reason.
+            # capabilities._owner_of is its only caller and reports access "unknown" when the
+            # call cannot be served — never "ok" on weaker evidence.
+            "mcp_get_drive_file_metadata": {
+                "kind": READ, "approval": NONE, "available": False,
+                "unavailable_because": "the live google_workspace MCP server does not publish "
+                                       "this tool (25 published, checked 2026-09-10), so "
+                                       "owner and permission data cannot be read there at "
+                                       "all — access is reported as unknown, not assumed"},
             "mcp_read_sheet_values": {"kind": READ, "approval": NONE},
             "mcp_get_doc_content": {"kind": READ, "approval": NONE},
             "mcp_search_gmail_messages": {"kind": READ, "approval": NONE},
@@ -249,6 +266,13 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
             # gap that wording hid.
             "allowed": a.get("approval") != NEVER,
             "published": (None if published_set is None else (tool in published_set)),
+            # A FIFTH CLAIM, AND A STANDING ONE (2026-09-10). "published" is what THIS
+            # request's probe found, so it is None when nobody asked. "available" is what we
+            # already know from reading the connector's published schemas: False here means
+            # the tool has been checked and is not offered, and the count below leaves it out
+            # rather than advertising a read that cannot be served.
+            "available": a.get("available", True),
+            "unavailable_because": a.get("unavailable_because", ""),
             "enabled": a.get("approval") != NEVER,
                 "approval": a.get("approval"),
                 "approval_when": a.get("approval_when", ""),
@@ -280,8 +304,13 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
             "cost_note": c.get("cost_note"),
             "actions": acts,
             "counts": {
-                "allowed_read": sum(1 for a in acts if a["kind"] == READ and a["enabled"]),
-                "read": sum(1 for a in acts if a["kind"] == READ and a["enabled"]),
+                # Reads Ace may call AND the connector actually offers. Counting the ones it
+                # does not offer is how a registry entry became a claim about the world.
+                "allowed_read": sum(1 for a in acts
+                                    if a["kind"] == READ and a["enabled"] and a["available"]),
+                "read": sum(1 for a in acts
+                            if a["kind"] == READ and a["enabled"] and a["available"]),
+                "registered_but_unavailable": sum(1 for a in acts if not a["available"]),
                 "registered_but_not_published": sum(
                     1 for a in acts if a["published"] is False),
                 "write": sum(1 for a in acts
@@ -296,6 +325,9 @@ def inventory(reachable: dict = None, tested: dict = None, identity: dict = None
             "note": ("Configured means the settings are present. Reachable means the connector "
                      "answered. Published means the connector actually offers the tool. "
                      "Allowed means Ace is permitted to call it — that is a REGISTRY fact, "
-                     "not proof it exists or works. Tested means THIS tool was called here "
+                     "not proof it exists or works. Available means it has been checked "
+                     "against the connector's published tools and IS offered; where it is "
+                     "false the reason is given and the tool is left out of the counts. "
+                     "Tested means THIS tool was called here "
                      "and answered, never inferred from another tool; and answering is "
                      "weaker evidence than an artefact we read back and compared.")}

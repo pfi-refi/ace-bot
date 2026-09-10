@@ -1170,14 +1170,29 @@ class FolderCreationHasTheSameRetryGuard(unittest.TestCase):
         self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
         self.assertIn("have NOT made another one", str(e.exception))
 
-    def test_it_resumes_only_when_the_marker_proves_identity(self):
+    def test_a_marker_in_the_result_is_not_identity_because_it_is_never_sent(self):
+        """REPLACES test_it_resumes_only_when_the_marker_proves_identity, which asserted an
+        outcome that could not occur (2026-09-10).
+
+        That test passed by handing the fake a folder literally NAMED "Deals MK123" — the
+        only way a Drive search could contain the task's marker, because the marker is never
+        given to the provider: mcp_create_drive_folder takes folder_name and parent_folder_id
+        and nothing else. So the branch it covered was unreachable in production, and the
+        recovery it described has never once happened.
+
+        The assertion is stricter now, not weaker: even when the marker text IS in the search
+        result, the folder is NOT adopted, nothing is created, and it is offered as a
+        candidate for Brady to settle."""
         found = ('Found 1 files:\n- Name: "Deals MK123" '
                  '(ID: 1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB) x')
         f = Fake(mcp_create_drive_folder="should not be called", mcp_search_drive_files=found)
-        out = run(cp.create_folder({"name": "Deals"}, f,
-                                   known={"create_state": "unknown", "create_marker": "MK123"}))
-        self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
-        self.assertTrue(out["url"].endswith("1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f,
+                                 known={"create_state": "unknown", "create_marker": "MK123"}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+        self.assertIn("will not adopt an existing folder", str(e.exception))
+        self.assertEqual(e.exception.result["candidates"],
+                         ["1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB"])
 
     def test_a_name_match_alone_never_adopts_an_existing_folder(self):
         """Codex, 2026-09-10: a "Deals" folder created in 2020 was being claimed as this
@@ -1270,3 +1285,736 @@ class TheInventoryDistinguishesFourClaims(unittest.TestCase):
     def test_answering_is_called_weaker_than_verification(self):
         from backend import connectors as cn
         self.assertIn("weaker evidence than an artefact", cn.inventory()["note"])
+
+
+# ── THE LOST CREATE: IDENTITY, RECOVERY, AND NEVER A SECOND FILE ───────────────
+# Everything below drives the REAL handlers against a local fake provider. No network, no
+# credentials, no provider call of any kind.
+import re as _re                                        # noqa: E402
+
+SCHEMA_DUMP = Path("/Users/brady/Documents/Codex/2026-09-06/install-github-cli-gh-on-this"
+                   "/work/remote-mcp-schemas.json")
+FOLDER_ID = "1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+OTHER_ID = "1Folder2020AAAAAAAAAAAAAAAAAAAAAAAA"
+
+
+def _hit(name, file_id, extra=""):
+    return f'Found 1 files:\n- Name: "{name}" (ID: {file_id}{extra}) Link: x'
+
+
+class TheProviderOffersNoIdentityChannelOnCreate(unittest.TestCase):
+    """The finding that makes every "marker matched" branch dead code: there is nowhere to
+    put a marker. The create tools take a name and a parent and nothing else, and they all
+    declare additionalProperties=false, so an extra field is rejected outright rather than
+    stored. Anything that reads as if identity had been proven is therefore a lie about a
+    check that never ran."""
+
+    def test_the_folder_create_sends_only_the_name_and_the_parent(self):
+        marks = []
+
+        async def checkpoint(patch):
+            marks.append(dict(patch))
+            return True
+
+        f = Fake(mcp_create_drive_folder=f"Created. ID: {FOLDER_ID}",
+                 mcp_search_drive_files=_hit("Deals", FOLDER_ID))
+        run(cp.create_folder({"name": "Deals", "parent_folder_id": FOLDER_ID}, f,
+                             checkpoint=checkpoint))
+        payload = next(a for t, a in f.calls if t == "mcp_create_drive_folder")
+        self.assertEqual(set(payload), {"folder_name", "parent_folder_id"})
+        self.assertEqual(payload["folder_name"], "Deals")
+        # WHAT BRADY SUPPLIED IS ALLOWED THROUGH — the name and the parent are the payload.
+        # What must never appear is anything identifying THIS ATTEMPT, because that is the
+        # channel the marker branch pretended to have.
+        his = {"Deals", FOLDER_ID}
+        blob = str(payload)
+        leaked = sorted({str(v) for m in marks for v in m.values()
+                         if str(v) and str(v) not in his and str(v) in blob})
+        self.assertEqual(leaked, [],
+                         'a task-side value was smuggled into the create payload')
+        # ...and nothing marker-shaped is in there under any name.
+        self.assertEqual(_re.findall(r"\b[0-9a-f]{12}\b", blob), [])
+
+    def test_no_marker_is_recorded_that_could_never_be_used(self):
+        marks = []
+
+        async def checkpoint(patch):
+            marks.append(dict(patch))
+            return True
+
+        f = Fake(mcp_create_drive_folder=f"Created. ID: {FOLDER_ID}",
+                 mcp_search_drive_files=_hit("Deals", FOLDER_ID))
+        run(cp.create_folder({"name": "Deals"}, f, checkpoint=checkpoint))
+        keys = {k for m in marks for k in m}
+        self.assertNotIn("create_marker", keys,
+                         'a marker that cannot be sent proves nothing and must not be kept')
+        # what IS kept is real evidence Brady can compare against Drive's "created" column
+        self.assertIn("create_dispatched_at", keys)
+
+    def test_the_captured_create_schema_has_no_field_to_carry_one(self):
+        # In-repo evidence: the live create_spreadsheet schema, captured from Brady's server.
+        sch = LIVE_SCHEMAS["mcp_create_spreadsheet"]
+        self.assertIs(sch.get("additionalProperties"), False)
+        for field in ("description", "appProperties", "properties_", "metadata"):
+            self.assertNotIn(field, sch.get("properties") or {})
+
+    @unittest.skipUnless(SCHEMA_DUMP.exists(), "live schema dump not on this machine")
+    def test_no_published_create_tool_accepts_custom_metadata(self):
+        dump = {t["name"]: t for t in _json.loads(SCHEMA_DUMP.read_text())["schemas"]}
+        creates = ("mcp_create_drive_folder", "mcp_create_doc", "mcp_create_spreadsheet",
+                   "mcp_import_to_google_doc", "mcp_import_to_google_sheets")
+        # A tool that is simply ABSENT is a finding in its own right, not a KeyError.
+        self.assertEqual([t for t in creates if t not in dump], [],
+                         'a create tool this code calls is not published at all')
+        for tool in creates:
+            sch = dump[tool]["input_schema"]          # snake_case, as the dump writes it
+            self.assertIs(sch.get("additionalProperties"), False, tool)
+            for field in ("description", "appProperties", "properties", "metadata",
+                          "custom_properties"):
+                self.assertNotIn(field, sch["properties"], f"{tool} may in fact carry {field}")
+        self.assertEqual(set(dump["mcp_create_drive_folder"]["input_schema"]["properties"])
+                         - {"user_google_email"}, {"folder_name", "parent_folder_id"})
+
+
+class NoRecoveryPathEverCreatesASecondFolder(unittest.TestCase):
+    """The guarantee, stated once per way it could be broken. Every case asserts the literal
+    COUNT of create calls, because "not in the list" would still pass if the list were empty
+    for the wrong reason."""
+
+    def _f(self, search):
+        return Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                    mcp_import_to_google_doc="MUST NOT BE CALLED",
+                    mcp_search_drive_files=search)
+
+    def _creates(self, f):
+        return [t for t, _ in f.calls].count("mcp_create_drive_folder")
+
+    def test_no_match_at_all_refuses_and_creates_nothing(self):
+        f = self._f("Found 0 files")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertEqual(self._creates(f), 0)
+        self.assertIn("whether it was made at all", str(e.exception))
+        self.assertEqual(e.exception.result["candidates"], [])
+        self.assertIn("start fresh", str(e.exception))
+
+    def test_one_unrelated_match_is_offered_never_adopted(self):
+        """A "Deals" folder created in 2020 is exactly as good a name match as one created
+        ninety seconds ago, and nothing distinguishes them (Codex, 2026-09-10)."""
+        f = self._f(_hit("Deals", OTHER_ID, ", Created: 2020-04-01T00:00:00Z"))
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f,
+                                 known={"create_state": "unknown",
+                                        "create_marker": "NEW_ATTEMPT"}))
+        self.assertEqual(self._creates(f), 0)
+        self.assertIn("will not adopt an existing folder", str(e.exception))
+        self.assertEqual(e.exception.result["candidates"], [OTHER_ID],
+                         'the candidate must be handed to Brady, not swallowed')
+        self.assertEqual(e.exception.result["resolution_needed"],
+                         "give me the id to use, or tell me to start fresh")
+
+    def test_several_matches_refuse_to_be_guessed_between(self):
+        two = (f'Found 2 files:\n- Name: "Deals" (ID: {FOLDER_ID}) x\n'
+               f'- Name: "Deals" (ID: {OTHER_ID}) x')
+        f = self._f(two)
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertEqual(self._creates(f), 0)
+        self.assertIn("which of the 2 folders", str(e.exception))
+        self.assertEqual(e.exception.result["candidates"], [FOLDER_ID, OTHER_ID])
+
+    def test_dispatched_without_an_id_is_the_same_situation(self):
+        # The checkpoint is written BEFORE the call, so a crash in between lands here.
+        f = self._f(_hit("Deals", OTHER_ID))
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "dispatched"}))
+        self.assertEqual(self._creates(f), 0)
+        self.assertEqual(e.exception.result["candidates"], [OTHER_ID])
+
+    def test_the_reconciliation_search_asks_only_about_folders(self):
+        seen = []
+
+        def search(a):
+            seen.append(a.get("query"))
+            return "Found 0 files"
+        f = self._f(search)
+        with self.assertRaises(cp.Failed):
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertTrue(all("application/vnd.google-apps.folder" in s for s in seen), seen)
+
+    def test_no_gated_tool_is_reached_for_on_the_way_out(self):
+        f = self._f("Found 0 files")
+        with self.assertRaises(cp.Failed):
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        called = {t for t, _ in f.calls}
+        for gated in ("mcp_get_drive_shareable_link", "mcp_modify_doc_text",
+                      "mcp_create_drive_file", "mcp_send_gmail_message"):
+            self.assertNotIn(gated, called)
+
+
+class AnUnresolvedCreateHasAWayForward(unittest.TestCase):
+    """Being unable to create a duplicate is correct. Being unable to EVER make the folder is
+    not: the checkpoint is written before the dispatch, so a crash in that window left
+    'Deals' permanently uncreatable with nothing Brady could say about it. The guard against
+    AUTOMATIC adoption is untouched — these are all things he says out loud."""
+
+    def test_an_id_he_gives_is_adopted_and_still_verified(self):
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                 mcp_search_drive_files=_hit("Deals", OTHER_ID))
+        out = run(cp.create_folder({"name": "Deals"}, f,
+                                   known={"create_state": "dispatched",
+                                          "use_existing_folder_id": OTHER_ID}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+        self.assertEqual(out["file_id"], OTHER_ID)
+        self.assertTrue(out["adopted_existing"])
+        self.assertTrue(any("did not make a new folder" in w for w in out["warnings"]),
+                        'an adoption must never read as a creation')
+
+    def test_an_id_drive_will_not_confirm_is_refused_and_nothing_is_created(self):
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                 mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f,
+                                 known={"create_state": "unknown",
+                                        "use_existing_folder_id": OTHER_ID}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+        self.assertIn("does not return a folder", str(e.exception))
+
+    def test_something_that_is_not_an_id_is_refused_before_anything_is_called(self):
+        f = Fake()
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f,
+                                 known={"create_state": "unknown",
+                                        "use_existing_folder_id": "the deals one"}))
+        self.assertEqual(f.calls, [])
+        self.assertIn("not a Drive id", str(e.exception))
+
+    def test_start_fresh_is_honoured_and_makes_exactly_one(self):
+        f = Fake(mcp_create_drive_folder=f"Created. ID: {FOLDER_ID}",
+                 mcp_search_drive_files=_hit("Deals", FOLDER_ID))
+        out = run(cp.create_folder({"name": "Deals"}, f,
+                                   known={"create_state": "unknown", "start_fresh": True}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 1)
+        self.assertEqual(out["file_id"], FOLDER_ID)
+        self.assertFalse(out["adopted_existing"])
+
+    def test_start_fresh_recovers_the_crashed_between_checkpoint_and_dispatch_case(self):
+        f = Fake(mcp_create_drive_folder=f"Created. ID: {FOLDER_ID}",
+                 mcp_search_drive_files=_hit("Deals", FOLDER_ID))
+        out = run(cp.create_folder({"name": "Deals"}, f,
+                                   known={"create_state": "dispatched", "start_fresh": True}))
+        self.assertEqual(out["file_id"], FOLDER_ID)
+
+    def test_a_resolution_written_onto_the_task_record_works_too(self):
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                 mcp_search_drive_files=_hit("Deals", OTHER_ID))
+        out = run(cp.create_folder({"name": "Deals"}, f,
+                                   known={"create_state": "unknown",
+                                          "adopt_file_id": OTHER_ID}))
+        self.assertEqual(out["file_id"], OTHER_ID)
+
+    def test_the_refusal_says_what_he_can_do_about_it(self):
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                 mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        msg = str(e.exception)
+        self.assertIn("Tell me the id to use", msg)
+        self.assertIn("start fresh", msg)
+        self.assertIn("no way to mark a folder as mine", msg,
+                      'the reason identity cannot be proven must be said, not implied')
+
+    def test_the_way_forward_is_never_taken_without_being_asked(self):
+        # No resolution on the record: still a refusal, still no create.
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                 mcp_search_drive_files=_hit("Deals", OTHER_ID))
+        with self.assertRaises(cp.Failed):
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+
+
+class ARequestBodyCannotAuthoriseAnything(unittest.TestCase):
+    """THE SECURITY FIX (2026-09-10, adversarial review).
+
+    `_explicit_resolution` used to read the adopt/fresh keys from the task's `args` as well as
+    from its record. `args` is CALLER DATA: main.py's POST /actions/start declares
+    `args: dict = {}` on its request model and hands it to taskrunner.dispatch unfiltered, so
+    one authenticated request body was a complete bypass —
+
+        {"capability": "create_folder", "args": {"name": "Deals", "start_fresh": true}}
+            -> the second folder the entire lost-create guard exists to prevent
+        {"capability": "create_folder",
+         "args": {"name": "Deals", "use_existing_folder_id": "<any id>"}}
+            -> an arbitrary Drive folder adopted as this task's output
+
+    chat.py's start_task branch allowlists model output, so the model never had this; that
+    allowlist covered one of the two callers. Holding the bearer token is not the same thing
+    as Brady deciding something.
+
+    `known` is the task ROW: written only by tasks.checkpoint and the settle path, with
+    accept()'s re-ask carry-forward whitelisted to file_id/url/create_state/create_marker. A
+    caller cannot put a key in it. It is therefore the only channel read.
+
+    Every case here asserts the LITERAL COUNT of create calls, because "did not adopt" would
+    also pass on a handler that quietly created something instead."""
+
+    RESOLUTIONS = ({"start_fresh": True}, {"create_a_new_one": True},
+                   {"use_existing_folder_id": OTHER_ID}, {"use_existing_file_id": OTHER_ID},
+                   {"adopt_file_id": OTHER_ID})
+
+    def _fake(self):
+        return Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                    mcp_create_doc="MUST NOT BE CALLED",
+                    mcp_import_to_google_doc="MUST NOT BE CALLED",
+                    mcp_create_spreadsheet="MUST NOT BE CALLED",
+                    mcp_search_drive_files=_hit("Deals", OTHER_ID))
+
+    def test_no_resolution_key_in_args_authorises_a_folder(self):
+        for res in self.RESOLUTIONS:
+            for state in cp._LOST_CREATE_STATES:
+                with self.subTest(resolution=res, state=state):
+                    f = self._fake()
+                    with self.assertRaises(cp.Failed) as e:
+                        run(cp.create_folder({"name": "Deals", **res}, f,
+                                             known={"create_state": state}))
+                    self.assertEqual(
+                        [t for t, _ in f.calls].count("mcp_create_drive_folder"), 0,
+                        "a request body forced a create")
+                    self.assertIn("will not create another one on a guess", str(e.exception))
+                    self.assertIn("will not adopt an existing", str(e.exception))
+
+    def test_no_resolution_key_in_args_authorises_a_document_or_a_spreadsheet(self):
+        for res in self.RESOLUTIONS:
+            with self.subTest(resolution=res):
+                f = self._fake()
+                with self.assertRaises(cp.Failed):
+                    run(cp.create_doc({"title": "Notes", "blocks": ["a"], **res}, f,
+                                      known={"create_state": "unknown"}))
+                self.assertEqual([t for t, _ in f.calls].count("mcp_create_doc"), 0)
+                self.assertEqual([t for t, _ in f.calls].count("mcp_import_to_google_doc"), 0)
+
+                g = self._fake()
+                with self.assertRaises(cp.Failed):
+                    run(cp.create_spreadsheet({"title": "T", "rows": [["a"]], **res}, g,
+                                              known={"create_state": "unknown"}))
+                self.assertEqual([t for t, _ in g.calls].count("mcp_create_spreadsheet"), 0)
+
+    def test_the_resolver_does_not_accept_caller_args_at_all(self):
+        """Signature-level, so the channel cannot be reopened by passing args positionally."""
+        import inspect
+        params = list(inspect.signature(cp._explicit_resolution).parameters)
+        self.assertEqual(params, ["known"],
+                         "_explicit_resolution takes caller data again")
+        for res in self.RESOLUTIONS:
+            self.assertEqual(cp._explicit_resolution(dict(res))[0] or "",
+                             "fresh" if "fresh" in str(res) or "new_one" in str(res)
+                             else "adopt",
+                             "the record channel stopped working")
+
+    def test_the_route_allowlists_what_a_caller_may_send(self):
+        """The other half, and the one that actually mattered: removing the args-read closed
+        ADOPTION, but `start_fresh` in a body still changed tasks.request_key — which hashes
+        the whole args dict — so the unresolved-create row was never found and the guard was
+        not bypassed so much as never consulted. Measured end to end: the create went through.
+        The route drops unknown keys BEFORE the key is computed."""
+        src = (Path(__file__).resolve().parents[1] / "ace2/backend/main.py").read_text()
+        route = src.split('@app.post("/actions/start"')[1].split("@app.")[0]
+        self.assertIn("sanitize_args", route,
+                      "the route hands caller args to dispatch unfiltered again")
+        self.assertNotIn("dispatch(req.capability, req.args", route)
+
+    def test_an_unknown_key_cannot_change_a_requests_identity(self):
+        """Why the allowlist has to run before the key is computed, stated as a property."""
+        from backend import tasks as _tasks
+        base = {"name": "Deals"}
+        for extra in ({"start_fresh": True}, {"use_existing_folder_id": OTHER_ID},
+                      {"x": 1}, {"_client": "anything"}):
+            with self.subTest(extra=extra):
+                dirty = {**base, **extra}
+                self.assertNotEqual(_tasks.request_key("create_folder", dirty),
+                                    _tasks.request_key("create_folder", base),
+                                    "request_key stopped depending on args; recheck this fix")
+                self.assertEqual(
+                    _tasks.request_key("create_folder",
+                                       cp.sanitize_args("create_folder", dirty)),
+                    _tasks.request_key("create_folder", base),
+                    "an unknown key still changes the request identity")
+
+    def test_the_allowlist_covers_every_key_the_handlers_read_and_no_more(self):
+        """A handler field that is NOT allowlisted silently stops working; a field that is
+        allowlisted but unread is a channel nobody is thinking about. Both are pinned."""
+        self.assertEqual(set(cp.ARG_KEYS), set(cp.REGISTRY),
+                         "a capability has no declared argument list")
+        for cap, keys in cp.ARG_KEYS.items():
+            with self.subTest(cap=cap):
+                self.assertEqual(set(keys) & set(cp._ADOPT_KEYS + cp._FRESH_KEYS), set(),
+                                 "a resolution key is caller-settable again")
+                self.assertNotIn("_client", keys, "the test injection hook is caller-settable")
+        # Every key chat.py's start_task branch builds must survive the route's allowlist too,
+        # or the two callers disagree about what a task is allowed to contain.
+        chat_src = (Path(__file__).resolve().parents[1] / "ace2/backend/chat.py").read_text()
+        branch = chat_src.split('if block.name == "start_task":')[1].split(
+            "\n                    continue")[0]
+        for cap, keys in (("create_spreadsheet", ("title", "rows", "bold_header", "folder")),
+                          ("create_doc", ("title", "blocks", "folder")),
+                          ("create_folder", ("name",)),
+                          ("research", ("question",))):
+            for k in keys:
+                self.assertIn(f'"{k}"', branch)
+                self.assertIn(k, cp.ARG_KEYS[cap],
+                              f"chat sends {k} for {cap} but the route would drop it")
+
+
+class DocsAndSheetsRecoverTheSameWay(unittest.TestCase):
+    """Three handlers, one situation, one set of words — and the candidates carried in every
+    one of them. The Docs handler used to find them and drop them."""
+
+    DOC_ID = "1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    SHEET_ID = "1FakeSheetIdAbCdEfGhIjKlMnOpQrStUv"
+
+    def test_a_document_recovery_carries_its_candidates(self):
+        f = Fake(mcp_create_doc="MUST NOT BE CALLED",
+                 mcp_import_to_google_doc="MUST NOT BE CALLED",
+                 mcp_search_drive_files=_hit("Notes", self.DOC_ID))
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f,
+                              known={"create_state": "unknown"}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_doc"), 0)
+        self.assertEqual(e.exception.result["candidates"], [self.DOC_ID],
+                         'the Docs handler threw the candidates away')
+        self.assertIn("will not adopt an existing document", str(e.exception))
+
+    def test_a_document_dispatched_without_an_id_is_guarded_too(self):
+        f = Fake(mcp_create_doc="MUST NOT BE CALLED", mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed):
+            run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f,
+                              known={"create_state": "dispatched"}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_doc"), 0)
+
+    def test_a_document_can_be_resolved_by_starting_fresh(self):
+        body = "\n\n".join(DOC_BLOCKS)
+        f = Fake(mcp_create_doc=f"Created. ID: {self.DOC_ID}", mcp_get_doc_content=body,
+                 mcp_search_drive_files=_hit("Notes", self.DOC_ID))
+        out = run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS},
+                                f, known={"create_state": "unknown", "start_fresh": True}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_doc"), 1)
+        self.assertEqual(out["file_id"], self.DOC_ID)
+
+    def test_a_spreadsheet_recovery_carries_its_candidates(self):
+        two = (f'Found 2 files:\n- Name: "T" (ID: {self.SHEET_ID}) x\n'
+               f'- Name: "T" (ID: {OTHER_ID}) x')
+        f = Fake(mcp_create_spreadsheet="MUST NOT BE CALLED",
+                 mcp_import_to_google_sheets="MUST NOT BE CALLED",
+                 mcp_search_drive_files=two)
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f,
+                                      known={"create_state": "unknown"}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_spreadsheet"), 0)
+        self.assertEqual(e.exception.result["candidates"], [self.SHEET_ID, OTHER_ID])
+        self.assertIn("which of the 2 spreadsheets", str(e.exception))
+
+    def test_a_spreadsheet_dispatched_without_an_id_no_longer_creates_a_second_one(self):
+        # 'dispatched' means the call may have reached Google. It used to fall straight
+        # through to another create.
+        f = Fake(mcp_create_spreadsheet="MUST NOT BE CALLED",
+                 mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed):
+            run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f,
+                                      known={"create_state": "dispatched"}))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_spreadsheet"), 0)
+
+    def test_every_handler_uses_the_same_words_for_the_same_situation(self):
+        msgs = []
+        for handler, args in ((cp.create_folder, {"name": "X"}),
+                              (cp.create_doc, {"title": "X", "blocks": DOC_BLOCKS}),
+                              (cp.create_spreadsheet, {"title": "X", "rows": ROWS})):
+            f = Fake(mcp_search_drive_files="Found 0 files")
+            with self.assertRaises(cp.Failed) as e:
+                run(handler(args, f, known={"create_state": "unknown"}))
+            msgs.append(str(e.exception))
+        for m in msgs:
+            self.assertIn("I will not create another one on a guess", m)
+            self.assertIn("Tell me the id to use, or tell me to start fresh", m)
+
+
+class PlacementCannotBeFooledOrTruncated(unittest.TestCase):
+    """Codex asked whether _in_folder could match a same-named file elsewhere under the
+    parent. It matches on the ID, so no — but looking for it turned up two real ways the
+    check gives a WRONG answer, and one of them makes a correct placement read as unknown."""
+
+    SHEET_ID = "1SheetAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+    def _crowded(self, page_default=10):
+        """A folder that already holds ten things. The provider returns page_size rows and no
+        more — the default is 10 — so the eleventh child is simply not in the answer."""
+        seen = []
+
+        def search(a):
+            query, size = str(a.get("query") or ""), int(a.get("page_size") or page_default)
+            seen.append(a)
+            if "in parents" not in query:
+                return _hit("Deals", FOLDER_ID)
+            rows = [f'- Name: "Other {i}" (ID: 1Other{i:0>29}) x' for i in range(10)]
+            rows.append(f'- Name: "T" (ID: {self.SHEET_ID}) x')
+            if "name = 'T'" in query:
+                rows = [r for r in rows if 'Name: "T"' in r]
+            return "Found files:\n" + "\n".join(rows[:size])
+        return search, seen
+
+    def test_a_crowded_folder_does_not_hide_a_correct_placement(self):
+        search, seen = self._crowded()
+        f = Fake(mcp_search_drive_files=search,
+                 mcp_import_to_google_sheets=f"Imported. ID: {self.SHEET_ID}",
+                 mcp_read_sheet_values=_json.dumps({"values": ROWS}))
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f))
+        self.assertEqual(out["placed_in"], "Deals",
+                         'the eleventh file in a folder read back as not there')
+        parents = [a for a in seen if "in parents" in str(a.get("query"))]
+        self.assertTrue(all(int(a.get("page_size") or 10) > 10 for a in parents),
+                        'the listing was left on the provider default of ten rows')
+
+    def test_the_parent_id_goes_through_the_same_escaping_as_every_other_query(self):
+        seen = {}
+
+        async def call(tool, args):
+            seen["query"] = args.get("query")
+            return "Found 0 files"
+        run(cp._in_folder(self.SHEET_ID, "Brady's folder", call))
+        self.assertIn("Brady\\'s folder", seen["query"])
+        self.assertNotIn("'Brady's folder'", seen["query"], 'the literal closed early')
+
+    def test_an_id_that_is_a_prefix_of_another_does_not_satisfy_the_check(self):
+        longer = self.SHEET_ID + "ZZ"
+
+        async def call(tool, args):
+            return f'Found 1 files:\n- Name: "Other" (ID: {longer}) x'
+        self.assertFalse(run(cp._in_folder(self.SHEET_ID, FOLDER_ID, call)),
+                         'a longer id containing ours was accepted as ours')
+        self.assertTrue(run(cp._in_folder(longer, FOLDER_ID, call)))
+
+    def test_a_file_that_really_is_absent_is_still_reported_as_unconfirmed(self):
+        async def call(tool, args):
+            if "in parents" in str(args.get("query")):
+                return "Found 0 files"
+            return _hit("Deals", FOLDER_ID)
+        self.assertFalse(run(cp._in_folder(self.SHEET_ID, FOLDER_ID, call, "T")))
+
+
+class EveryDriveQueryIsEscaped(unittest.TestCase):
+    """q() is only worth having if nothing goes round it."""
+
+    def test_a_name_with_a_backslash_and_a_quote_survives_both_passes(self):
+        self.assertEqual(cp.q("a\\b'c"), "a\\\\b\\'c")
+        self.assertEqual(cp.q("Brady's a\\b"), "Brady\\'s a\\\\b")
+
+    def test_the_escaped_form_leaves_the_literal_balanced(self):
+        for name in ("Brady's Projects", "a\\b", "Brady's a\\b'c", "'", "\\"):
+            literal = f"name = '{cp.q(name)}'"
+            bare = literal.replace("\\\\", "").replace("\\'", "")
+            self.assertEqual(bare.count("'") % 2, 0, f"{name!r} left {literal!r} unbalanced")
+
+    def _queries_from(self, coro_factory):
+        seen = []
+
+        async def call(tool, args):
+            if tool == "mcp_search_drive_files":
+                seen.append(str(args.get("query") or ""))
+            return "Found 0 files"
+        try:
+            run(coro_factory(call))
+        except cp.Failed:
+            pass
+        return seen
+
+    def test_every_query_a_hostile_name_reaches_is_still_balanced(self):
+        NASTY = "Brady's a\\b"
+        runs = [
+            lambda call: cp.resolve_folder(NASTY, call),
+            lambda call: cp._find_created(NASTY, call),
+            lambda call: cp._find_created(NASTY, call, folders_only=True),
+            lambda call: cp._in_folder("1SheetAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", NASTY, call,
+                                       NASTY),
+            lambda call: cp._owner_of("1SheetAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", call, NASTY),
+            lambda call: cp.create_folder({"name": NASTY}, call,
+                                          known={"create_state": "unknown"}),
+        ]
+        queries = [q for r in runs for q in self._queries_from(r)]
+        self.assertGreaterEqual(len(queries), 6, 'no queries were captured at all')
+        for query in queries:
+            bare = query.replace("\\\\", "").replace("\\'", "")
+            self.assertEqual(bare.count("'") % 2, 0, f"unbalanced query: {query!r}")
+
+    def test_no_drive_query_in_the_source_interpolates_a_raw_value(self):
+        src = Path(cp.__file__).read_text()
+        offenders = []
+        for line in src.splitlines():
+            if "'{" not in line:
+                continue
+            if not any(k in line for k in ("name = ", "in parents", "mimeType")):
+                continue        # prose, not a query
+            offenders += [m.group(1) for m in _re.finditer(r"'\{([^{}]+)\}'", line)
+                          if not m.group(1).startswith("q(")]
+        self.assertEqual(offenders, [], 'a Drive query interpolates a value without q()')
+
+
+class TheAccessCheckOnlyCallsToolsTheRegistryAllows(unittest.TestCase):
+    """_owner_of used to try mcp_get_drive_file_info, which is registered on no connector at
+    all — connectors.allowed() refuses it outright — and which this server does not publish
+    either. It was an allow-list bypass that could never have answered."""
+
+    def test_every_metadata_tool_it_may_try_is_registered_and_allowed(self):
+        from backend import connectors as cn
+        self.assertTrue(cp._OWNER_METADATA_TOOLS)
+        for tool, _key in cp._OWNER_METADATA_TOOLS:
+            ok, why = cn.allowed(tool)
+            self.assertTrue(ok, f"{tool} is not callable: {why}")
+
+    def test_the_unregistered_fallback_is_gone(self):
+        from backend import connectors as cn
+        self.assertFalse(cn.allowed("mcp_get_drive_file_info")[0])
+        self.assertNotIn("mcp_get_drive_file_info",
+                         [t for t, _ in cp._OWNER_METADATA_TOOLS])
+        f = Fake(mcp_get_drive_file_metadata="⚠️ MCP tool unavailable")
+        run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertNotIn("mcp_get_drive_file_info", [t for t, _ in f.calls])
+
+    def test_a_tool_this_connector_does_not_publish_is_marked_unavailable(self):
+        from backend import connectors as cn
+        act = cn.action("google_workspace", "mcp_get_drive_file_metadata")
+        self.assertIs(act.get("available"), False,
+                      'the one registered tool the live server does not publish')
+        self.assertIn("does not publish", act.get("unavailable_because", ""))
+
+    def test_an_unavailable_read_is_not_counted_as_a_live_one(self):
+        from backend import connectors as cn
+        g = next(c for c in cn.inventory()["connectors"]
+                 if c["name"] == "google_workspace")
+        by = {a["tool"]: a for a in g["actions"]}
+        self.assertFalse(by["mcp_get_drive_file_metadata"]["available"])
+        self.assertTrue(by["mcp_search_drive_files"]["available"])
+        self.assertEqual(g["counts"]["registered_but_unavailable"], 1)
+        live_reads = [a["tool"] for a in g["actions"]
+                      if a["kind"] == cn.READ and a["enabled"] and a["available"]]
+        self.assertEqual(g["counts"]["read"], len(live_reads))
+        self.assertNotIn("mcp_get_drive_file_metadata", live_reads)
+        self.assertIn("Available means", cn.inventory()["note"])
+
+    def test_access_stays_unknown_rather_than_being_filled_in(self):
+        # No metadata tool, and a search that cannot identify the account: unknown, and said.
+        f = Fake(mcp_get_drive_file_metadata="⚠️ MCP tool unavailable",
+                 mcp_search_drive_files="⚠️ MCP tool unavailable")
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["access"], "unknown")
+        self.assertNotEqual(out["access"], "ok")
+
+    @unittest.skipUnless(SCHEMA_DUMP.exists(), "live schema dump not on this machine")
+    def test_the_registry_matches_what_the_connector_publishes_but_for_that_one(self):
+        from backend import connectors as cn
+        published = {t["name"] for t in _json.loads(SCHEMA_DUMP.read_text())["schemas"]}
+        registered = set(cn.CONNECTORS["google_workspace"]["actions"])
+        self.assertEqual(len(published), 25)
+        self.assertEqual(len(registered), 26)
+        self.assertEqual(registered - published, {"mcp_get_drive_file_metadata"})
+        self.assertEqual(published - registered, set())
+        # ...and the one gap is the one the registry declares unavailable.
+        unavailable = {t for t, a in cn.CONNECTORS["google_workspace"]["actions"].items()
+                       if a.get("available") is False}
+        self.assertEqual(unavailable, registered - published)
+
+
+class TheApprovalGuardsAreUntouched(unittest.TestCase):
+    """None of the recovery work above may widen what Ace can call."""
+
+    def test_the_never_tools_are_still_refused(self):
+        from backend import connectors as cn
+        for tool in ("mcp_create_drive_file", "mcp_import_to_google_slides"):
+            self.assertFalse(cn.allowed(tool)[0], tool)
+
+    def test_the_gated_writes_still_need_review(self):
+        from backend import connectors as cn
+        for tool in ("mcp_modify_doc_text", "mcp_send_gmail_message",
+                     "mcp_get_drive_shareable_link"):
+            self.assertEqual(cn.action("google_workspace", tool)["approval"], cn.REVIEW)
+
+    def test_the_creates_still_route_through_a_verified_capability(self):
+        from backend import connectors as cn
+        for tool, cap in (("mcp_create_drive_folder", "create_folder"),
+                          ("mcp_create_doc", "create_doc"),
+                          ("mcp_create_spreadsheet", "create_spreadsheet")):
+            self.assertEqual(cn.action("google_workspace", tool)["via_capability"], cap)
+            self.assertIn(cap, cp.REGISTRY)
+
+    def test_a_stop_request_still_beats_an_explicit_start_fresh(self):
+        async def stop():
+            return True
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED")
+        with self.assertRaises(cp.Cancelled):
+            run(cp.create_folder({"name": "Deals"}, f,
+                                 known={"create_state": "unknown", "start_fresh": True},
+                                 should_stop=stop))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+
+    def test_a_checkpoint_that_will_not_write_still_stops_the_folder_create(self):
+        async def checkpoint(patch):
+            return False
+        f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f, checkpoint=checkpoint))
+        self.assertIn("could not record", str(e.exception))
+        self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+
+
+class TheRefusalSurvivesBeingReAsked(unittest.TestCase):
+    """The guarantee has to hold across ATTEMPTS, not just within one.
+
+    tasks.accept carries exactly file_id / url / create_state / create_marker from a failed
+    attempt into the retry it creates. So the state a refusal reports is not cosmetic: report
+    one the guard does not recognise and the third attempt sails past it and creates the
+    second file. Found while writing the refusal — a `create_state: "unresolved"` would have
+    done exactly that."""
+
+    CARRIED = ("file_id", "url", "create_state", "create_marker")   # tasks.py, verbatim
+
+    def _reask(self, handler, args, first_known, rounds=3):
+        creates, known = [], dict(first_known)
+        for _ in range(rounds):
+            f = Fake(mcp_create_drive_folder=f"Created. ID: {FOLDER_ID}",
+                     mcp_create_spreadsheet='{"spreadsheetId": "1NewSheetAAAAAAAAAAAAAAAAAAAAAAAAA"}',
+                     mcp_create_doc="Created. ID: 1NewDocAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                     mcp_search_drive_files="Found 0 files")
+            with self.assertRaises(cp.Failed) as e:
+                run(handler(args, f, known=known))
+            creates.append([t for t, _ in f.calls
+                            if t.startswith("mcp_create") or t.startswith("mcp_import")])
+            known = {k: v for k, v in e.exception.result.items() if k in self.CARRIED}
+        return creates, known
+
+    def test_a_folder_is_never_created_however_often_he_re_asks(self):
+        creates, known = self._reask(cp.create_folder, {"name": "Deals"},
+                                     {"create_state": "unknown"})
+        self.assertEqual(creates, [[], [], []], 're-asking created something')
+        self.assertIn(known.get("create_state"), cp._LOST_CREATE_STATES,
+                      'the state carried into the next attempt no longer trips the guard')
+
+    def test_the_same_holds_for_documents_and_spreadsheets(self):
+        for handler, args in ((cp.create_doc, {"title": "Notes", "blocks": DOC_BLOCKS}),
+                              (cp.create_spreadsheet, {"title": "T", "rows": ROWS})):
+            creates, known = self._reask(handler, args, {"create_state": "dispatched"})
+            self.assertEqual(creates, [[], [], []], handler.__name__)
+            self.assertIn(known.get("create_state"), cp._LOST_CREATE_STATES)
+
+    def test_the_states_that_mean_maybe_created_are_all_guarded(self):
+        self.assertEqual(set(cp._LOST_CREATE_STATES), {"unknown", "dispatched"})
+        for state in cp._LOST_CREATE_STATES:
+            f = Fake(mcp_create_drive_folder="MUST NOT BE CALLED",
+                     mcp_search_drive_files="Found 0 files")
+            with self.assertRaises(cp.Failed):
+                run(cp.create_folder({"name": "Deals"}, f, known={"create_state": state}))
+            self.assertEqual([t for t, _ in f.calls].count("mcp_create_drive_folder"), 0)
+
+    def test_a_refused_create_is_not_treated_as_maybe_created(self):
+        # The provider ANSWERED "no". That is settled, and re-asking may try again.
+        f = Fake(mcp_create_drive_folder=f"Created. ID: {FOLDER_ID}",
+                 mcp_search_drive_files=_hit("Deals", FOLDER_ID))
+        out = run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "refused"}))
+        self.assertEqual(out["file_id"], FOLDER_ID)

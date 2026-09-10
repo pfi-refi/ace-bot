@@ -13,14 +13,49 @@ survived a read-back. And being able to read a file over Ace's own connection is
 as Brady being able to open it in his browser — that difference is the likeliest reason he
 saw "does not exist" — so ownership is checked separately and, when it cannot be established,
 said plainly instead of dressed up as ready.
+
+THERE IS NO IDENTITY CHANNEL ON CREATE, AND THIS FILE NO LONGER PRETENDS THERE IS
+(2026-09-10). An earlier pass generated a per-attempt marker, checkpointed it, and then
+"reconciled" a lost create by looking for that marker in a Drive search result. The marker
+was never sent to the provider, because there is nowhere to send it. Measured against the
+captured live schema dump (work/remote-mcp-schemas.json, 25 published tools, every one of
+them `additionalProperties: false`):
+
+    mcp_create_drive_folder     folder_name, parent_folder_id, user_google_email
+    mcp_create_doc              title, content, user_google_email
+    mcp_create_spreadsheet      title, sheet_names, user_google_email
+    mcp_import_to_google_doc    file_name, content, file_path, file_url, source_format,
+                                folder_id, user_google_email
+    mcp_import_to_google_sheets  (the same set)
+
+No `description`, no `appProperties`, no `properties`, no custom metadata of any kind — and
+no update/patch/rename tool published that could attach one afterwards. So the marker branch
+could never fire: it was dead code shaped like a safeguard, which is worse than no safeguard,
+because it reads as if identity had been proven.
+
+What is left is the honest rule. AFTER A LOST CREATE, A NAME MATCH IS A CANDIDATE, NEVER AN
+IDENTITY. Ace does not adopt it, does not create a second one, and says what it found so
+Brady can decide. The only ways past that are things HE says: an id to use, or an explicit
+instruction to start fresh. Neither is ever inferred from a search result.
 """
 import json
 import logging
 import os
 import re
-import uuid
 
 logger = logging.getLogger("ace2.capabilities")
+
+
+def _now_iso() -> str:
+    """When a side effect was dispatched, in UTC.
+
+    This replaces the per-attempt marker that used to be checkpointed here. The marker could
+    not be sent to the provider (see the module docstring), so it proved nothing; a dispatch
+    time is real evidence Brady can compare against Drive's own "created" column when he is
+    deciding whether a file is the one a lost attempt made.
+    """
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 # The Google identity Brady is signed in as. Set it and a created file whose owner does not
 # match is reported as inaccessible rather than announced as ready.
@@ -303,33 +338,23 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
     create_state = str(known.get("create_state") or "")
 
     # ── AN EARLIER ATTEMPT MAY HAVE CREATED THIS ALREADY ────────────────────────
-    if not file_id and create_state == "unknown":
+    if not file_id and create_state in _LOST_CREATE_STATES:
         # The dangerous case Codex reproduced: a create was dispatched and its response was
         # lost, so the provider may hold a file we have no id for. Creating again is how two
-        # documents appear. Try to reconcile; if that cannot be done conclusively, STOP and
-        # ask — a title match is a candidate, not proof of identity.
-        await say("Checking whether the earlier attempt already created it")
-        marker = str(known.get("create_marker") or "")
-        found = await _find_created(title, marker, call)
-        if found.get("file_id"):
-            file_id = found["file_id"]
+        # documents appear. "dispatched" counts too — the checkpoint is written BEFORE the
+        # call, so a crash in between leaves exactly the same uncertainty.
+        resolution, given = _explicit_resolution(known)
+        if resolution == "adopt":
+            file_id = given
             await mark({"file_id": file_id, "url": sheet_url(file_id),
-                        "create_state": "confirmed", "reconciled": found.get("how")})
-        elif found.get("candidates"):
-            raise Failed(
-                "An earlier attempt at this may already have created a spreadsheet — the "
-                "provider stopped responding before it said so, and I can see "
-                f"{len(found['candidates'])} file(s) with this name. I will not create "
-                "another one on a guess. Open Drive and tell me whether to use the existing "
-                "one or make a fresh one.",
-                {"create_state": "unknown", "candidates": found["candidates"][:5]})
-        else:
-            raise Failed(
-                "An earlier attempt dispatched a create and never learned the outcome, and I "
-                "cannot confirm either way from the provider. I have NOT created another one, "
-                "because that is how you end up with two. Check Drive for "
-                f"'{title}' and tell me which way to go.",
-                {"create_state": "unknown"})
+                        "create_state": "confirmed",
+                        "reconciled": "Brady gave me this id himself"})
+        elif resolution != "fresh":
+            await say("Checking whether the earlier attempt already created it")
+            found = await _find_created(title, call)
+            raise _unresolved_create("spreadsheet", "created", title,
+                                     found.get("candidates") or [])
+        # 'fresh' falls through to the create below, which Brady asked for in so many words.
 
     # WHERE IT GOES. create_spreadsheet takes NO folder argument on this connector, and
     # nothing here can move a file afterwards, so anything it makes lands in the root of
@@ -345,10 +370,10 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
     if not file_id:
         if await stopping():
             raise Cancelled("Stopped before anything was created.", {})
-        marker = uuid.uuid4().hex[:12]
         # Written first, deliberately. If the response is lost, THIS is what tells the next
-        # attempt that a file may exist.
-        await mark({"create_state": "dispatched", "create_marker": marker,
+        # attempt that a file may exist. It is a record of INTENT, not of identity — nothing
+        # in it reaches the provider.
+        await mark({"create_state": "dispatched", "create_dispatched_at": _now_iso(),
                     "create_title": title})
         await say(f"Creating the spreadsheet in {folder_name}" if folder_id
                   else "Creating the spreadsheet")
@@ -366,8 +391,9 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
             raise Failed(
                 f"The create request went out and never came back ({type(e).__name__}). A "
                 f"spreadsheet may or may not have been made — I will not send another one "
-                f"until that is settled.",
-                {"create_state": "unknown", "create_marker": marker})
+                f"until that is settled. Tell me the id to use, or tell me to start fresh.",
+                {"create_state": "unknown",
+                 "resolution_needed": "give me the id to use, or tell me to start fresh"})
         if _looks_like_error(made):
             # A refusal is an ANSWER: the provider declined, so nothing was created.
             await mark({"create_state": "refused"})
@@ -379,7 +405,9 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
             await mark({"create_state": "unknown"})
             raise Failed("the provider answered without a spreadsheet id, so there is nothing "
                          "to link to and it is not safe to say this was created",
-                         {"create_state": "unknown", "create_marker": marker})
+                         {"create_state": "unknown",
+                          "resolution_needed": "give me the id to use, or tell me to start "
+                                               "fresh"})
         await mark({"file_id": file_id, "url": sheet_url(file_id),
                     "create_state": "confirmed", "folder_id": folder_id or "",
                     "wrote_at_create": "yes" if folder_id else "no"})
@@ -440,7 +468,7 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
     # the location was unknown. Root is only ever claimed when no folder was asked for.
     placed_in = ""
     if folder_id:
-        if await _in_folder(file_id, folder_id, call):
+        if await _in_folder(file_id, folder_id, call, title):
             placed_in = folder_name or args.get("folder") or folder_id
         else:
             placed_in = "not confirmed"
@@ -492,28 +520,177 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
     }
 
 
-async def _find_created(title: str, marker: str, call) -> dict:
+def _ids_in(text: str) -> list:
+    """Every provider id in a search result, in order, deduped.
+
+    The connector's own declared shape puts them after "ID:", which is the narrow reading and
+    the one to prefer — it cannot pick up a token out of a filename or a link. A structured
+    body has no such marker, so the general scan is the fallback rather than the default.
+    """
+    t = str(text or "")
+    out = []
+    for m in re.finditer(r"\bID:\s*([A-Za-z0-9_-]{25,80})", t):
+        if m.group(1) not in out:
+            out.append(m.group(1))
+    if out:
+        return out
+    for cand in _ID_RE.findall(t):
+        if cand not in out and (not cand.isalpha() or len(cand) >= 30):
+            out.append(cand)
+    return out
+
+
+def _mentions_id(text: str, file_id: str) -> bool:
+    """Is THIS id in the provider's answer — as a whole token, not as a substring?
+
+    `file_id in text` says yes when the id is a prefix of a longer id, which is how a
+    verification step passes on the wrong file. The id alphabet is the boundary.
+    """
+    if not file_id:
+        return False
+    return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(file_id)}(?![A-Za-z0-9_-])",
+                     str(text or "")) is not None
+
+
+# EVERY STATE THAT MEANS "a create may have reached Google and we do not know". "dispatched"
+# belongs here as much as "unknown": the checkpoint is written BEFORE the call, so a crash in
+# that window leaves a task that was never told anything either way. Whatever this set says,
+# the states a handler REPORTS on failure have to stay inside it — tasks.py carries
+# create_state forward into a re-ask, and a state the guard does not recognise would let the
+# next attempt create the second file.
+#
+# AND THE STORE HAS TO AGREE (2026-09-10, adversarial review). This guard can only fire on a
+# state tasks.py actually carries forward, and its unresolved-create query hard-coded
+# 'unknown' — so widening this tuple alone did nothing for "dispatched" past the dedup window.
+# The same list now lives in tasks.MAYBE_CREATED_STATES and the two are pinned equal by a
+# test. It is duplicated rather than imported on purpose: this module deliberately imports no
+# other backend module, so a handler can be exercised without a database.
+_LOST_CREATE_STATES = ("unknown", "dispatched")
+
+# WHAT COUNTS AS A RESOLUTION OF AN UNRESOLVED CREATE, AND WHERE IT MAY COME FROM.
+#
+# NOT FROM `args`. NOT EVER (2026-09-10, adversarial review — this is a security fix, not a
+# tidy-up). These keys used to be read from the task's own arguments as well as from the task
+# record, and `args` is CALLER DATA: POST /actions/start (main.py) passes an arbitrary request
+# body straight through to taskrunner.dispatch, unfiltered. So a single request body of
+#
+#     {"capability": "create_folder", "args": {"name": "Deals", "start_fresh": true}}
+#
+# forced the second folder the whole lost-create guard exists to prevent, and
+#
+#     {"args": {"name": "Deals", "use_existing_folder_id": "<any id at all>"}}
+#
+# adopted an arbitrary Drive folder as this task's output — the "stranger adoption" Codex
+# reported, reachable directly rather than only by inference. Holding the bearer token is not
+# the same thing as Brady making a decision, and the HUD holds the bearer token. chat.py's
+# start_task branch allowlists model output (`task_args = {"name": a.get("name")}`) and so was
+# never the exposure; that allowlist protected exactly one of the two callers.
+#
+# `known` is the task ROW's result. It is written only by tasks.checkpoint and the settle
+# path, both server-side, and tasks.accept's re-ask carry-forward is whitelisted to
+# file_id / url / create_state / create_marker — so no route lets a caller put a key in here.
+# That makes it the only channel of the two that cannot be forged, and it is the only one read.
+#
+# THE CONSEQUENCE, STATED PLAINLY: nothing in this codebase writes a resolution key into a
+# task record today, so RIGHT NOW THERE IS NO ROUTE IN AT ALL. An unresolved create dead-ends
+# until someone intervenes server-side. That is deliberate and it is the honest state: the
+# capabilities note's open item ("Brady's 'use that one' has no route in") should stay open
+# until the way in is a genuine server-approved receipt — review_store.propose/approve is this
+# codebase's existing machinery for "a human approved this exact payload, once" — rather than
+# a flag any client can set. A dead end that refuses is a limitation. A forgeable
+# authorisation is a defect, and it is the more expensive of the two by a wide margin.
+_ADOPT_KEYS = ("use_existing_file_id", "use_existing_folder_id", "adopt_file_id")
+_FRESH_KEYS = ("start_fresh", "create_a_new_one")
+
+
+def _explicit_resolution(known: dict = None) -> tuple:
+    """('adopt', file_id) | ('fresh', '') | ('', '') — an instruction, never a guess.
+
+    Reads SERVER-SIDE TASK STATE ONLY. See the note above for why caller-supplied `args` is
+    not consulted and must not be reintroduced. The no-duplicate-create guarantee is otherwise
+    unchanged: Ace still never adopts on a name match and never re-dispatches on its own.
+    """
+    known = known or {}
+    for k in _FRESH_KEYS:
+        if known.get(k):
+            return "fresh", ""
+    for k in _ADOPT_KEYS:
+        v = str(known.get(k) or "").strip()
+        if v:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{25,80}", v):
+                raise Failed(f"'{v[:40]}' is not a Drive id, so I have not used it and I have "
+                             f"not created anything. Give me the id out of the Drive URL — the "
+                             f"long token after /folders/ or /d/ — or tell me to start fresh.")
+            return "adopt", v
+    return "", ""
+
+
+async def _find_created(title: str, call, folders_only: bool = False) -> dict:
     """Look for a file an unanswered create may have left behind.
 
-    Returns {'file_id'} only when identity is CERTAIN, otherwise {'candidates'}. A title match
-    is not identity — Brady names things the same way twice — so a lone name match comes back
-    as a candidate for him to resolve, never as a confirmed id.
+    Returns {'candidates': [...]} or {}. NEVER {'file_id'}: this connector gives no way to
+    write an identity marker on create (see the module docstring), so nothing a search can
+    return proves that a file with the right name is the one the lost attempt made. Brady
+    names things the same way twice, and a folder created in 2020 matches just as well as one
+    created ninety seconds ago.
     """
+    query = f"trashed = false and name = '{q(title)}'"
+    if folders_only:
+        query = ("mimeType = 'application/vnd.google-apps.folder' and " + query)
     try:
-        out = await call("mcp_search_drive_files", {"query": f"name = '{q(title)}'"})
+        out = await call("mcp_search_drive_files", {"query": query, "page_size": 25})
     except Exception:
         return {}
     if not out or _looks_like_error(out):
         return {}
-    if marker and marker in out:
-        got = extract_id(out)
-        if got:
-            return {"file_id": got, "how": "provider marker matched"}
-    ids = []
-    for cand in _ID_RE.findall(out):
-        if cand not in ids and (not cand.isalpha() or len(cand) >= 30):
-            ids.append(cand)
+    ids = _ids_in(out)
     return {"candidates": ids} if ids else {}
+
+
+def _unresolved_create(thing: str, verb: str, title: str, candidates: list,
+                       extra: dict = None) -> Failed:
+    """The one message for "a create was dispatched and never answered".
+
+    Says exactly what is known, refuses to guess, CARRIES THE CANDIDATES so Brady is told
+    what was found (the Docs handler used to throw them away), and — the part that was
+    missing everywhere — names the two things he can say to settle it. Same words for
+    folders, documents and spreadsheets, because it is the same situation.
+    """
+    ids = list(candidates or [])
+    n = len(ids)
+    return Failed(
+        f"An earlier attempt to make '{title}' never came back, and nothing proves "
+        + (f"which of the {n} {thing}s with that name it made" if n > 1 else
+           f"that any {thing} with that name is the one it made" if n == 1 else
+           "whether it was made at all")
+        + f". This connection gives me no way to mark a {thing} as mine when I create it, so "
+          f"a matching name is all a search can ever tell me. I have NOT {verb} another one; "
+          f"I will not create another one on a guess, and I will not adopt an existing "
+          f"{thing} on a name match. Tell me the id to use, or tell me to start fresh and I "
+          f"will make a new one.",
+        # "unknown" DELIBERATELY, not a new word: tasks.py carries exactly
+        # file_id / url / create_state / create_marker from a failed attempt into the retry,
+        # so a state this file invented would be carried and then not recognised by the guard
+        # above — and the next re-ask would create the second file this whole path exists to
+        # prevent. Verified by TheRefusalSurvivesBeingReAsked below.
+        {"create_state": "unknown", "candidates": ids[:5],
+         "candidate_count": n,
+         "resolution_needed": "give me the id to use, or tell me to start fresh",
+         **(extra or {})})
+
+
+# THE ONLY METADATA TOOLS THIS MAY TRY, and on Brady's connector it is a list of one that
+# cannot be served (2026-09-10, measured against work/remote-mcp-schemas.json): the server
+# publishes 25 tools and mcp_get_drive_file_metadata is not among them — it is the single
+# registry entry with no published counterpart. Of the six Drive tools it DOES publish
+# (search, create_file, create_folder, get_file_content, get_file_download_url,
+# get_shareable_link) not one returns owners or permissions.
+#
+# So on this connection the permission check below cannot run, `access` comes back "unknown",
+# and that is reported as unknown. The parsing is kept, and kept tested, because a connector
+# that publishes a metadata tool is a configuration change rather than a rewrite — but
+# nothing here upgrades weaker evidence to "ok" to fill the gap.
+_OWNER_METADATA_TOOLS = (("mcp_get_drive_file_metadata", "file_id"),)
 
 
 async def _owner_of(file_id: str, call, title_hint: str = "") -> tuple:
@@ -531,8 +708,14 @@ async def _owner_of(file_id: str, call, title_hint: str = "") -> tuple:
     cannot establish either, the honest answer is unknown — which the caller reports as a
     warning rather than a promise.
     """
-    for tool, key in (("mcp_get_drive_file_metadata", "file_id"),
-                      ("mcp_get_drive_file_info", "file_id")):
+    for tool, key in _OWNER_METADATA_TOOLS:
+        # ONLY TOOLS THE REGISTRY ACTUALLY PERMITS (2026-09-10). This loop used to try
+        # mcp_get_drive_file_info as a fallback — a tool registered on no connector, which
+        # connectors.allowed() refuses outright and the live server does not publish. Calling
+        # it was an allow-list bypass that could never have produced an answer.
+        from . import connectors as _cn
+        if not _cn.allowed(tool)[0]:
+            continue
         try:
             out = await call(tool, {key: file_id})
         except Exception:
@@ -564,9 +747,9 @@ async def _owner_of(file_id: str, call, title_hint: str = "") -> tuple:
             return owner, "no_access", "you are not in the file's permission list"
         # An owner with no permission list proves nothing about whether he can open it.
         return owner, "unknown", "the provider returned no permission list to check against"
-    # NO METADATA TOOL ON THIS CONNECTION (confirmed live, 2026-09-10). The server publishes
-    # 25 tools and neither get_drive_file_metadata nor get_drive_file_info is among them, so
-    # the permission check above can never run here.
+    # NO METADATA TOOL ON THIS CONNECTION (confirmed against the captured live schema dump,
+    # 2026-09-10). The server publishes 25 tools and get_drive_file_metadata is not among
+    # them, so the permission check above cannot run here at all.
     #
     # search_drive_files DOES return an account, in its own declared shape:
     #   - Name: "..." (ID: <id>, ..., Last Edited By: Brady McGraw <pfi@example.com>) Link: ...
@@ -575,11 +758,12 @@ async def _owner_of(file_id: str, call, title_hint: str = "") -> tuple:
     # record, and labelled as what it is rather than promoted to "you own it".
     try:
         found = await call("mcp_search_drive_files",
-                           {"query": f"trashed = false and name = '{q(title_hint)}'"}) \
+                           {"query": f"trashed = false and name = '{q(title_hint)}'",
+                            "page_size": 25}) \
             if title_hint else ""
     except Exception:
         found = ""
-    if found and not _looks_like_error(found) and file_id in str(found):
+    if found and not _looks_like_error(found) and _mentions_id(found, file_id):
         seg = str(found).split(file_id, 1)[1][:400]
         m = re.search(r"Last Edited By:[^<]*<([^>]+)>", seg)
         who = (m.group(1) or "").lower() if m else ""
@@ -849,24 +1033,26 @@ async def create_doc(args: dict, call, progress=None, known=None,
 
     body = "\n\n".join(str(b).strip() for b in blocks)
     file_id = str(known.get("file_id") or "").strip()
-    if not file_id and str(known.get("create_state") or "") == "unknown":
-        await say("Checking whether the earlier attempt already created it")
-        found = await _find_created(title, str(known.get("create_marker") or ""), call)
-        if found.get("file_id"):
-            file_id = found["file_id"]
+    if not file_id and str(known.get("create_state") or "") in _LOST_CREATE_STATES:
+        # Same rule and the same words as the other two handlers, including the candidates:
+        # this branch used to find them and then drop them on the floor, so Brady was told
+        # "I could not confirm" without being told what was actually in his Drive.
+        resolution, given = _explicit_resolution(known)
+        if resolution == "adopt":
+            file_id = given
             await mark({"file_id": file_id, "url": doc_url(file_id),
-                        "create_state": "confirmed"})
-        else:
-            raise Failed(
-                "An earlier attempt dispatched a create and never learned the outcome. I have "
-                f"NOT created another one. Check Drive for '{title}' and tell me which way to "
-                "go.", {"create_state": "unknown"})
+                        "create_state": "confirmed",
+                        "reconciled": "Brady gave me this id himself"})
+        elif resolution != "fresh":
+            await say("Checking whether the earlier attempt already created it")
+            found = await _find_created(title, call)
+            raise _unresolved_create("document", "created", title,
+                                     found.get("candidates") or [])
 
     if not file_id:
         if await stopping():
             raise Cancelled("Stopped before anything was created.", {})
-        marker = uuid.uuid4().hex[:12]
-        await mark({"create_state": "dispatched", "create_marker": marker,
+        await mark({"create_state": "dispatched", "create_dispatched_at": _now_iso(),
                     "create_title": title})
         # Same story as the spreadsheet: create_doc has no folder argument and nothing can
         # move the file afterwards, so a folder request goes through the import route, which
@@ -885,8 +1071,11 @@ async def create_doc(args: dict, call, progress=None, known=None,
             await mark({"create_state": "unknown"})
             raise Failed(f"The create request went out and never came back "
                          f"({type(e).__name__}). A document may or may not have been made — "
-                         f"I will not send another until that is settled.",
-                         {"create_state": "unknown", "create_marker": marker})
+                         f"I will not send another until that is settled. Tell me the id to "
+                         f"use, or tell me to start fresh.",
+                         {"create_state": "unknown",
+                          "resolution_needed": "give me the id to use, or tell me to start "
+                                               "fresh"})
         if _looks_like_error(made):
             await mark({"create_state": "refused"})
             raise Failed(f"the provider refused to create it: {str(made)[:200]}")
@@ -895,7 +1084,9 @@ async def create_doc(args: dict, call, progress=None, known=None,
             await mark({"create_state": "unknown"})
             raise Failed("the provider answered without a document id, so there is nothing to "
                          "link to and it is not safe to say this was created",
-                         {"create_state": "unknown", "create_marker": marker})
+                         {"create_state": "unknown",
+                          "resolution_needed": "give me the id to use, or tell me to start "
+                                               "fresh"})
         await mark({"file_id": file_id, "url": doc_url(file_id),
                     "create_state": "confirmed", "folder_id": folder_id or ""})
 
@@ -920,7 +1111,7 @@ async def create_doc(args: dict, call, progress=None, known=None,
     warnings = []
     placed_in = ""
     if _folder_id:
-        if await _in_folder(file_id, _folder_id, call):
+        if await _in_folder(file_id, _folder_id, call, title):
             placed_in = args.get("folder") or _folder_id
         else:
             placed_in = "not confirmed"
@@ -964,43 +1155,40 @@ async def create_folder(args: dict, call, progress=None, known=None,
     # THE SAME GUARD THE OTHER TWO HAVE (Codex, 2026-09-10). This handler was missing it, so a
     # create whose response was lost would be dispatched a SECOND time on the next attempt.
     #
-    # AND IT MUST NOT ADOPT A STRANGER (Codex again). A first pass here took a single
-    # name match as proof the lost attempt had made it — so a "Deals" folder created in 2020
-    # would have been claimed as this task's output, and everything filed into it afterwards.
-    # A name is not an identity. Only the task's own marker proves that, and without it the
-    # match is a CANDIDATE for Brady to resolve.
-    if not file_id and str(known.get("create_state") or "") in ("unknown", "dispatched"):
-        if progress:
-            await progress("Checking whether the earlier attempt already made it")
-        marker = str(known.get("create_marker") or "")
-        found = await call("mcp_search_drive_files",
-                           {"query": "mimeType = 'application/vnd.google-apps.folder' "
-                                     f"and trashed = false and name = '{q(name)}'"})
-        ids = []
-        if found and not _looks_like_error(found):
-            for m in re.finditer(r"ID:\s*([A-Za-z0-9_-]{25,80})", str(found)):
-                if m.group(1) not in ids:
-                    ids.append(m.group(1))
-        if marker and marker in str(found) and len(ids) == 1:
-            file_id = ids[0]
+    # AND IT MUST NOT ADOPT A STRANGER (Codex again). A first pass here took a single name
+    # match as proof the lost attempt had made it — so a "Deals" folder created in 2020 would
+    # have been claimed as this task's output, and everything filed into it afterwards.
+    #
+    # A second pass claimed the task's marker settled that. IT CANNOT: the marker is never
+    # sent to the provider, because mcp_create_drive_folder takes folder_name and
+    # parent_folder_id and nothing else (additionalProperties: false — see the module
+    # docstring). That branch could not fire, which made this read like a safeguard while
+    # every real recovery fell through to the refusal below.
+    #
+    # So: a name match is a CANDIDATE and never an identity, and the way out is something
+    # Brady says — an id to adopt, or "start fresh" — never something Ace infers.
+    adopted = False
+    if not file_id and str(known.get("create_state") or "") in _LOST_CREATE_STATES:
+        resolution, given = _explicit_resolution(known)
+        if resolution == "adopt":
+            adopted = True
+            # HIS id, not one Ace picked. The Drive read-back below still has to find it, so
+            # a mistyped id fails loudly instead of being reported as a folder.
+            file_id = given
             await mark({"file_id": file_id, "create_state": "confirmed",
-                        "reconciled": "the provider marker matched"})
-        else:
-            raise Failed(
-                f"An earlier attempt to make '{name}' never came back, and nothing proves "
-                + (f"which of the {len(ids)} folders with that name it made"
-                   if len(ids) > 1 else
-                   "that any folder with that name is the one it made" if ids else
-                   "whether it was made at all")
-                + ". I have NOT made another one and I will not adopt an existing folder on "
-                  "a name match. Tell me which to use, or to start fresh.",
-                {"create_state": "unknown", "candidates": ids[:5]})
+                        "reconciled": "Brady gave me this id himself"})
+        elif resolution != "fresh":
+            if progress:
+                await progress("Checking whether the earlier attempt already made it")
+            found = await _find_created(name, call, folders_only=True)
+            raise _unresolved_create("folder", "made", name, found.get("candidates") or [])
+        # 'fresh' means he was told about the unresolved attempt and said make another one
+        # anyway. Honoured, recorded, and never assumed.
 
     if not file_id:
         if should_stop and await should_stop():
             raise Cancelled("Stopped before anything was created.", {})
-        marker = uuid.uuid4().hex[:12]
-        await mark({"create_state": "dispatched", "create_marker": marker,
+        await mark({"create_state": "dispatched", "create_dispatched_at": _now_iso(),
                     "create_title": name})
         if progress:
             await progress("Creating the folder")
@@ -1012,30 +1200,54 @@ async def create_folder(args: dict, call, progress=None, known=None,
         except Exception as e:
             await mark({"create_state": "unknown"})
             raise Failed(f"the create went out and never came back ({type(e).__name__}); a "
-                         f"folder may or may not exist", {"create_state": "unknown"})
+                         f"folder may or may not exist. Tell me the id to use, or tell me to "
+                         f"start fresh.",
+                         {"create_state": "unknown",
+                          "resolution_needed": "give me the id to use, or tell me to start "
+                                               "fresh"})
         if _looks_like_error(made):
+            # A refusal is an ANSWER: the provider declined, so nothing was created and this
+            # is not left in an unresolved state.
+            await mark({"create_state": "refused"})
             raise Failed(f"the provider refused to create it: {str(made)[:200]}")
         file_id = extract_id(made)
         if not file_id:
             await mark({"create_state": "unknown"})
             raise Failed("the provider answered without a folder id, so there is nothing to "
-                         "link to", {"create_state": "unknown"})
+                         "link to. Tell me the id to use, or tell me to start fresh.",
+                         {"create_state": "unknown",
+                          "resolution_needed": "give me the id to use, or tell me to start "
+                                               "fresh"})
         await mark({"file_id": file_id, "create_state": "confirmed"})
 
     if progress:
         await progress("Checking it is really there")
+    # WHOLE-TOKEN, NOT SUBSTRING: an id that is a prefix of a longer id would otherwise pass
+    # this check on the strength of a different folder's row.
     found = await call("mcp_search_drive_files",
-                       {"query": f"trashed = false and name = '{q(name)}'"})
-    if _looks_like_error(found) or file_id not in str(found):
+                       {"query": "mimeType = 'application/vnd.google-apps.folder' and "
+                                 f"trashed = false and name = '{q(name)}'",
+                        "page_size": 25})
+    if _looks_like_error(found) or not _mentions_id(found, file_id):
+        if adopted:
+            raise Failed(f"you told me to use {file_id}, but Drive does not return a folder "
+                         f"called '{name}' with that id, so I have not used it — and I have "
+                         f"not created anything either. Check the id, or tell me to start "
+                         f"fresh.", {"file_id": file_id, "create_state": "unknown"})
         raise Failed("the folder was created but does not come back in a Drive search, so it "
                      "is not verified", {"file_id": file_id, "partial": True})
     owner, access, how = await _owner_of(file_id, call, name)
+    warnings = [] if access == "ok" else [f"On access: {how}."]
+    if adopted:
+        # Never let an adoption read as a creation on the card.
+        warnings.insert(0, "I did not make a new folder — this is the one you told me to use.")
     return {"file_id": file_id,
             "url": f"https://drive.google.com/drive/folders/{file_id}",
             "action_label": "Open folder", "title": name,
+            "adopted_existing": adopted,
             "owner": owner or "", "access": access, "access_evidence": how,
             "link_kind": "owner-access URL — no sharing permission was created or changed",
-            "warnings": [] if access == "ok" else [f"On access: {how}."]}
+            "warnings": warnings}
 
 
 REGISTRY["create_doc"] = {
@@ -1063,6 +1275,44 @@ REGISTRY["create_folder"] = {
 # that way instead. Same verification either way: a real id, the artefact re-read, and the
 # link built from the id — plus a check that it really landed in the folder asked for.
 
+# ── WHAT A CALLER IS ALLOWED TO PUT IN A TASK'S ARGS ───────────────────────────
+# EVERY KEY EACH HANDLER ACTUALLY READS, AND NOTHING ELSE (2026-09-10, adversarial review).
+#
+# Removing the `args` read from _explicit_resolution closed the ADOPTION half of the request
+# body bypass and did NOT close the other half, which was only visible by running it: an
+# unresolved create is found by request_key, and tasks.request_key hashes the WHOLE args dict.
+# So any extra key at all — `start_fresh`, or `{"x": 1}` — produces a different key, the
+# unresolved row is never found, nothing is carried forward, the guard never sees a
+# create_state, and the second folder gets made. Measured end to end through POST
+# /actions/start against a real Postgres: `{"name": "Deals", "start_fresh": true}` completed
+# with one create call while the plain re-ask beside it correctly refused.
+#
+# So the client-settable channel is removed rather than patched key by key. A caller may send
+# the fields the handler reads; anything else is DROPPED at the route before the request key
+# is computed, which means an unknown key can no longer change a request's identity. Dropped,
+# not rejected, so a future field on a newer client cannot break an older server.
+#
+# `_client` is deliberately absent: it is a test injection point for the research handler and
+# was reachable from a request body.
+ARG_KEYS = {
+    "create_spreadsheet": ("title", "rows", "bold_header", "folder", "formatting",
+                           "value_input_option"),
+    "create_doc": ("title", "blocks", "folder"),
+    "create_folder": ("name", "parent_folder_id"),
+    "research": ("question", "max_searches"),
+}
+
+
+def sanitize_args(capability: str, args: dict) -> dict:
+    """The subset of `args` a caller is permitted to set for `capability`.
+
+    An unknown capability keeps nothing: dispatch refuses it anyway, and an empty dict cannot
+    smuggle anything into a request key on the way to that refusal.
+    """
+    allowed = ARG_KEYS.get((capability or "").strip(), ())
+    return {k: v for k, v in (args or {}).items() if k in allowed}
+
+
 def q(value: str) -> str:
     """Escape a value for a Drive query string.
 
@@ -1087,7 +1337,8 @@ async def resolve_folder(folder: str, call) -> tuple:
         return f, f            # already an id
     out = await call("mcp_search_drive_files",
                      {"query": "mimeType = 'application/vnd.google-apps.folder' "
-                               f"and trashed = false and name = '{q(f)}'"})
+                               f"and trashed = false and name = '{q(f)}'",
+                      "page_size": 25})
     if _looks_like_error(out):
         raise Failed(f"I could not look up a folder called '{f}', so I did not create "
                      f"anything: {str(out)[:140]}")
@@ -1104,14 +1355,40 @@ async def resolve_folder(folder: str, call) -> tuple:
     return ids[0], f
 
 
-async def _in_folder(file_id: str, folder_id: str, call) -> bool:
-    """Did it really land there? Asked of the provider, not assumed from the request."""
-    try:
-        out = await call("mcp_search_drive_files",
-                         {"query": f"'{folder_id}' in parents and trashed = false"})
-    except Exception:
-        return False
-    return bool(out) and not _looks_like_error(out) and file_id in str(out)
+async def _in_folder(file_id: str, folder_id: str, call, name: str = "") -> bool:
+    """Did it really land there? Asked of the provider, not assumed from the request.
+
+    Three things were wrong with the first version (Codex flagged the third; the first two
+    turned up looking for it).
+
+    THE PARENT ID WENT IN UNESCAPED, so it was the one Drive query in this file not going
+    through q(). An id cannot normally contain a quote, but this argument is also fed folder
+    NAMES by resolve_folder's id passthrough, and an unescaped quote closes the literal early
+    and produces a query that matches something else.
+
+    THE LISTING IS PAGED. Asking for everything in a parent returns the provider's default
+    ten rows, so a file put into a folder that already holds ten things read back as NOT
+    THERE — a correct placement reported as unconfirmed. The query is narrowed to the file's
+    own name and the page size asked for explicitly; if that finds nothing, the plain listing
+    is still checked before concluding it is absent, so a provider that ignores the name
+    filter cannot produce a false negative either.
+
+    AND THE ID WAS MATCHED AS A SUBSTRING. Codex asked whether a same-named file elsewhere
+    could satisfy this: not by name — the check has always been on the id — but an id that is
+    a PREFIX of another id would have passed on that other file's row. Matched as a whole
+    token now.
+    """
+    base = f"'{q(folder_id)}' in parents and trashed = false"
+    queries = [f"{base} and name = '{q(name)}'"] if name else []
+    queries.append(base)
+    for query in queries:
+        try:
+            out = await call("mcp_search_drive_files", {"query": query, "page_size": 100})
+        except Exception:
+            return False
+        if out and not _looks_like_error(out) and _mentions_id(out, file_id):
+            return True
+    return False
 
 
 def rows_to_csv(rows: list) -> str:

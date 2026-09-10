@@ -3058,19 +3058,24 @@ async def _run_and_settle(name: str, args: dict, key: str, sink: dict = None) ->
                 + ("The request may already have gone through — check before retrying."
                    if state == ops.UNKNOWN else "Nothing was sent; it is safe to try again."))
         await asyncio.to_thread(ops.settle, key, state, text)
-        _sink(sink, state)
+        _sink(sink, state, "mutation")
         raise
     state, text, record_id = ops.classify(result)
-    _sink(sink, state)
+    _sink(sink, state, "mutation")
     await asyncio.to_thread(ops.settle, key, state, text, record_id)
     return text
 
 
-def _sink(sink, state):
+def _sink(sink, state, kind: str = ""):
     """Record the journal's verdict where the turn can read it. The verdict is the evidence —
-    an interrupted turn must not re-derive "did this happen" from the sentence it produced."""
+    an interrupted turn must not re-derive "did this happen" from the sentence it produced.
+
+    `kind` is what the tool was DECLARED to be (read / mutation / unclassified), carried
+    alongside the verdict so the call site does not have to re-guess it from the name."""
     if sink is not None:
         sink["state"] = state
+        if kind:
+            sink["kind"] = kind
 
 
 async def _dispatch_write(name: str, args: dict, sink: dict = None) -> str:
@@ -3082,29 +3087,45 @@ async def _dispatch_write(name: str, args: dict, sink: dict = None) -> str:
     an invisible maybe. An interrupted-with-unknown-outcome action is reported, never
     silently replayed."""
     if name not in ops.JOURNALLED:
-        out = str(await asyncio.to_thread(tools.execute, name, args))
-        # Not journalled, so there is no verdict to read. A read is a read; anything else is
-        # UNKNOWN rather than assumed done.
-        _sink(sink, ops.COMPLETED if name in tools.NATIVE_READS else ops.UNKNOWN)
+        raw = await asyncio.to_thread(tools.execute, name, args)
+        # NO JOURNAL MEANS NO VERDICT (2026-09-10). This used to sink ops.COMPLETED for a
+        # native read, which is a false verdict: the journal never said that, and the only
+        # thing keeping it from being spoken as "this went through" was classify_result
+        # short-circuiting reads first. One refactor of that order and a calendar read
+        # becomes a completion claim again. The sink now records what the EXECUTOR said —
+        # ops.classify, the same rule the journalled path uses, which can only reach
+        # COMPLETED from a structured Outcome and never from prose.
+        state, out, _rid = ops.classify(raw)
+        kind = ("read" if name in tools.NATIVE_READS else
+                "mutation" if name in tools.NATIVE_MUTATIONS else "unclassified")
+        if kind == "unclassified":
+            # tools.py's two frozensets are meant to partition the native surface (pinned by
+            # test_conversation_context). Landing here means someone added a native tool and
+            # declared nothing about it — it is treated as a possible mutation with an
+            # unknown outcome, which is the safe default, but the gap is said out loud
+            # rather than left to be discovered from a wrong receipt.
+            logger.warning("native tool %s is in neither NATIVE_READS nor NATIVE_MUTATIONS; "
+                           "treating it as a possible mutation with an unknown outcome", name)
+        _sink(sink, state, kind)
         return out
     verdict, key, prior_receipt = await asyncio.to_thread(ops.begin, name, args)
     if verdict == "unavailable":
         # Fail CLOSED. Without the journal we cannot tell a redelivery from a new request,
         # and for an external provider that means a silent double-booking. Say plainly that
         # nothing was attempted, so the request is preserved rather than half-claimed.
-        _sink(sink, ops.UNAVAILABLE)
+        _sink(sink, ops.UNAVAILABLE, "mutation")
         return ("\u26a0\ufe0f NOT DONE — I could not reach the record that stops this from "
                 "being done twice, so I did not attempt it. Tell Brady it still needs doing "
                 "and try again shortly. Do not claim it happened.")
     if verdict == "duplicate":
-        _sink(sink, ops.COMPLETED)      # it DID happen, just not on this turn
+        _sink(sink, ops.COMPLETED, "mutation")   # it DID happen, just not on this turn
         return prior_receipt or "Already done moments ago — not repeated."
     if verdict == "in_flight":
-        _sink(sink, ops.UNKNOWN)
+        _sink(sink, ops.UNKNOWN, "mutation")
         return ("STOP: this exact action is already running from a previous turn. Do not "
                 "send it again. Say it is in progress and wait.")
     if verdict == "unknown":
-        _sink(sink, ops.UNKNOWN)
+        _sink(sink, ops.UNKNOWN, "mutation")
         return "\u26a0\ufe0f " + (prior_receipt or "Previous attempt's outcome is unknown.")
     task = asyncio.create_task(_run_and_settle(name, args, key, sink))
     try:
@@ -3125,6 +3146,7 @@ async def _dispatch_write(name: str, args: dict, sink: dict = None) -> str:
 # (Codex, 2026-09-10.)
 OP_DONE, OP_FAILED, OP_QUEUED, OP_READ = "done", "failed", "queued", "read"
 OP_UNKNOWN = "unknown"          # it ran; whether it changed anything is NOT established
+OP_UI = "ui"                    # painted a screen; nothing in anyone's data changed at all
 
 # Exact openings this codebase uses to mean "this did not happen". Still checked, but only as
 # one source of NEGATIVE evidence — never as the thing that decides success.
@@ -3153,30 +3175,66 @@ def classify_result(name: str, text: str, is_read: bool = False,
     whose default was success — so any answer it did not recognise became "this went through".
     Success is now positive-only: the journal's verdict, a declared read, or a task card's
     real state. Anything unrecognised is UNKNOWN, which no surface reports as done.
+
+    ORDER MATTERS, and it changed on 2026-09-10. The prose check used to run FIRST, which
+    meant it could overrule real evidence: `_dispatch_write` returns "⚠️ …" for a write whose
+    previous attempt was interrupted, and sinks ops.UNKNOWN beside it — the glyph won, the op
+    was recorded as a clean failure and the interrupted note dropped it entirely. A write that
+    may have gone through was reported as one that certainly did not. Structured evidence (a
+    card's state, the journal's verdict, a declared read) is now consulted before the prose,
+    and the prose is only ever consulted to say NO.
     """
     t = (text or "").strip()
     if not t:
         return OP_FAILED
-    if any(t.startswith(x) for x in _REFUSAL_OPENINGS):
-        return OP_FAILED
+    if name in tools.UI_TOOLS:
+        # A screen render is not a mutation of anything. Without this it fell through to
+        # UNKNOWN and Brady was told a card he watched appear "may or may not have taken
+        # effect" (Codex, 2026-09-10).
+        return OP_UI
     if card_state:
         # A dispatched task reports its OWN state; "accepted" is never "finished".
         return {"completed": OP_DONE, "failed": OP_FAILED,
                 "cancelled": OP_FAILED}.get(card_state, OP_QUEUED)
     if is_read or name in tools.NATIVE_READS:
+        # Ahead of `outcome` deliberately: a non-journalled call has no verdict to report, so
+        # the sink says UNKNOWN for it, and a read must not be dragged into the receipts by
+        # the absence of evidence about a mutation it never performed.
         return OP_READ
     if outcome:
         return _OPS_MEANING.get(outcome, OP_UNKNOWN)
+    if any(t.startswith(x) for x in _REFUSAL_OPENINGS):
+        return OP_FAILED
     return OP_UNKNOWN
 
 
 def interrupted_note(ops_list: list) -> str:
     """The history line an interrupted turn leaves behind, or '' when there is nothing true
-    to say. Tested by execution, not by reading the source."""
+    to say. Tested by execution, not by reading the source.
+
+    A FAILURE IS SOMETHING TRUE TO SAY (2026-09-10, adversarial review). This returned '' for
+    a turn whose only operations FAILED, so an interrupted turn where a task was refused
+    before it started left NO assistant row at all — the next turn read Brady's words with
+    silence under them and no idea he had asked for anything. Silence is not honesty; it is
+    the same missing-record failure this handler was written for, pointed at the other
+    outcome. Failures are now named.
+
+    THE REFUSAL PROSE IS DELIBERATELY NOT REPLAYED. Refusal text in this codebase is addressed
+    to the MODEL ("Tell Brady plainly and do not describe this as done", "Call start_task with
+    capability 'create_doc' and the same details"), and history.append feeds the RECENT
+    THREAD — the exact channel that, per the note further down this file, once resurfaced raw
+    tool-result strings as things "Ace said" and pushed the voice model into status-report
+    babble. So a failure is recorded as the FACT of a failure and the tool it belonged to, and
+    nothing else. That also keeps "a refusal never rides along as a completion" true by
+    construction: the refusal's own words are not in this string at all.
+    """
     done = [o for o in (ops_list or []) if o.get("state") == OP_DONE]
     queued = [o for o in (ops_list or []) if o.get("state") == OP_QUEUED]
     unsure = [o for o in (ops_list or []) if o.get("state") == OP_UNKNOWN]
-    if not (done or queued or unsure):
+    failed = [o for o in (ops_list or []) if o.get("state") == OP_FAILED]
+    if not (done or queued or unsure or failed):
+        # Still '' for a genuinely empty turn, and for one that only READ or only painted a
+        # screen: nothing was asked of the world, so there is nothing to report about it.
         return ""
     lines = ["\u26a0 INTERRUPTED — the call cut off before I answered."]
     if done:
@@ -3188,6 +3246,13 @@ def interrupted_note(ops_list: list) -> str:
     if unsure:
         lines.append("Outcome NOT confirmed — these may or may not have taken effect:")
         lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in unsure[:4]]
+    if failed:
+        # NAMES ONLY, and on ONE line: see the docstring. Deduplicated and order-preserving,
+        # so two refusals of the same tool do not read as two separate requests, and written
+        # without a bullet so it cannot be miscounted as one of the entries above.
+        names = list(dict.fromkeys(str(o.get("tool") or "something") for o in failed))
+        lines.append("Asked for and NOT done \u2014 these failed or were refused, and nothing "
+                     "changed: " + ", ".join(names[:6]))
     # A write shielded by _dispatch_write can settle AFTER this turn ends, so this list is not
     # a complete account of the turn and must not be read as one.
     lines.append("This is only what I saw before the line dropped — a write can finish after "
@@ -3424,6 +3489,15 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     rows = a.get("rows") or []
                     question = (a.get("question") or "").strip()
                     task_args, task_title, missing = {}, "", ""
+                    # PER-BLOCK, ALWAYS BOUND (2026-09-10). `card` used to be an unbound
+                    # loop local on the rejection paths, and the classification below read it
+                    # through `"card" in dir() or card` — which raises NameError on the very
+                    # branch it was meant to protect (dir() inside a function lists BOUND
+                    # locals only), killing the whole turn. Worse, when it did happen to be
+                    # bound it was bound by a PREVIOUS tool block, so a second start_task
+                    # whose arguments were rejected inherited the first one's card and was
+                    # reported to Brady as "started and still running".
+                    card, op_state = None, None
                     if cap == "create_spreadsheet":
                         if not (a.get("title") or "").strip() or not rows:
                             missing = ("A title and the contents are both required, and I "
@@ -3456,13 +3530,16 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     if not cap:
                         result = ("No task type came through. Ask Brady what he wants in one "
                                   "short sentence.")
+                        op_state = OP_FAILED     # nothing was dispatched: NOT started
                     elif missing:
                         result = missing
+                        op_state = OP_FAILED     # arguments refused: NOT started
                     else:
                         card = await taskrunner.dispatch(
                             cap, task_args,
                             origin=("voice" if fast else "typed"),
                             title=task_title)
+                        card = card if isinstance(card, dict) else {}
                         await emit("task", card)
                         st = card.get("state")
                         if st == tasks_mod.FAILED and not card.get("task_id"):
@@ -3480,14 +3557,16 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                                       f"show when it is done. Do NOT say it is built, ready or "
                                       f"open. Do NOT give a link. Then carry on the "
                                       f"conversation normally.")
+                        # Whatever the card actually says — queued, running, completed,
+                        # failed, cancelled — is what gets recorded. Derived from THIS
+                        # block's card, which is the only one in scope.
+                        op_state = classify_result("start_task", result,
+                                                   card_state=(st or ""))
                     # Recorded HERE, before the continue — this branch never reached the
                     # classification below, so a dispatched task was invisible to an
                     # interrupted turn's record entirely (Codex, 2026-09-10).
-                    turn_ops.append({
-                        "tool": "start_task", "text": result,
-                        "state": classify_result(
-                            "start_task", result,
-                            card_state=(card.get("state") if "card" in dir() or card else ""))})
+                    turn_ops.append({"tool": "start_task", "text": result,
+                                     "state": op_state or OP_UNKNOWN})
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id,
                                          "content": result})
                     continue
@@ -3554,6 +3633,40 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     block.name.removeprefix("mcp_").replace("_", " ").upper()
                 await emit("tool", {"name": block.name, "label": label, "status": "running", "ui": is_ui})
                 _outcome = {}
+                # WHAT THIS TOOL IS, DECIDED BEFORE IT RUNS. The registry and tools.py both
+                # declare a tool's kind STATICALLY, so a read is knowable without waiting for
+                # an answer — which matters because the answer may never arrive.
+                _declared_read = (block.name in tools.NATIVE_READS
+                                  or connectors.action(connectors.connector_of(block.name),
+                                                       block.name).get("kind") == "read")
+                # UNOBSERVED IS NOT DID-NOT-HAPPEN (2026-09-10). _dispatch_write shields the
+                # write and re-raises CancelledError, so a barge-in mid-write skipped the
+                # append below entirely: the operation was absent from turn_ops and the
+                # interrupted note never named it — Brady was told about everything EXCEPT
+                # the write that was actually in flight when the line dropped. The entry goes
+                # in BEFORE the await, marked outcome-unknown, and is overwritten with the
+                # real verdict if the call gets to come back.
+                #
+                # AND "UNOBSERVED" IS NOT "UNKNOWN" EITHER, WHEN THE TOOL CANNOT MUTATE
+                # ANYTHING (2026-09-10, adversarial review). The provisional state was
+                # computed from tools.NATIVE_READS alone, which holds only the NATIVE reads —
+                # so every MCP read (mcp_search_drive_files, mcp_get_doc_content,
+                # mcp_read_sheet_values, …) fell through to OP_UNKNOWN, and a barge-in during
+                # a Drive search wrote "may or may not have taken effect" about a search.
+                # That is a false alarm of exactly the kind this note exists to stop, pointed
+                # the wrong way: it invites Brady to go and check a record that a read could
+                # not have touched. connectors.py already states the kind before the call, so
+                # it is asked.
+                _entry = {"tool": block.name,
+                          "text": ((f"{label} ({block.name}) — started, and the line dropped "
+                                    f"before the answer came back.")
+                                   if (is_ui or _declared_read) else
+                                   (f"{label} ({block.name}) — started, and the line dropped "
+                                    f"before the outcome came back. It may have completed. "
+                                    f"Check the record before doing it again.")),
+                          "state": (OP_UI if is_ui else
+                                    OP_READ if _declared_read else OP_UNKNOWN)}
+                turn_ops.append(_entry)
                 if is_ui:
                     result = await _run_ui_tool(block.name, use_args, emit)
                 elif mcp_client.is_mcp_tool(block.name):
@@ -3585,13 +3698,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     await emit("confirmation", {"text": result})
                     confirmations.append(result)
                 # Classified HERE, where the tool and its answer are both in hand — not
-                # re-derived from prose later.
-                _is_read = (connectors.action(connectors.connector_of(block.name),
-                                              block.name).get("kind") == "read"
-                            or block.name in tools.NATIVE_READS)
-                turn_ops.append({"tool": block.name, "text": result,
-                                 "state": classify_result(block.name, result, _is_read,
-                                                          outcome=_outcome.get("state", ""))})
+                # re-derived from prose later. connectors.action() on a NATIVE name is safe:
+                # connector_of returns "" and action("", name) reads {} → {}, never raises.
+                _is_read = _declared_read or _outcome.get("kind") == "read"
+                # The provisional entry is UPDATED, not duplicated — the call came back, so
+                # its real outcome replaces "unknown, still in flight".
+                _entry["text"] = result
+                _entry["state"] = classify_result(block.name, result, _is_read,
+                                                  outcome=_outcome.get("state", ""))
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
