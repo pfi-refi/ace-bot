@@ -233,6 +233,17 @@ body {
 .msg .ts { font-family: var(--mono); font-size: 10.5px; color: rgba(234,255,245,.52); margin-top: 6px;
   letter-spacing: .5px; font-variant-numeric: tabular-nums; }
 .msg.user .ts { text-align: right; }
+/* HELD, NOT LOST (2026-09-10). Something Brady said while Ace was mid-turn used to be
+   discarded without a trace. It is now on screen the moment it is heard, dimmed and marked,
+   so "he did not answer me" and "he did not hear me" stop looking identical. */
+.msg.user.held { opacity: .72; border-right-color: var(--amber, #ffb454);
+  border-right-width: 3px; }
+.msg.user .hold-tag { display: block; margin-top: 6px; font-family: var(--mono);
+  font-size: 9px; letter-spacing: 1.6px; color: var(--amber, #ffb454); opacity: .85; }
+/* Past the hold limit. The bubble stays: a dropped instruction he can still read is
+   recoverable, one that vanished is not. */
+.msg.user.dropped { opacity: .55; border-right-color: #ff6b6b; border-right-width: 3px; }
+.msg.user .hold-tag.bad { color: #ff6b6b; opacity: .9; }
 .msg.hist .ts { opacity: .7; }
 .msg .cursor { display: inline-block; width: 7px; background: var(--aurora);
   box-shadow: 0 0 8px var(--aurora-60); animation: blink 1s step-end infinite; margin-left: 2px; }

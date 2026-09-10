@@ -639,7 +639,7 @@
     var ws; try { ws = new WebSocket(wsURL()); } catch (e) { setLink(false); scheduleReconnect(); return; }
     state.ws = ws;
     ws.onopen = function () { state.wsReady = true; state.reconnectDelay = 1000; setLink(true); syncTaskCards(); };
-    ws.onclose = function (ev) { state.wsReady = false; state.busy = false; setLink(false); if (ev && ev.code === 4401) { toLogin(); return; } scheduleReconnect(); };
+    ws.onclose = function (ev) { state.wsReady = false; setLink(false); if (ev && ev.code === 4401) { state.busy = false; toLogin(); return; } settleTurn(); scheduleReconnect(); };
     ws.onerror = function () { setLink(false); };
     ws.onmessage = function (ev) { try { handleWSEvent(JSON.parse(ev.data)); } catch (e) {} };
   }
@@ -830,6 +830,9 @@
 
   var streamMsg = null, activeTool = null;
   function handleWSEvent(msg) {
+    // Proof of life. A turn streaming deltas or running tools is working, however long it
+    // takes; only one that says nothing at all for BUSY_QUIET_MS is treated as dead.
+    if (state.busy) armBusyWatch();
     switch (msg.type) {
       case 'start': removeTyping(); setOrbState('speaking'); streamMsg = beginAceStream(); break;
       case 'delta': if (!streamMsg) streamMsg = beginAceStream(); appendToStream(streamMsg, msg.text); break;
@@ -860,10 +863,10 @@
       case 'run_on_hud': runOnHud(msg.message); break;
       case 'confirmation': renderConfirm(msg.text); break;
       case 'final': if (streamMsg) finalizeStream(streamMsg, msg.text); break;
-      case 'error': removeTyping(); discardEmptyStream(); collapseTools(); addAceMessage(msg.text); state.busy = false;
-        if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
-      case 'done': discardEmptyStream(); collapseTools(); streamMsg = null; state.busy = false;
-        if (!ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); } break;
+      case 'error': removeTyping(); discardEmptyStream(); collapseTools(); addAceMessage(msg.text);
+        settleTurn(); break;
+      case 'done': discardEmptyStream(); collapseTools(); streamMsg = null;
+        settleTurn(); break;
     }
   }
 
@@ -884,19 +887,105 @@
                      auto_dismiss_ms: 0 });
   }
 
-  function sendMessage(text) {
+  /* ============================================================ HEARD, NOT DROPPED
+     THE VOICE PATH USED TO LOSE WHAT BRADY SAID (2026-09-10, the iPad silence).
+     sendMessage began `if (!text || state.busy) return;` — a silent discard. The voice
+     coalescer had ALREADY emptied utterBuf by the time it called in, so a sentence spoken
+     while Ace was still working left no bubble, no error and no record. He talked; nothing
+     happened; nothing said why. beginSegment refuses to open while busy too, so a long turn
+     shut the ear entirely and every word inside it went into the same hole.
+
+     A turn still runs alone — overlapping them is what the busy flag is FOR — but what he
+     said is now held and sent when the turn settles, and he can see it waiting. */
+  var pendingSays = [], PENDING_MAX = 4;
+
+  // The status sits in a REAL NODE, not a CSS ::after. A label that exists only as
+  // `content:` is unreadable to a screen reader, unselectable, and invisible to anything that
+  // reads the page — including the test that is supposed to prove Brady can see it.
+  function holdTag(el, words, cls) {
+    if (!el) return;
+    var tag = el.querySelector('.hold-tag');
+    if (!tag) { tag = document.createElement('div'); tag.className = 'hold-tag'; el.appendChild(tag); }
+    tag.textContent = words; tag.className = 'hold-tag' + (cls ? ' ' + cls : '');
+  }
+  function clearTag(el) {
+    if (!el) return;
+    var tag = el.querySelector('.hold-tag');
+    if (tag && tag.parentNode) tag.parentNode.removeChild(tag);
+  }
+
+  function queueSay(text) {
+    if (!text) return;
+    // The cap is a real limit, not a silent one: dropping the OLDEST keeps the most recent
+    // instruction, and the bubble for what fell off says so rather than vanishing.
+    if (pendingSays.length >= PENDING_MAX) {
+      var lost = pendingSays.shift();
+      if (lost && lost.el) {
+        lost.el.classList.remove('held'); lost.el.classList.add('dropped');
+        holdTag(lost.el, 'Not sent — say it again', 'bad');
+      }
+    }
+    var el = addUserMessage(text);
+    if (el) { el.classList.add('held'); holdTag(el, 'Heard — waiting for the current turn'); }
+    pendingSays.push({ text: text, el: el });
+  }
+
+  function drainPending() {
+    if (state.busy || !pendingSays.length) return;
+    var next = pendingSays.shift();
+    if (next && next.el) { next.el.classList.remove('held'); clearTag(next.el); }
+    // Already on screen as his own bubble, so send it WITHOUT drawing a second one.
+    if (next && next.text) sendMessage(next.text, true);
+  }
+
+  /* A turn that never reports back used to latch state.busy true forever: no done, no error,
+     and the mic never reopened. That is the second half of the same silence — the first
+     dropped one sentence, this one killed the loop until a reload. The watchdog watches for
+     SILENCE, not duration: any event from the turn resets it, so a slow tool call is fine and
+     only a genuinely dead turn trips it. */
+  var busyWatch = null, BUSY_QUIET_MS = 120000;
+  function armBusyWatch() {
+    if (busyWatch) clearTimeout(busyWatch);
+    if (!state.busy) { busyWatch = null; return; }
+    busyWatch = setTimeout(function () {
+      busyWatch = null;
+      if (!state.busy) return;
+      removeTyping(); discardEmptyStream(); collapseTools();
+      // Deliberately does NOT say the turn failed. It went quiet, and this side cannot know
+      // whether the work settled — the same distinction the write journal draws.
+      addAceMessage('That turn went quiet and I stopped waiting on it. I do not know whether '
+                  + 'it finished, so check before assuming either way. The mic is open again.');
+      settleTurn();
+    }, BUSY_QUIET_MS);
+  }
+
+  function settleTurn() {
+    state.busy = false;
+    if (busyWatch) { clearTimeout(busyWatch); busyWatch = null; }
+    // ORDER MATTERS. Draining first means a held sentence starts its turn before the mic is
+    // told to reopen — otherwise maybeResumeMic sees busy=false, opens a segment, and the
+    // drain immediately starts a turn underneath it, leaving the ear recording into a window
+    // that beginSegment would have refused to open.
+    drainPending();
+    if (!state.busy && !ttsPlaying) { setOrbState(state.micActive ? 'listening' : 'idle'); maybeResumeMic(); }
+    else if (state.busy) setOrbState('listening');
+  }
+
+  function sendMessage(text, alreadyShown) {
     text = (text || $('chat-input').value).trim();
-    if (!text || state.busy) return;
+    if (!text) return;
+    if (state.busy) { queueSay(text); $('chat-input').value = ''; return; }
     state.busy = true; $('chat-input').value = '';
     $('chat-input').style.height = 'auto';   // collapse the grown textarea back to one line
-    addUserMessage(text); showTyping(); setOrbState('listening');
+    if (!alreadyShown) addUserMessage(text);
+    showTyping(); setOrbState('listening'); armBusyWatch();
     if (state.wsReady && state.ws) { state.ws.send(JSON.stringify({ message: text })); }
     else {
       fetch(API + '/chat', { method: 'POST', headers: headers(), body: JSON.stringify({ message: text }) })
         .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
         .then(function (d) { removeTyping(); if (d.reply) { setOrbState('speaking'); addAceMessage(d.reply); speak(d.reply); }
-          (d.confirmations || []).forEach(renderConfirm); state.busy = false; if (!ttsPlaying) setOrbState('idle'); })
-        .catch(function () { removeTyping(); addAceMessage('⚠️ Link failed. Reconnecting…'); state.busy = false; setOrbState('idle'); });
+          (d.confirmations || []).forEach(renderConfirm); settleTurn(); })
+        .catch(function () { removeTyping(); addAceMessage('⚠️ Link failed. Reconnecting…'); settleTurn(); });
     }
   }
 
@@ -927,7 +1016,7 @@
     return ((now - d) < 7 * 864e5 ? days[d.getDay()] : (d.getMonth() + 1) + '/' + d.getDate()) + ' ' + t;
   }
   function stampEl(label) { var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = label; return ts; }
-  function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); m.appendChild(stampEl(nowLabel())); messagesEl.appendChild(m); scrollBottom(true); }
+  function addUserMessage(t) { var m = document.createElement('div'); m.className = 'msg user'; m.appendChild(document.createTextNode(t)); m.appendChild(stampEl(nowLabel())); messagesEl.appendChild(m); scrollBottom(true); return m; }
   function addAceMessage(t) { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; m.appendChild(document.createTextNode(t)); var ts = document.createElement('div'); ts.className = 'ts'; ts.textContent = nowLabel(); m.appendChild(ts); messagesEl.appendChild(m); scrollBottom(); markUnread(); return m; }
   function beginAceStream() { var m = document.createElement('div'); m.className = 'msg ace'; m.innerHTML = '<div class="sender">ACE</div>'; var b = document.createElement('span'); m.appendChild(b); var c = document.createElement('span'); c.className = 'cursor'; c.textContent = ' '; m.appendChild(c); messagesEl.appendChild(m); scrollBottom(); return { el: m, body: b, cursor: c, text: '' }; }
   function appendToStream(s, t) { s.text += t; s.body.textContent = s.text; scrollBottom(); }
@@ -3218,7 +3307,14 @@
   }
 
   // Debug/demo hook (also lets us drive the stage from the console).
-  window.aceDebug = { card: materializeCard, open: openLink, event: handleWSEvent, orb: orb };
+  window.aceDebug = { card: materializeCard, open: openLink, event: handleWSEvent, orb: orb,
+    // Voice-continuity hooks. `hold` stands in for a turn in flight WITHOUT a network call,
+    // so the held/drain/watchdog paths can be driven exactly as they run in production.
+    say: sendMessage,
+    hold: function () { state.busy = true; armBusyWatch(); },
+    busy: function () { return state.busy; },
+    pending: function () { return pendingSays.map(function (q) { return q.text; }); },
+    quiet: function (ms) { BUSY_QUIET_MS = ms; } };
 
   boot();
 })();

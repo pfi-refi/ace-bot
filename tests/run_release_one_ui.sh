@@ -4,6 +4,7 @@
 set -e
 HERE="${0:A:h}"; ROOT="${HERE:h}"
 V="/Users/brady/Documents/Codex/2026-09-06/install-github-cli-gh-on-this/work/ace-repair/.venv-runtime/bin/python"
+[ -x "$V" ] || V="$ROOT/.venv-test/bin/python"
 NODE="/Users/brady/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
 LOG="${TMPDIR:-/tmp}/ace-ui-server.log"
 pkill -f "tests/ui_server.py" 2>/dev/null || true
