@@ -349,8 +349,7 @@ class TheVerifiedHandlerCannotBeBypassed(unittest.TestCase):
 
     def test_unregistered_creates_are_refused_outright(self):
         from backend import connectors as cn
-        for tool in ("mcp_create_drive_file", "mcp_import_to_google_slides",
-                     "mcp_import_to_google_doc"):
+        for tool in ("mcp_create_drive_file", "mcp_import_to_google_slides"):
             ok, why = cn.allowed(tool)
             self.assertFalse(ok, tool)
             self.assertTrue(why)
@@ -974,3 +973,113 @@ class SlidesIsBlockedByTheConnectorNotByChoice(unittest.TestCase):
         from backend import tools
         self.assertNotIn("create_slides",
                          tools.START_TASK["input_schema"]["properties"]["capability"]["enum"])
+
+
+class WhereTheFileActuallyGoes(unittest.TestCase):
+    """create_spreadsheet and create_doc take NO folder on this connector, and no move tool
+    exists — so without this everything Ace makes piles up in the root of My Drive forever."""
+
+    FOLDER_ID = "1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    FOLDER_HIT = ('Found 1 files:\n- Name: "Deals" '
+                  '(ID: 1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA) Link: x')
+
+    def _search(self, folder_reply, contents_id):
+        """Drive search answers two different questions here — "where is the folder called
+        Deals" and "what is inside it" — so the fake has to tell them apart the way the real
+        one does, or a placement check passes for the wrong reason."""
+        def reply(a):
+            q = str(a.get("query") or "")
+            if "in parents" in q:
+                return (f'Found 1 files:\n- Name: "T" (ID: {contents_id}, '
+                        f'Last Edited By: Brady McGraw <pfi@platinumfortuneimpact.com>) x'
+                        ) if contents_id else "Found 0 files"
+            return folder_reply
+        return reply
+
+    def setUp(self):
+        self._was = cp.EXPECTED_USER
+        cp.EXPECTED_USER = "pfi@platinumfortuneimpact.com"
+
+    def tearDown(self):
+        cp.EXPECTED_USER = self._was
+
+    SHEET_ID = "1FakeSheetIdAbCdEfGhIjKlMnOpQrStUv"
+
+    def _sheet_fake(self, folder_reply, inside=True):
+        import json as _j
+        return Fake(mcp_search_drive_files=self._search(
+                        folder_reply, self.SHEET_ID if inside else ""),
+                    mcp_import_to_google_sheets=f"Imported. ID: {self.SHEET_ID}",
+                    mcp_read_sheet_values=_j.dumps({"values": ROWS}))
+
+    def test_no_folder_says_plainly_where_it_landed(self):
+        f = Fake()
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["placed_in"], "the root of My Drive")
+
+    def test_a_folder_request_uses_the_route_that_can_take_one(self):
+        f = self._sheet_fake(self.FOLDER_HIT)
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f))
+        called = [t for t, _ in f.calls]
+        self.assertIn("mcp_import_to_google_sheets", called)
+        self.assertNotIn("mcp_create_spreadsheet", called,
+                         'the plain create cannot put a file in a folder')
+        args = next(a for t, a in f.calls if t == "mcp_import_to_google_sheets")
+        self.assertEqual(args["folder_id"], "1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        self.assertEqual(args["source_format"], "csv")
+        self.assertEqual(out["placed_in"], "Deals")
+
+    def test_the_rows_are_not_written_twice(self):
+        f = self._sheet_fake(self.FOLDER_HIT)
+        run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f))
+        self.assertNotIn("mcp_modify_sheet_values", [t for t, _ in f.calls],
+                         'the import already wrote them')
+
+    def test_contents_are_still_verified_on_the_folder_route(self):
+        f = self._sheet_fake(self.FOLDER_HIT)
+        run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f))
+        self.assertIn("mcp_read_sheet_values", [t for t, _ in f.calls])
+
+    def test_a_folder_that_does_not_exist_creates_nothing(self):
+        f = self._sheet_fake("Found 0 files")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Nope"}, f))
+        self.assertIn("no folder called", str(e.exception))
+        self.assertNotIn("mcp_import_to_google_sheets", [t for t, _ in f.calls])
+        self.assertNotIn("mcp_create_spreadsheet", [t for t, _ in f.calls])
+
+    def test_two_folders_of_the_same_name_are_not_guessed_between(self):
+        two = ('Found 2 files:\n- Name: "Deals" (ID: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) x\n'
+               '- Name: "Deals" (ID: 1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB) x')
+        f = self._sheet_fake(two)
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f))
+        self.assertIn("will not guess", str(e.exception))
+
+    def test_a_missing_folder_is_never_created_on_his_behalf(self):
+        f = self._sheet_fake("Found 0 files")
+        with self.assertRaises(cp.Failed):
+            run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Nope"}, f))
+        self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
+
+    def test_a_doc_can_be_filed_too(self):
+        body = "\n\n".join(DOC_BLOCKS)
+        f = Fake(mcp_search_drive_files=self._search(
+                     self.FOLDER_HIT, "1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                 mcp_import_to_google_doc="Imported. ID: 1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                 mcp_get_doc_content=body)
+        out = run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS, "folder": "Deals"}, f))
+        called = [t for t, _ in f.calls]
+        self.assertIn("mcp_import_to_google_doc", called)
+        self.assertNotIn("mcp_create_doc", called)
+        self.assertIn("mcp_get_doc_content", called, 'still read back')
+        self.assertEqual(out["placed_in"], "Deals")
+
+    def test_placement_is_confirmed_with_the_provider_not_assumed(self):
+        # Search finds the folder, but the new file never shows up inside it.
+        f = self._sheet_fake(self.FOLDER_HIT)
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f))
+        self.assertEqual(out["placed_in"], "Deals")
+        f2 = self._sheet_fake(self.FOLDER_HIT, inside=False)
+        out2 = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f2))
+        self.assertTrue(any("does not list it there" in w for w in out2["warnings"]))

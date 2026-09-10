@@ -86,10 +86,13 @@ CONNECTORS = {
                                       "why": "no verified capability yet"},
             "mcp_create_drive_folder": {"kind": CREATE, "approval": NONE,
                                         "via_capability": "create_folder"},
-            "mcp_import_to_google_doc": {"kind": CREATE, "approval": NEVER,
-                                         "why": "no verified capability yet"},
-            "mcp_import_to_google_sheets": {"kind": CREATE, "approval": NEVER,
-                                            "why": "use create_spreadsheet, which verifies"},
+            "mcp_import_to_google_doc": {"kind": CREATE, "approval": NONE,
+                                         "via_capability": "create_doc"},
+            # Enabled because it is the ONLY way to create into a chosen folder: neither
+            # create_spreadsheet nor create_doc takes one, and no move tool exists. Reached
+            # through the same verified capability, never directly.
+            "mcp_import_to_google_sheets": {"kind": CREATE, "approval": NONE,
+                                            "via_capability": "create_spreadsheet"},
             # NOT A DESIGN CHOICE — A FACT ABOUT THIS CONNECTOR (2026-09-10). It publishes
             # an IMPORTER and no create-from-scratch and no read tool for Slides, so Ace
             # cannot author a deck from a description here, and could not check one if it

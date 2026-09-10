@@ -637,6 +637,13 @@ START_TASK = {
                 "type": "string",
                 "description": "For create_folder: the folder name.",
             },
+            "folder": {
+                "type": "string",
+                "description": ("Optional, for create_spreadsheet and create_doc: the name of "
+                                "an EXISTING Drive folder to put it in. Leave it out and the "
+                                "file lands in the root of My Drive. Only pass this if Brady "
+                                "said where it should go — do not choose a folder for him."),
+            },
             "title": {
                 "type": "string",
                 "description": "The document title exactly as Brady asked for it.",

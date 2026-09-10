@@ -331,6 +331,16 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
                 f"'{title}' and tell me which way to go.",
                 {"create_state": "unknown"})
 
+    # WHERE IT GOES. create_spreadsheet takes NO folder argument on this connector, and
+    # nothing here can move a file afterwards, so anything it makes lands in the root of
+    # My Drive permanently. The import route DOES take folder_id and documents its content
+    # and source_format values, so a folder request goes that way — and writes the rows as
+    # it creates, which is why the write step below is skipped for it.
+    folder_id, folder_name = ("", "")
+    if not file_id:
+        folder_id, folder_name = await resolve_folder(args.get("folder") or "", call)
+    folder_id = folder_id or str(known.get("folder_id") or "")
+
     # ── 1. CREATE, with the intent recorded BEFORE it is dispatched ─────────────
     if not file_id:
         if await stopping():
@@ -340,9 +350,15 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
         # attempt that a file may exist.
         await mark({"create_state": "dispatched", "create_marker": marker,
                     "create_title": title})
-        await say("Creating the spreadsheet")
+        await say(f"Creating the spreadsheet in {folder_name}" if folder_id
+                  else "Creating the spreadsheet")
         try:
-            made = await call("mcp_create_spreadsheet", {"title": title})
+            if folder_id:
+                made = await call("mcp_import_to_google_sheets",
+                                  {"file_name": title, "content": rows_to_csv(rows),
+                                   "source_format": "csv", "folder_id": folder_id})
+            else:
+                made = await call("mcp_create_spreadsheet", {"title": title})
         except Exception as e:
             # The request left this process. The provider may well have committed before the
             # response was lost, so the outcome is UNKNOWN — never "failed, safe to retry".
@@ -364,9 +380,12 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
             raise Failed("the provider answered without a spreadsheet id, so there is nothing "
                          "to link to and it is not safe to say this was created",
                          {"create_state": "unknown", "create_marker": marker})
-        await mark({"file_id": file_id, "url": sheet_url(file_id), "create_state": "confirmed"})
+        await mark({"file_id": file_id, "url": sheet_url(file_id),
+                    "create_state": "confirmed", "folder_id": folder_id or "",
+                    "wrote_at_create": "yes" if folder_id else "no"})
 
     receipt = {"file_id": file_id, "url": sheet_url(file_id), "create_state": "confirmed"}
+    _already_written = (str(known.get("wrote_at_create") or "") == "yes") or bool(folder_id)
 
     # ── 2. WRITE — but not if a stop was asked for while the create was in flight
     if await stopping():
@@ -374,17 +393,22 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
             "Stopped after the spreadsheet was created but before anything was written into "
             "it. The empty file exists — it is linked here so you can open or bin it.",
             receipt)
-    await say("Writing the rows")
     rng = a1(rows)
-    # range_name, NOT range — confirmed against the live schema, which sets
-    # additionalProperties=false, so `range` is rejected outright rather than ignored.
-    # RAW rather than the provider default USER_ENTERED: what Brady asked for is what lands,
-    # and a read-back then means something. USER_ENTERED would let Google reinterpret "1-2"
-    # as a date and turn a correct write into a verification failure.
-    wrote = await call("mcp_modify_sheet_values",
-                       {"spreadsheet_id": file_id, "range_name": rng, "values": rows,
-                        "value_input_option": args.get("value_input_option") or "RAW"})
-    if _looks_like_error(wrote):
+    # The import route wrote the contents AS it created the file, so writing again would
+    # duplicate them. Either way it is the read-back below that decides whether this is
+    # reported as done.
+    wrote = ""
+    if not _already_written:
+        await say("Writing the rows")
+        # range_name, NOT range — confirmed against the live schema, which sets
+        # additionalProperties=false, so `range` is rejected outright rather than ignored.
+        # RAW rather than the provider default USER_ENTERED: what Brady asked for is what
+        # lands, and a read-back then means something. USER_ENTERED would let Google
+        # reinterpret "1-2" as a date and turn a correct write into a verification failure.
+        wrote = await call("mcp_modify_sheet_values",
+                           {"spreadsheet_id": file_id, "range_name": rng, "values": rows,
+                            "value_input_option": args.get("value_input_option") or "RAW"})
+    if wrote and _looks_like_error(wrote):
         raise Failed(f"the spreadsheet was created but the rows would not write: "
                      f"{str(wrote)[:160]}", {**receipt, "partial": True})
 
@@ -411,6 +435,13 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
                      {**receipt, "partial": True, "mismatches": mismatches[:20]})
 
     warnings = []
+    placed_in = ""
+    if folder_id:
+        if await _in_folder(file_id, folder_id, call):
+            placed_in = folder_name or args.get("folder") or folder_id
+        else:
+            warnings.append("I asked for this to go in that folder but Drive does not list it "
+                            "there, so check where it landed before relying on the location.")
     if formulas:
         warnings.append("Formulas were sent as text and the provider returns their computed "
                         "value, so " + ", ".join(formulas[:4]) + " could not be checked.")
@@ -447,6 +478,9 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
         "access": access,
         "access_evidence": how,
         "link_kind": "owner-access URL — no sharing permission was created or changed",
+        # Said out loud: without a folder this connector can only put things in the root of
+        # My Drive, and Brady should not have to go hunting for what Ace just made.
+        "placed_in": placed_in or "the root of My Drive",
         "warnings": warnings,
     }
 
@@ -827,9 +861,19 @@ async def create_doc(args: dict, call, progress=None, known=None,
         marker = uuid.uuid4().hex[:12]
         await mark({"create_state": "dispatched", "create_marker": marker,
                     "create_title": title})
-        await say("Creating the document")
+        # Same story as the spreadsheet: create_doc has no folder argument and nothing can
+        # move the file afterwards, so a folder request goes through the import route, which
+        # documents both its content and its source_format.
+        folder_id, folder_name = await resolve_folder(args.get("folder") or "", call)
+        await say(f"Creating the document in {folder_name}" if folder_id
+                  else "Creating the document")
         try:
-            made = await call("mcp_create_doc", {"title": title, "content": body})
+            if folder_id:
+                made = await call("mcp_import_to_google_doc",
+                                  {"file_name": title, "content": body,
+                                   "source_format": "txt", "folder_id": folder_id})
+            else:
+                made = await call("mcp_create_doc", {"title": title, "content": body})
         except Exception as e:
             await mark({"create_state": "unknown"})
             raise Failed(f"The create request went out and never came back "
@@ -845,9 +889,11 @@ async def create_doc(args: dict, call, progress=None, known=None,
             raise Failed("the provider answered without a document id, so there is nothing to "
                          "link to and it is not safe to say this was created",
                          {"create_state": "unknown", "create_marker": marker})
-        await mark({"file_id": file_id, "url": doc_url(file_id), "create_state": "confirmed"})
+        await mark({"file_id": file_id, "url": doc_url(file_id),
+                    "create_state": "confirmed", "folder_id": folder_id or ""})
 
     receipt = {"file_id": file_id, "url": doc_url(file_id), "create_state": "confirmed"}
+    _folder_id = str(known.get("folder_id") or "") or locals().get("folder_id") or ""
 
     if await stopping():
         raise Cancelled("Stopped after the document was created but before its contents were "
@@ -865,6 +911,13 @@ async def create_doc(args: dict, call, progress=None, known=None,
                      {**receipt, "partial": True, "missing": missing[:20]})
 
     warnings = []
+    placed_in = ""
+    if _folder_id:
+        if await _in_folder(file_id, _folder_id, call):
+            placed_in = args.get("folder") or _folder_id
+        else:
+            warnings.append("I asked for this to go in that folder but Drive does not list it "
+                            "there, so check where it landed.")
     owner, access, how = await _owner_of(file_id, call, title)
     if access == "no_access":
         raise Failed(f"the document exists and is correct, but {how}, so the link will not "
@@ -876,6 +929,7 @@ async def create_doc(args: dict, call, progress=None, known=None,
         warnings.append("Headings, bold and layout are not something this connection can "
                         "apply — the text is all in, the formatting is not.")
     return {**receipt, "action_label": "Open document", "title": title,
+            "placed_in": placed_in or "the root of My Drive",
             "blocks_written": len(blocks), "blocks_verified": len(blocks),
             "owner": owner or "", "access": access, "access_evidence": how,
             "link_kind": "owner-access URL — no sharing permission was created or changed",
@@ -950,3 +1004,67 @@ REGISTRY["create_folder"] = {
     "verb": "Making a folder",
     "connector": "google_workspace",
 }
+
+
+# ── PUTTING THINGS WHERE BRADY WANTS THEM ──────────────────────────────────────
+# create_spreadsheet and create_doc take NO folder argument on this connector, and there is
+# no move or change-parent tool, so anything made through them lands in the root of My Drive
+# and cannot be relocated afterwards. That is fine for a one-off and wrong for real work —
+# it turns Drive's root into Ace's dumping ground.
+#
+# The import tools DO take folder_id, and their schemas document the accepted content and
+# source_format values rather than leaving them to be guessed at, so a folder request goes
+# that way instead. Same verification either way: a real id, the artefact re-read, and the
+# link built from the id — plus a check that it really landed in the folder asked for.
+
+async def resolve_folder(folder: str, call) -> tuple:
+    """(folder_id, human_name). Resolves a name to exactly one folder, or refuses.
+
+    Deliberately does NOT create a missing folder: "put it in Deals" when there is no Deals
+    folder is more likely a typo than an instruction to make one, and quietly creating it
+    would be Ace inventing structure in his Drive.
+    """
+    f = (folder or "").strip()
+    if not f:
+        return "", ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{25,80}", f):
+        return f, f            # already an id
+    out = await call("mcp_search_drive_files",
+                     {"query": "mimeType = 'application/vnd.google-apps.folder' "
+                               f"and trashed = false and name = '{f}'"})
+    if _looks_like_error(out):
+        raise Failed(f"I could not look up a folder called '{f}', so I did not create "
+                     f"anything: {str(out)[:140]}")
+    ids = []
+    for m in re.finditer(r"ID:\s*([A-Za-z0-9_-]{25,80})", str(out)):
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+    if not ids:
+        raise Failed(f"There is no folder called '{f}' in your Drive, so I have not created "
+                     f"anything. Tell me the right name, or ask me to make the folder first.")
+    if len(ids) > 1:
+        raise Failed(f"There are {len(ids)} folders called '{f}' and I will not guess which "
+                     f"one you meant. Give me the exact one and I will use it.")
+    return ids[0], f
+
+
+async def _in_folder(file_id: str, folder_id: str, call) -> bool:
+    """Did it really land there? Asked of the provider, not assumed from the request."""
+    try:
+        out = await call("mcp_search_drive_files",
+                         {"query": f"'{folder_id}' in parents and trashed = false"})
+    except Exception:
+        return False
+    return bool(out) and not _looks_like_error(out) and file_id in str(out)
+
+
+def rows_to_csv(rows: list) -> str:
+    """Proper CSV, so a cell containing a comma or a quote survives the round trip."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    for r in rows or []:
+        w.writerow([("" if c is None else str(c)) for c in
+                    (r if isinstance(r, (list, tuple)) else [r])])
+    return buf.getvalue()
