@@ -63,13 +63,25 @@ async def _execute(task_id: str, call=None) -> dict:
         await _broadcast(tasks.working(task_id, detail))
 
     async def checkpoint(patch):
-        # Written straight to the row, so a retry after a lost response resumes instead of
-        # creating a second document.
-        await asyncio.to_thread(tasks.checkpoint, task_id, patch)
+        """Written straight to the row, so a retry after a lost response resumes instead of
+        creating a second document. Returns False when the write did NOT land, so the
+        handler can refuse to dispatch something it cannot keep track of."""
+        out = await asyncio.to_thread(tasks.checkpoint, task_id, patch)
+        return bool(out)
+
+    async def should_stop():
+        # Read fresh each time: the request arrives from another request handler while this
+        # coroutine is mid-flight, so a cached value would miss it.
+        return await asyncio.to_thread(tasks.is_cancel_requested, task_id)
 
     try:
         result = await spec["handler"](t.get("args") or {}, call or _provider, progress,
-                                       t.get("result") or {}, checkpoint)
+                                       t.get("result") or {}, checkpoint, should_stop)
+    except capabilities.Cancelled as e:
+        # Stopped at a boundary, carrying what already happened. Settled here — with the
+        # receipt — rather than by the cancel request, which is why "cancelled" can no longer
+        # be displayed while a file quietly exists.
+        return tasks.cancelled_with_receipt(task_id, e.result, e.message)
     except capabilities.Failed as e:
         # A named, explainable failure. Any partial artefact rides along so Brady is told
         # what DOES exist rather than left to guess.
@@ -171,20 +183,29 @@ async def deny(task_id: str, reason: str = "") -> dict:
 
 
 async def cancel(task_id: str, reason: str = "") -> dict:
-    """(card) — refuses once the work is done, and says so.
+    """Ask it to stop. Reports honestly what that achieved.
 
-    "Cancelled" must never be said about something that already happened.
+    A queued task stops outright — nothing has happened yet. A RUNNING one is flagged, and the
+    handler stops at its next side-effect boundary and hands back what it had already done;
+    until then the card says "stopping", not "cancelled". Displaying a cancellation while a
+    provider call is still in flight is what let Ace report a stopped task and then write the
+    file anyway.
     """
-    ok, t = tasks.cancel(task_id, reason)
+    verdict, t = tasks.request_cancel(task_id)
     if t:
         await _broadcast(t)
     card = tasks.card(t)
-    if not ok and t:
+    if verdict == "too_late":
         card["cancel_refused"] = True
         card["cancel_reason"] = (
             "That had already finished before you asked me to stop, so there was nothing to "
             "cancel." if t["state"] == tasks.COMPLETED else
             "That was already finished, so there was nothing to cancel.")
+    elif verdict == "requested":
+        card["cancel_pending"] = True
+        card["cancel_reason"] = (
+            "Asked it to stop. It is mid-step, so I will stop at the next safe point and tell "
+            "you exactly what had already been done.")
     return card
 
 

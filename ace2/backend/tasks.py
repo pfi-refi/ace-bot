@@ -67,6 +67,14 @@ def ready() -> None:
             error         TEXT,
             review_id     TEXT,
             attempts      INT NOT NULL DEFAULT 0,
+            -- CANCELLATION IS A REQUEST, NOT AN OUTCOME (Codex, 2026-09-09). Marking a task
+            -- cancelled while its provider call was still in flight displayed "cancelled"
+            -- and then wrote the file anyway, and terminal immutability then blocked the
+            -- receipt — so the record said nothing happened while a document existed. The
+            -- flag is what a running handler checks at each side-effect boundary; the state
+            -- only becomes cancelled once that handler has stopped and handed back what it
+            -- did do.
+            cancel_requested BOOLEAN NOT NULL DEFAULT false,
             created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
             started_at    TIMESTAMPTZ,
@@ -105,17 +113,18 @@ def _row(r) -> dict:
     return {
         "id": r[0], "request_key": r[1], "capability": r[2], "args": r[3], "origin": r[4],
         "state": r[5], "title": r[6], "detail": r[7], "result": r[8], "error": r[9],
-        "review_id": r[10], "attempts": r[11],
-        "created_at": r[12].isoformat() if r[12] else None,
-        "updated_at": r[13].isoformat() if r[13] else None,
-        "started_at": r[14].isoformat() if r[14] else None,
-        "settled_at": r[15].isoformat() if r[15] else None,
-        "spoken_at": r[16].isoformat() if r[16] else None,
+        "review_id": r[10], "attempts": r[11], "cancel_requested": bool(r[12]),
+        "created_at": r[13].isoformat() if r[13] else None,
+        "updated_at": r[14].isoformat() if r[14] else None,
+        "started_at": r[15].isoformat() if r[15] else None,
+        "settled_at": r[16].isoformat() if r[16] else None,
+        "spoken_at": r[17].isoformat() if r[17] else None,
     }
 
 
 _COLS = ("id, request_key, capability, args, origin, state, title, detail, result, error, "
-         "review_id, attempts, created_at, updated_at, started_at, settled_at, spoken_at")
+         "review_id, attempts, cancel_requested, created_at, updated_at, started_at, "
+         "settled_at, spoken_at")
 
 
 def accept(capability: str, args: dict, origin: str = "voice", title: str = "") -> tuple:
@@ -139,6 +148,18 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "") 
                         f"AND created_at > now() - %s::interval ORDER BY created_at DESC LIMIT 1",
                         (key, f"{DEDUP_WINDOW_SECONDS} seconds"))
             prior = cur.fetchone()
+            # AN UNRESOLVED CREATE OUTLIVES THE DEDUP WINDOW. If an earlier attempt dispatched
+            # a create and never learned the outcome, that protection must not expire fifteen
+            # minutes later — that is precisely when a re-ask would make the second document.
+            # Searched by request_key with no time bound, newest first.
+            cur.execute(f"SELECT {_COLS} FROM ace_tasks WHERE request_key = %s AND "
+                        f"result->>'create_state' = 'unknown' ORDER BY created_at DESC LIMIT 1",
+                        (key,))
+            unresolved = cur.fetchone()
+            if unresolved and not prior:
+                prior = unresolved
+            elif unresolved and prior and _row(unresolved)["id"] != _row(prior)["id"]:
+                prior = unresolved
             carried = {}
             if prior:
                 got = _row(prior)
@@ -151,7 +172,9 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "") 
                 # retrying creation after a timeout", enforced in the store rather than
                 # left to whoever calls it.
                 for k, v in (got.get("result") or {}).items():
-                    if k in ("file_id", "url"):
+                    # Everything that says "something already exists out there": the id if we
+                    # got one, and the create marker/ambiguity if we did not.
+                    if k in ("file_id", "url", "create_state", "create_marker"):
                         carried[k] = v
             tid = uuid.uuid4().hex
             cur.execute(f"INSERT INTO ace_tasks(id, request_key, capability, args, origin, "
@@ -286,6 +309,45 @@ def failed(task_id: str, error: str, result: dict = None) -> dict:
                     result=result or {})
 
 
+def request_cancel(task_id: str) -> tuple:
+    """(verdict, task) — 'cancelled' | 'requested' | 'too_late' | 'gone'.
+
+    A task that has not started yet can be stopped outright: nothing has happened. One that is
+    already running gets a FLAG, and the handler stops at its next side-effect boundary and
+    reports what it had already done. Nothing here claims the work did not happen.
+    """
+    got = get(task_id)
+    if not got:
+        return "gone", {}
+    if got["state"] in TERMINAL:
+        return "too_late", got
+    if got["state"] == QUEUED:
+        out = _advance(task_id, CANCELLED, detail="Stopped before it started")
+        return "cancelled", out
+    try:
+        with db._conn() as c, c.cursor() as cur:
+            cur.execute("UPDATE ace_tasks SET cancel_requested=true, updated_at=now() "
+                        "WHERE id=%s AND state NOT IN %s", (task_id, tuple(TERMINAL)))
+    except Exception as e:
+        logger.warning("tasks.request_cancel failed: %s", e)
+        return "gone", got
+    return "requested", get(task_id)
+
+
+def is_cancel_requested(task_id: str) -> bool:
+    t = get(task_id)
+    return bool(t and t.get("cancel_requested"))
+
+
+def cancelled_with_receipt(task_id: str, result: dict, detail: str) -> dict:
+    """Settle as cancelled while RECORDING what already happened.
+
+    The receipt is the point. A create that landed before the stop request is a real file, and
+    the record has to say so — "cancelled" must never be read as "nothing was made".
+    """
+    return _advance(task_id, CANCELLED, result=result or {}, detail=(detail or "")[:300])
+
+
 def cancel(task_id: str, reason: str = "") -> tuple:
     """(ok, task). Refuses once the task is terminal.
 
@@ -366,6 +428,9 @@ def card(t: dict) -> dict:
     out = {
         "task_id": t.get("id"),
         "state": state,
+        # A stop was asked for and the handler has not reached a safe point yet. The surface
+        # says "stopping", never "cancelled" — the work may still be mid-step.
+        "stopping": bool(t.get("cancel_requested")) and state in LIVE,
         "capability": t.get("capability"),
         # Name it the way Brady asked for it. A card headed "Spreadsheet" tells him nothing
         # when two are in flight, so the request's own title is the fallback before the

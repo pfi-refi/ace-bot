@@ -189,19 +189,43 @@ try:
     call6, _ = make_provider(mcp_create_spreadsheet="The spreadsheet was created.")
     v, t6 = tasks.accept("create_spreadsheet", {"title": "No id", "rows": ROWS})
     out = run(taskrunner.run(t6["id"], call6))
-    assert out["state"] == tasks.FAILED and "did not return a spreadsheet id" in out["error"]
+    assert out["state"] == tasks.FAILED and "without a spreadsheet id" in out["error"]
     assert not (out.get("result") or {}).get("url"), 'a link was offered without an id'
 
     # ── 5. WRONG ACCOUNT: correct file, but Brady cannot open it ────────────────
+    # A permission list that excludes him IS evidence he cannot open it.
     call7, st7 = make_provider(
-        mcp_get_drive_file_metadata=json.dumps({"owners": [{"emailAddress": "svc@robot.iam"}]}),
-        mcp_get_drive_file_info="Error: none",
-        mcp_search_drive_files="Error: none")
+        mcp_get_drive_file_metadata=json.dumps({
+            "owners": [{"emailAddress": "svc@robot.iam"}],
+            "permissions": [{"emailAddress": "svc@robot.iam"}]}),
+        mcp_get_drive_file_info="Error: none")
     v, t7 = tasks.accept("create_spreadsheet", {"title": "Wrong owner", "rows": ROWS})
     out = run(taskrunner.run(t7["id"], call7))
     assert out["state"] == tasks.FAILED, out
     assert "file does not exist" in out["error"], out["error"]
     assert "mcp_get_drive_shareable_link" not in st7["calls"], 'it tried to share its way out'
+
+    # A different owner with NO permission list proves nothing either way (Codex): report
+    # unknown and warn, rather than calling a shared file inaccessible.
+    call7b, _ = make_provider(
+        mcp_get_drive_file_metadata=json.dumps({"owners": [{"emailAddress": "svc@robot.iam"}]}),
+        mcp_get_drive_file_info="Error: none")
+    v, t7b = tasks.accept("create_spreadsheet", {"title": "Owner unknown", "rows": ROWS})
+    out7b = run(taskrunner.run(t7b["id"], call7b))
+    assert out7b["state"] == tasks.COMPLETED, out7b
+    assert out7b["result"]["access"] == "unknown"
+    assert any("cannot promise" in w for w in out7b["result"]["warnings"])
+
+    # ...and a file OWNED by someone else but shared with him is simply fine.
+    call7c, _ = make_provider(
+        mcp_get_drive_file_metadata=json.dumps({
+            "owners": [{"emailAddress": "svc@robot.iam"}],
+            "permissions": [{"emailAddress": "svc@robot.iam"},
+                            {"emailAddress": "brady@example.com"}]}),
+        mcp_get_drive_file_info="Error: none")
+    v, t7c = tasks.accept("create_spreadsheet", {"title": "Shared with me", "rows": ROWS})
+    out7c = run(taskrunner.run(t7c["id"], call7c))
+    assert out7c["state"] == tasks.COMPLETED and out7c["result"]["access"] == "ok"
 
     # ── 6. APPROVAL: required, denied, and "No, do not send it" ─────────────────
     async def gated(args, call, progress=None, known=None, checkpoint=None):
@@ -317,6 +341,142 @@ try:
                     "'record','waiting','the county')", (wid, datetime.now(timezone.utc)))
     assert c.post('/daybank/update', json={"id": wid, "status": "done"}).json().get("blocked")
 
+    # ── 12. THE TRUE LOST-CREATE-RESPONSE CASE (Codex defect 2) ────────────────
+    # The provider CREATES the file and then the response is lost. The old checkpoint only
+    # existed after a response came back, so the next attempt created a second document.
+    made_files = {"n": 0}
+
+    def create_then_vanish(args, state):
+        made_files["n"] += 1
+        raise asyncio.TimeoutError("response lost after the remote create")
+
+    callL, _ = make_provider(mcp_create_spreadsheet=create_then_vanish)
+    LOST = {"title": "Lost create response", "rows": ROWS}
+    l1 = run(taskrunner.dispatch("create_spreadsheet", LOST, call=callL))
+    for _ in range(200):
+        if tasks.get(l1["task_id"])["state"] in tasks.TERMINAL:
+            break
+        run(asyncio.sleep(0.02))
+    t_l1 = tasks.get(l1["task_id"])
+    assert t_l1["state"] == tasks.FAILED
+    assert t_l1["result"].get("create_state") == "unknown", t_l1["result"]
+    assert "may or may not" in t_l1["error"], t_l1["error"]
+    # Re-asking must NOT create again — it must stop and ask.
+    l2 = run(taskrunner.dispatch("create_spreadsheet", LOST, call=callL))
+    for _ in range(200):
+        if tasks.get(l2["task_id"])["state"] in tasks.TERMINAL:
+            break
+        run(asyncio.sleep(0.02))
+    assert made_files["n"] == 1, f'a re-ask created {made_files["n"]} documents'
+    assert tasks.get(l2["task_id"])["state"] == tasks.FAILED
+    assert "will not create another" in tasks.get(l2["task_id"])["error"].lower() \
+        or "not created another" in tasks.get(l2["task_id"])["error"].lower(), \
+        tasks.get(l2["task_id"])["error"]
+
+    # ...and the protection SURVIVES the dedup window closing.
+    with db._conn() as cn, cn.cursor() as cur:
+        cur.execute("UPDATE ace_tasks SET created_at = now() - interval '3 hours' "
+                    "WHERE id IN %s", ((l1["task_id"], l2["task_id"]),))
+    l3 = run(taskrunner.dispatch("create_spreadsheet", LOST, call=callL))
+    for _ in range(200):
+        if tasks.get(l3["task_id"])["state"] in tasks.TERMINAL:
+            break
+        run(asyncio.sleep(0.02))
+    assert made_files["n"] == 1, \
+        f'the unresolved create was forgotten once the dedup window closed ({made_files["n"]})'
+
+    # A title match alone is a CANDIDATE, not identity — it must still refuse to guess.
+    callR, _ = make_provider(
+        mcp_create_spreadsheet=create_then_vanish,
+        mcp_search_drive_files=json.dumps({"files": [
+            {"id": "1CandidateAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+            {"id": "1CandidateBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]}))
+    AMB = {"title": "Ambiguous name", "rows": ROWS}
+    r1 = run(taskrunner.dispatch("create_spreadsheet", AMB, call=callR))
+    for _ in range(200):
+        if tasks.get(r1["task_id"])["state"] in tasks.TERMINAL:
+            break
+        run(asyncio.sleep(0.02))
+    r2 = run(taskrunner.dispatch("create_spreadsheet", AMB, call=callR))
+    for _ in range(200):
+        if tasks.get(r2["task_id"])["state"] in tasks.TERMINAL:
+            break
+        run(asyncio.sleep(0.02))
+    err2 = tasks.get(r2["task_id"])["error"]
+    assert "guess" in err2.lower() or "tell me" in err2.lower(), err2
+
+    # ── 13. A CHECKPOINT THAT WILL NOT WRITE STOPS THE CREATE (fail closed) ────
+    import ace2.backend.tasks as _tmod
+    real_cp = _tmod.checkpoint
+    _tmod.checkpoint = lambda *a, **k: {}          # every checkpoint write fails
+    try:
+        callC, stC = make_provider()
+        v, tC = tasks.accept("create_spreadsheet", {"title": "No journal", "rows": ROWS})
+        outC = run(taskrunner.run(tC["id"], callC))
+        assert outC["state"] == tasks.FAILED
+        assert "could not record" in outC["error"], outC["error"]
+        assert stC["created"] == 0, 'it created something it could not keep track of'
+    finally:
+        _tmod.checkpoint = real_cp
+
+    # ── 14. CANCELLATION AT EVERY BOUNDARY (Codex defect 3) ────────────────────
+    # (a) before dispatch — nothing exists, and nothing is created
+    callX, stX = make_provider()
+    v, tX = tasks.accept("create_spreadsheet", {"title": "Stop before", "rows": ROWS})
+    # claim first so the row is WORKING, then ask it to stop — this exercises the handler's
+    # own boundary check rather than the queued short-circuit. run() would refuse a second
+    # claim, so the executor is called directly.
+    tasks.claim(tX["id"]); tasks.request_cancel(tX["id"])
+    outX = run(taskrunner._execute(tX["id"], callX))
+    assert outX["state"] == tasks.CANCELLED and stX["created"] == 0
+
+    # (b) DURING the create — the file lands, the write must NOT, and the receipt is kept
+    gate = {"stop_after_create": None}
+
+    def slow_create(args, state):
+        state["created"] += 1
+        gate["stop_after_create"]()               # the stop arrives mid-call
+        return json.dumps({"spreadsheetId": "1MidCreateAAAAAAAAAAAAAAAAAAAAAAAAAA"})
+
+    callY, stY = make_provider(mcp_create_spreadsheet=slow_create)
+    v, tY = tasks.accept("create_spreadsheet", {"title": "Stop during", "rows": ROWS})
+    gate["stop_after_create"] = lambda: tasks.request_cancel(tY["id"])
+    tasks.claim(tY["id"])
+    outY = run(taskrunner._execute(tY["id"], callY))
+    assert outY["state"] == tasks.CANCELLED, outY
+    assert "mcp_modify_sheet_values" not in stY["calls"], \
+        'it kept writing after being told to stop'
+    assert outY["result"].get("file_id") == "1MidCreateAAAAAAAAAAAAAAAAAAAAAAAAAA", \
+        f'cancellation lost the receipt for a file that exists: {outY["result"]}'
+    cardY = tasks.card(outY)
+    assert "exists" in (cardY["detail"] or "").lower(), cardY["detail"]
+    assert stY["created"] == 1
+
+    # (c) a running task reports STOPPING, never cancelled, until it settles
+    v, tZ = tasks.accept("create_spreadsheet", {"title": "Stopping label", "rows": ROWS})
+    tasks.claim(tZ["id"])
+    verdict, tz = tasks.request_cancel(tZ["id"])
+    assert verdict == "requested"
+    cz = tasks.card(tasks.get(tZ["id"]))
+    assert cz["state"] == tasks.WORKING and cz["stopping"] is True, cz
+    pend = run(taskrunner.cancel(tZ["id"]))
+    assert pend.get("cancel_pending") is True and pend["state"] != tasks.CANCELLED
+
+    # (d) a queued task stops outright, because nothing has happened
+    v, tQ = tasks.accept("create_spreadsheet", {"title": "Stop queued", "rows": ROWS})
+    assert tasks.request_cancel(tQ["id"])[0] == "cancelled"
+
+    # ── 15. WRONG VALUES DO NOT PASS VERIFICATION ─────────────────────────────
+    callW, _ = make_provider(
+        mcp_read_sheet_values=json.dumps({"values": [["Assistant", "Pricing model", "Monthly"],
+                                                     ["Northwind Helper", "flat", "$999"],
+                                                     ["Cedar Assist", "per-request", "$0.004"]]}))
+    v, tW = tasks.accept("create_spreadsheet", {"title": "Wrong figure", "rows": ROWS})
+    outW = run(taskrunner.run(tW["id"], callW))
+    assert outW["state"] == tasks.FAILED, 'a wrong money figure verified clean'
+    assert "C2" in outW["error"], outW["error"]
+    assert tasks.card(outW)["action"] is None, 'a wrong sheet still offered a link'
+
     print('PASS: a dispatched request is never reported as done; the link is built from a '
           'provider id that survived a read-back; duplicate dispatch, a re-spaced transcript '
           'and three tabs make ONE document; a lost response after creation resumes from the '
@@ -326,6 +486,10 @@ try:
           'completed and cancelled states cannot be rewritten by a redelivery, and cancelling '
           'finished work is refused with a reason; results stay retrievable after the card '
           'goes; a dead socket cannot stop the work; and the email, sharing, document, '
-          'calendar and board guards are all still in force.')
+          'calendar and board guards are all still in force; a lost create response is '
+          'never retried into a second document and survives the dedup window; a checkpoint '
+          'that will not write stops the create; cancellation before, during and after the '
+          'create reports stopping rather than cancelled and keeps the receipt for anything '
+          'that already existed; and a wrong cell value fails verification by coordinate.')
 finally:
     server.cleanup(); tmp.cleanup()

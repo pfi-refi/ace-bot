@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import uuid
 
 logger = logging.getLogger("ace2.capabilities")
 
@@ -31,6 +32,19 @@ _ID_KEYS = ("spreadsheetId", "spreadsheet_id", "fileId", "file_id", "documentId"
 _ID_RE = re.compile(r"\b([A-Za-z0-9_-]{25,80})\b")
 _URL_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]{25,80})")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+class Cancelled(Exception):
+    """Stopped at a side-effect boundary, carrying whatever had already happened.
+
+    Never raised to mean "nothing occurred". If a file was created before the stop request
+    landed, its id rides along so the record and the card can both say so.
+    """
+
+    def __init__(self, message: str, result: dict = None):
+        super().__init__(message)
+        self.message = message
+        self.result = result or {}
 
 
 class Failed(Exception):
@@ -52,9 +66,22 @@ def _looks_like_error(text: str) -> bool:
     t = (text or "").strip()
     if not t or t == "(no content returned)":
         return True
-    low = t.lower()
     if t.startswith("⚠️"):
         return True
+    # STRUCTURED FIRST. Sniffing prose for words like "permission" or "error" is a last
+    # resort, and applying it to JSON is wrong: a perfectly good Drive metadata payload
+    # contains a "permissions" array, and this function read that as a failure — discarding
+    # the very evidence the access check needs. A parseable body is judged by its own error
+    # fields, never by the vocabulary that happens to appear inside it.
+    try:
+        blob = json.loads(t)
+    except Exception:
+        blob = None
+    if isinstance(blob, dict):
+        return any(blob.get(k) for k in ("error", "errors", "isError", "err"))
+    if isinstance(blob, list):
+        return False
+    low = t.lower()
     return any(m in low for m in (
         "error", "failed", "denied", "not found", "does not exist", "forbidden",
         "unauthorized", "permission", "invalid_grant", "quota", "insufficient",
@@ -131,24 +158,74 @@ def _cells(text: str) -> list:
     return [[c.strip() for c in ln.split("\t")] for ln in t.splitlines() if ln.strip()]
 
 
-def _flat(rows) -> set:
-    out = set()
-    for r in rows or []:
-        if isinstance(r, (list, tuple)):
-            out |= {str(c).strip() for c in r if str(c).strip()}
-        elif str(r).strip():
-            out.add(str(r).strip())
-    return out
+def cell_ref(row: int, col: int) -> str:
+    """0-indexed (row, col) → 'B2', for naming a mismatch where Brady can find it."""
+    name, c = "", col + 1
+    while c:
+        c, rem = divmod(c - 1, 26)
+        name = chr(65 + rem) + name
+    return f"{name}{row + 1}"
+
+
+def _norm_cell(v):
+    """One comparable form for a cell, tolerating the normalisation providers really do.
+
+    Sheets returns numbers as strings, trims trailing zeros, and may hand back '' for a blank.
+    None of that is a difference worth failing on. A FORMULA is different: the provider returns
+    its computed value, which cannot be compared to the text that was sent, so it is reported
+    as unverifiable rather than quietly called correct.
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s.startswith("="):
+        return ("formula", s)
+    try:
+        f = float(s.replace(",", ""))
+        return f"{f:.10g}"          # 50000 == "50000" == "50,000" == 50000.0
+    except (TypeError, ValueError):
+        return s
+
+
+def compare_matrix(requested: list, returned: list) -> tuple:
+    """(mismatches, formula_cells) — every requested cell checked AT ITS COORDINATE.
+
+    The set-membership check this replaces was the defect Codex reproduced: it asked only
+    whether the header labels and first-column labels appeared ANYWHERE in the read-back, so
+    a request for 50000 that came back as 999999 verified clean. Every value is now compared
+    where it was written, which is also what catches a swapped or shifted row, a dropped
+    duplicate, and a blank that should not be blank.
+    """
+    mismatches, formulas = [], []
+    for r, row in enumerate(requested or []):
+        cells = row if isinstance(row, (list, tuple)) else [row]
+        got_row = []
+        if r < len(returned or []):
+            gr = returned[r]
+            got_row = gr if isinstance(gr, (list, tuple)) else [gr]
+        for c, want in enumerate(cells):
+            w = _norm_cell(want)
+            # A provider may legitimately omit TRAILING blanks, so an absent cell only
+            # matters when something was actually asked for.
+            g = _norm_cell(got_row[c]) if c < len(got_row) else ""
+            if isinstance(w, tuple):
+                formulas.append(cell_ref(r, c))
+                continue
+            if w != g:
+                mismatches.append({"cell": cell_ref(r, c),
+                                   "expected": str(want), "found": str(
+                                       got_row[c] if c < len(got_row) else "")})
+    return mismatches, formulas
 
 
 async def create_spreadsheet(args: dict, call, progress=None, known=None,
-                             checkpoint=None) -> dict:
-    """Create a spreadsheet, write it, READ IT BACK, and only then return a link.
+                             checkpoint=None, should_stop=None) -> dict:
+    """Create a spreadsheet, write it, verify it CELL BY CELL, and only then return a link.
 
-    `call(tool, arguments) -> str` is the provider (mcp_client.call in production, a fake in
-    tests). `progress(detail)` is optional and only ever reports what is being attempted.
+    `call(tool, arguments) -> str` is the provider. `checkpoint(patch)` durably records facts
+    the instant they become true. `should_stop()` is checked before every side effect.
 
-    Returns a verified result. Raises Failed with a shovel-ready explanation otherwise.
+    Returns a verified result; raises Failed or Cancelled, both carrying receipts.
     """
     title = (args.get("title") or "").strip()
     rows = args.get("rows") or []
@@ -156,124 +233,243 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
         raise Failed("no title was given, so nothing was created")
     if not rows:
         raise Failed("no contents were given, so nothing was created")
+    known = known or {}
 
     async def say(msg):
         if progress:
             await progress(msg)
 
-    # 1 — create, and demand a real id back.
-    #
-    # NEVER CREATE TWICE. A create that succeeds and then loses its response is the one
-    # failure that costs a duplicate document, so an id recorded by an earlier attempt is
-    # reused and the create is skipped. `known` comes from the task row, which was written
-    # the instant the provider answered — before anything downstream could time out.
-    file_id = str((known or {}).get("file_id") or "").strip()
-    if file_id:
-        await say("Picking up the spreadsheet that was already created")
-    else:
+    async def stopping():
+        return bool(should_stop and await should_stop())
+
+    async def mark(patch):
+        """Checkpoint, and FAIL CLOSED if the record cannot be written.
+
+        The checkpoint is the only thing standing between a lost response and a duplicate
+        document. Dispatching a create we cannot record is how the duplicate happens, so an
+        unrecordable intent stops the task instead.
+        """
+        if not checkpoint:
+            return
+        ok = await checkpoint(patch)
+        if ok is False:
+            raise Failed("I could not record what I was about to do, and I will not create "
+                         "something I cannot keep track of. Nothing was attempted.")
+
+    file_id = str(known.get("file_id") or "").strip()
+    create_state = str(known.get("create_state") or "")
+
+    # ── AN EARLIER ATTEMPT MAY HAVE CREATED THIS ALREADY ────────────────────────
+    if not file_id and create_state == "unknown":
+        # The dangerous case Codex reproduced: a create was dispatched and its response was
+        # lost, so the provider may hold a file we have no id for. Creating again is how two
+        # documents appear. Try to reconcile; if that cannot be done conclusively, STOP and
+        # ask — a title match is a candidate, not proof of identity.
+        await say("Checking whether the earlier attempt already created it")
+        marker = str(known.get("create_marker") or "")
+        found = await _find_created(title, marker, call)
+        if found.get("file_id"):
+            file_id = found["file_id"]
+            await mark({"file_id": file_id, "url": sheet_url(file_id),
+                        "create_state": "confirmed", "reconciled": found.get("how")})
+        elif found.get("candidates"):
+            raise Failed(
+                "An earlier attempt at this may already have created a spreadsheet — the "
+                "provider stopped responding before it said so, and I can see "
+                f"{len(found['candidates'])} file(s) with this name. I will not create "
+                "another one on a guess. Open Drive and tell me whether to use the existing "
+                "one or make a fresh one.",
+                {"create_state": "unknown", "candidates": found["candidates"][:5]})
+        else:
+            raise Failed(
+                "An earlier attempt dispatched a create and never learned the outcome, and I "
+                "cannot confirm either way from the provider. I have NOT created another one, "
+                "because that is how you end up with two. Check Drive for "
+                f"'{title}' and tell me which way to go.",
+                {"create_state": "unknown"})
+
+    # ── 1. CREATE, with the intent recorded BEFORE it is dispatched ─────────────
+    if not file_id:
+        if await stopping():
+            raise Cancelled("Stopped before anything was created.", {})
+        marker = uuid.uuid4().hex[:12]
+        # Written first, deliberately. If the response is lost, THIS is what tells the next
+        # attempt that a file may exist.
+        await mark({"create_state": "dispatched", "create_marker": marker,
+                    "create_title": title})
         await say("Creating the spreadsheet")
-        made = await call("mcp_create_spreadsheet", {"title": title})
+        try:
+            made = await call("mcp_create_spreadsheet", {"title": title})
+        except Exception as e:
+            # The request left this process. The provider may well have committed before the
+            # response was lost, so the outcome is UNKNOWN — never "failed, safe to retry".
+            await mark({"create_state": "unknown", "create_error": f"{type(e).__name__}"})
+            raise Failed(
+                f"The create request went out and never came back ({type(e).__name__}). A "
+                f"spreadsheet may or may not have been made — I will not send another one "
+                f"until that is settled.",
+                {"create_state": "unknown", "create_marker": marker})
         if _looks_like_error(made):
+            # A refusal is an ANSWER: the provider declined, so nothing was created.
+            await mark({"create_state": "refused"})
             raise Failed(f"the provider refused to create it: {str(made)[:200]}")
         file_id = extract_id(made)
-        if file_id and checkpoint:
-            # Durable BEFORE the next call. This is the line that turns a lost response
-            # from a duplicate file into a resumable task.
-            await checkpoint({"file_id": file_id, "url": sheet_url(file_id)})
-    if not file_id:
-        # This is the 9 September failure caught at its source: without an id from the
-        # provider there is nothing to link to, and a link invented here would 404.
-        raise Failed("the provider did not return a spreadsheet id, so nothing can be "
-                     "linked; it is not safe to say this was created")
+        if not file_id:
+            # It answered, but with nothing to link to. Treated as unknown rather than
+            # failed: an answer we cannot parse is not proof nothing was made.
+            await mark({"create_state": "unknown"})
+            raise Failed("the provider answered without a spreadsheet id, so there is nothing "
+                         "to link to and it is not safe to say this was created",
+                         {"create_state": "unknown", "create_marker": marker})
+        await mark({"file_id": file_id, "url": sheet_url(file_id), "create_state": "confirmed"})
 
-    # 2 — write the contents
+    receipt = {"file_id": file_id, "url": sheet_url(file_id), "create_state": "confirmed"}
+
+    # ── 2. WRITE — but not if a stop was asked for while the create was in flight
+    if await stopping():
+        raise Cancelled(
+            "Stopped after the spreadsheet was created but before anything was written into "
+            "it. The empty file exists — it is linked here so you can open or bin it.",
+            receipt)
     await say("Writing the rows")
     rng = a1(rows)
     wrote = await call("mcp_modify_sheet_values",
                        {"spreadsheet_id": file_id, "range": rng, "values": rows})
     if _looks_like_error(wrote):
         raise Failed(f"the spreadsheet was created but the rows would not write: "
-                     f"{str(wrote)[:160]}",
-                     {"file_id": file_id, "url": sheet_url(file_id), "partial": True})
+                     f"{str(wrote)[:160]}", {**receipt, "partial": True})
 
-    # 3 — read it back. This is the step whose absence let Ace claim a populated sheet.
-    await say("Reading it back to check")
+    # ── 3. READ IT BACK AND COMPARE EVERY CELL ─────────────────────────────────
+    if await stopping():
+        raise Cancelled("Stopped after the rows were written. The contents have not been "
+                        "checked, so treat them as unverified.", {**receipt, "partial": True})
+    await say("Checking every cell against what you asked for")
     got = await call("mcp_read_sheet_values", {"spreadsheet_id": file_id, "range": rng})
     if _looks_like_error(got):
         raise Failed(f"the spreadsheet could not be read back, so it is not verified: "
-                     f"{str(got)[:160]}",
-                     {"file_id": file_id, "url": sheet_url(file_id), "partial": True})
-    back = _flat(_cells(got))
+                     f"{str(got)[:160]}", {**receipt, "partial": True})
+    back = _cells(got)
     if not back:
         raise Failed("reading it back returned nothing, so the contents are unverified",
-                     {"file_id": file_id, "url": sheet_url(file_id), "partial": True})
-    # Representative cells: the header row and the first cell of each written row.
-    expected = _flat([rows[0]]) | {str(r[0]).strip() for r in rows[1:] if r and str(r[0]).strip()}
-    missing = sorted(x for x in expected if x not in back)
-    if missing:
-        raise Failed("the spreadsheet does not contain what was written — missing "
-                     + ", ".join(repr(m) for m in missing[:4])
-                     + (f" and {len(missing) - 4} more" if len(missing) > 4 else ""),
-                     {"file_id": file_id, "url": sheet_url(file_id), "partial": True})
+                     {**receipt, "partial": True})
+    mismatches, formulas = compare_matrix(rows, back)
+    if mismatches:
+        detail = "; ".join(f"{m['cell']} should be {m['expected']!r} but holds {m['found']!r}"
+                           for m in mismatches[:4])
+        more = f" and {len(mismatches) - 4} more" if len(mismatches) > 4 else ""
+        raise Failed(f"the spreadsheet does not match what you asked for — {detail}{more}",
+                     {**receipt, "partial": True, "mismatches": mismatches[:20]})
 
-    # 4 — can the person who asked actually open it? Reading it over Ace's connection only
-    #     proves ACE can. Brady's "file does not exist" is what the difference looks like.
     warnings = []
-    owner, access = await _owner_of(file_id, call)
-    if access == "mismatch":
+    if formulas:
+        warnings.append("Formulas were sent as text and the provider returns their computed "
+                        "value, so " + ", ".join(formulas[:4]) + " could not be checked.")
+
+    # ── 4. CAN THE PERSON WHO ASKED ACTUALLY OPEN IT? ──────────────────────────
+    owner, access, how = await _owner_of(file_id, call)
+    if access == "no_access":
         raise Failed(
-            f"the spreadsheet exists and is correct, but it belongs to {owner} — not the "
-            f"account you are signed into, so the link will read as 'file does not exist' "
-            f"for you. Nothing was shared to work around that; connect the Google account "
-            f"you use and ask again.",
-            {"file_id": file_id, "url": sheet_url(file_id), "owner": owner})
+            f"the spreadsheet exists and is correct, but the connected account "
+            f"({owner or 'unknown'}) is not the one you sign in with and the file is not "
+            f"shared with you — so the link will read as 'file does not exist'. Nothing was "
+            f"shared to work around that.",
+            {**receipt, "owner": owner})
     if access == "unknown":
-        warnings.append("I could not confirm from the provider which account owns this, so I "
-                        "cannot promise it opens for you until you try it.")
+        warnings.append("I could not confirm from the provider who owns this or whether your "
+                        "account can see it, so I cannot promise the link opens for you.")
 
     if args.get("bold_header") or args.get("formatting"):
-        # Said plainly rather than attempted with a Docs tool, which is what happened on
-        # 9 September: mcp_modify_doc_text was aimed at a spreadsheet and sat unapproved.
         warnings.append("Header bolding and column widths are not something this connection "
                         "can do — the values are all in, the formatting is not.")
 
     return {
-        "file_id": file_id,
-        "url": sheet_url(file_id),
+        **receipt,
         "action_label": "Open spreadsheet",
         "title": title,
         "rows_written": len(rows),
-        "cells_verified": len(expected),
+        "cells_verified": sum(len(r) if isinstance(r, (list, tuple)) else 1 for r in rows)
+                          - len(formulas),
         "owner": owner or "",
         "access": access,
+        "access_evidence": how,
         "link_kind": "owner-access URL — no sharing permission was created or changed",
         "warnings": warnings,
     }
 
 
-async def _owner_of(file_id: str, call) -> tuple:
-    """(owner, 'owner' | 'mismatch' | 'unknown') — never granted, only observed.
+async def _find_created(title: str, marker: str, call) -> dict:
+    """Look for a file an unanswered create may have left behind.
 
-    Deliberately read-only. The 9 September transcript shows Ace reaching for a shareable
-    link when Brady could not open the file; minting a link is a permission change and is
-    not a diagnosis.
+    Returns {'file_id'} only when identity is CERTAIN, otherwise {'candidates'}. A title match
+    is not identity — Brady names things the same way twice — so a lone name match comes back
+    as a candidate for him to resolve, never as a confirmed id.
+    """
+    try:
+        out = await call("mcp_search_drive_files", {"query": f"name = '{title}'"})
+    except Exception:
+        return {}
+    if not out or _looks_like_error(out):
+        return {}
+    if marker and marker in out:
+        got = extract_id(out)
+        if got:
+            return {"file_id": got, "how": "provider marker matched"}
+    ids = []
+    for cand in _ID_RE.findall(out):
+        if cand not in ids and (not cand.isalpha() or len(cand) >= 30):
+            ids.append(cand)
+    return {"candidates": ids} if ids else {}
+
+
+async def _owner_of(file_id: str, call) -> tuple:
+    """(owner, access, evidence) where access is 'ok' | 'no_access' | 'unknown'.
+
+    Two things Codex was right about, both fixed here.
+
+    The first email appearing anywhere in a blob of provider text is NOT the owner — it may
+    be a commenter, a sharer, or a name in a search snippet. Owner and permission data are
+    read from STRUCTURED fields, and prose is never mined for an address.
+
+    And an owner who is not Brady is NOT proof he cannot open the file: a file owned by
+    someone else and shared with him opens perfectly well. So access is decided by looking
+    for HIS address in the permission records, not by comparing owners. When the connector
+    cannot establish either, the honest answer is unknown — which the caller reports as a
+    warning rather than a promise.
     """
     for tool, key in (("mcp_get_drive_file_metadata", "file_id"),
-                      ("mcp_get_drive_file_info", "file_id"),
-                      ("mcp_search_drive_files", "query")):
+                      ("mcp_get_drive_file_info", "file_id")):
         try:
-            out = await call(tool, {key: file_id if key == "file_id" else f"'{file_id}'"})
+            out = await call(tool, {key: file_id})
         except Exception:
             continue
         if not out or _looks_like_error(out):
             continue
-        found = _EMAIL_RE.findall(out)
-        if found:
-            owner = found[0].lower()
-            if not EXPECTED_USER:
-                return owner, "unknown"
-            return owner, ("owner" if owner == EXPECTED_USER else "mismatch")
-    return "", "unknown"
+        try:
+            blob = json.loads(out)
+        except Exception:
+            continue      # unparseable is unknown, never guessed at
+        owner = ""
+        for o in (blob.get("owners") or []):
+            if isinstance(o, dict) and o.get("emailAddress"):
+                owner = str(o["emailAddress"]).lower()
+                break
+        allowed = set()
+        for perm in (blob.get("permissions") or []):
+            if isinstance(perm, dict) and perm.get("emailAddress"):
+                allowed.add(str(perm["emailAddress"]).lower())
+        if owner:
+            allowed.add(owner)
+        if not EXPECTED_USER:
+            return owner, "unknown", "ACE2_GOOGLE_USER is not set, so access cannot be checked"
+        if EXPECTED_USER in allowed:
+            return owner, "ok", ("you own it" if owner == EXPECTED_USER
+                                 else f"shared with you by {owner}")
+        if blob.get("permissions") is not None:
+            # The connector listed permissions and Brady is not among them. That IS evidence.
+            return owner, "no_access", "you are not in the file's permission list"
+        # An owner with no permission list proves nothing about whether he can open it.
+        return owner, "unknown", "the provider returned no permission list to check against"
+    return "", "unknown", "the provider exposes no file-metadata tool on this connection"
 
 
 # capability name → (handler, human title, whether it may run unattended)

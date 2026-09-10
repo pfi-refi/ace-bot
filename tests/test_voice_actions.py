@@ -57,7 +57,7 @@ class TheIdMustComeFromTheProvider(unittest.TestCase):
         f = Fake(mcp_create_spreadsheet="Created the spreadsheet successfully.")
         with self.assertRaises(cp.Failed) as e:
             run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
-        self.assertIn("did not return a spreadsheet id", str(e.exception))
+        self.assertIn("without a spreadsheet id", str(e.exception))
         self.assertNotIn("mcp_modify_sheet_values", [c[0] for c in f.calls])
 
     def test_the_link_is_built_from_the_verified_id(self):
@@ -92,8 +92,8 @@ class ContentsAreVerifiedNotAssumed(unittest.TestCase):
         f = Fake(mcp_read_sheet_values='{"values": [["Assistant","Model","Monthly"]]}')
         with self.assertRaises(cp.Failed) as e:
             run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
-        self.assertIn("does not contain what was written", str(e.exception))
-        self.assertIn("Northwind Helper", str(e.exception))
+        self.assertIn("does not match what you asked for", str(e.exception))
+        self.assertIn("A2", str(e.exception), 'the mismatch must name the cell')
 
     def test_a_write_failure_reports_the_partial_file(self):
         f = Fake(mcp_modify_sheet_values="Error: range is invalid")
@@ -122,44 +122,121 @@ class ProviderFailuresAreNotContent(unittest.TestCase):
 
 
 class AccessIsCheckedNotAssumed(unittest.TestCase):
-    """Brady's "file does not exist" is what a wrong-account file looks like."""
+    """Brady's "file does not exist" is what a wrong-account file looks like — but a file
+    owned by somebody else and SHARED with him opens fine, so ownership alone decides
+    nothing (Codex, 2026-09-09)."""
 
     def setUp(self):
         self._was = cp.EXPECTED_USER
+        cp.EXPECTED_USER = "brady@example.com"
 
     def tearDown(self):
         cp.EXPECTED_USER = self._was
 
-    def test_a_file_owned_by_another_account_is_not_announced_as_ready(self):
-        cp.EXPECTED_USER = "brady@example.com"
-        f = Fake(mcp_get_drive_file_metadata='{"owners":[{"emailAddress":"robot@svc.iam"}]}')
+    def _meta(self, payload):
+        return Fake(mcp_get_drive_file_metadata=__import__("json").dumps(payload),
+                    mcp_get_drive_file_info="Error: none")
+
+    def test_not_in_the_permission_list_is_no_access(self):
+        f = self._meta({"owners": [{"emailAddress": "svc@robot.iam"}],
+                        "permissions": [{"emailAddress": "svc@robot.iam"}]})
         with self.assertRaises(cp.Failed) as e:
             run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
         self.assertIn("file does not exist", str(e.exception))
-        self.assertIn("robot@svc.iam", str(e.exception))
 
-    def test_and_no_sharing_is_created_to_paper_over_it(self):
-        cp.EXPECTED_USER = "brady@example.com"
-        f = Fake(mcp_get_drive_file_metadata='{"owners":[{"emailAddress":"robot@svc.iam"}]}')
+    def test_a_file_shared_with_him_is_fine_even_when_owned_by_someone_else(self):
+        # The old rule called this inaccessible purely because the owner differed.
+        f = self._meta({"owners": [{"emailAddress": "svc@robot.iam"}],
+                        "permissions": [{"emailAddress": "svc@robot.iam"},
+                                        {"emailAddress": "brady@example.com"}]})
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["access"], "ok")
+        self.assertIn("shared with you", out["access_evidence"])
+
+    def test_an_owner_with_no_permission_list_proves_nothing(self):
+        f = self._meta({"owners": [{"emailAddress": "svc@robot.iam"}]})
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["access"], "unknown")
+        self.assertTrue(any("cannot promise" in w for w in out["warnings"]))
+
+    def test_an_email_in_prose_is_never_read_as_the_owner(self):
+        # The old code took the first address anywhere in the text — a commenter, a sharer,
+        # or a name in a search snippet would all have been treated as the owner.
+        f = Fake(mcp_get_drive_file_metadata="Shared by helper@example.com — see attached",
+                 mcp_get_drive_file_info="Error: none")
+        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
+        self.assertEqual(out["access"], "unknown")
+        self.assertEqual(out["owner"], "")
+
+    def test_no_sharing_is_created_to_paper_over_a_refusal(self):
+        f = self._meta({"owners": [{"emailAddress": "svc@robot.iam"}],
+                        "permissions": [{"emailAddress": "svc@robot.iam"}]})
         with self.assertRaises(cp.Failed):
             run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
         self.assertNotIn("mcp_get_drive_shareable_link", [c[0] for c in f.calls])
 
     def test_the_owners_own_link_is_not_a_sharing_change(self):
-        cp.EXPECTED_USER = "brady@example.com"
-        f = Fake()
+        f = self._meta({"owners": [{"emailAddress": "brady@example.com"}],
+                        "permissions": [{"emailAddress": "brady@example.com"}]})
         out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
-        self.assertEqual(out["access"], "owner")
+        self.assertEqual(out["access"], "ok")
         self.assertIn("no sharing permission", out["link_kind"])
 
-    def test_unknown_ownership_is_flagged_rather_than_promised(self):
-        cp.EXPECTED_USER = "brady@example.com"
-        f = Fake(mcp_get_drive_file_metadata="Error: not available",
-                 mcp_get_drive_file_info="Error: not available",
-                 mcp_search_drive_files="Error: not available")
-        out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
-        self.assertEqual(out["access"], "unknown")
-        self.assertTrue(any("cannot promise" in w for w in out["warnings"]))
+
+class EveryCellIsCheckedWhereItWasWritten(unittest.TestCase):
+    """The set-membership check verified a request for 50000 that came back as 999999."""
+
+    REQ = [["Client", "Income"], ["Alex", 50000]]
+
+    def _readback(self, values):
+        import json as _j
+        return Fake(mcp_read_sheet_values=_j.dumps({"values": values}))
+
+    def test_an_altered_number_is_caught(self):
+        f = self._readback([["Client", "Income"], ["Alex", 999999]])
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "T", "rows": self.REQ}, f))
+        self.assertIn("B2", str(e.exception))
+        self.assertIn("999999", str(e.exception))
+
+    def test_swapped_rows_are_caught(self):
+        f = self._readback([["Alex", 50000], ["Client", "Income"]])
+        with self.assertRaises(cp.Failed):
+            run(cp.create_spreadsheet({"title": "T", "rows": self.REQ}, f))
+
+    def test_a_shifted_cell_is_caught(self):
+        f = self._readback([["Client", "Income"], ["", "Alex"]])
+        with self.assertRaises(cp.Failed):
+            run(cp.create_spreadsheet({"title": "T", "rows": self.REQ}, f))
+
+    def test_a_dropped_duplicate_row_is_caught(self):
+        req = [["Item"], ["Alex"], ["Alex"]]
+        f = self._readback([["Item"], ["Alex"]])
+        with self.assertRaises(cp.Failed):
+            run(cp.create_spreadsheet({"title": "T", "rows": req}, f))
+
+    def test_provider_number_normalisation_is_not_a_mismatch(self):
+        f = self._readback([["Client", "Income"], ["Alex", "50000.0"]])
+        out = run(cp.create_spreadsheet({"title": "T", "rows": self.REQ}, f))
+        self.assertEqual(out["cells_verified"], 4)
+
+    def test_a_trailing_blank_the_provider_trims_is_not_a_mismatch(self):
+        req = [["A", "B", ""], ["1", "2", ""]]
+        f = self._readback([["A", "B"], ["1", "2"]])
+        run(cp.create_spreadsheet({"title": "T", "rows": req}, f))
+
+    def test_a_blank_that_should_hold_a_value_is_caught(self):
+        f = self._readback([["Client", "Income"], ["Alex", ""]])
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "T", "rows": self.REQ}, f))
+        self.assertIn("B2", str(e.exception))
+
+    def test_a_formula_is_reported_unverifiable_not_called_correct(self):
+        req = [["Total"], ["=SUM(B1:B9)"]]
+        f = self._readback([["Total"], ["42"]])
+        out = run(cp.create_spreadsheet({"title": "T", "rows": req}, f))
+        self.assertTrue(any("could not be checked" in w for w in out["warnings"]))
+        self.assertIn("A2", " ".join(out["warnings"]))
 
 
 class UnsupportedFormattingIsReportedNotAttempted(unittest.TestCase):
