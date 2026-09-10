@@ -726,6 +726,26 @@
       msg = card.detail || 'Verified and ready.';
     }
     if (msg) { var m = document.createElement('div'); m.className = 'tc-msg'; m.textContent = msg; el.appendChild(m); }
+    // RESEARCH: the answer, then the sources it rests on and when they were checked.
+    // Never the answer alone — an unsourced research result is the thing this replaced.
+    if (card.answer) {
+      var ans = document.createElement('div'); ans.className = 'tc-answer';
+      ans.textContent = card.answer; el.appendChild(ans);
+    }
+    if (card.sources && card.sources.length) {
+      var src = document.createElement('div'); src.className = 'tc-src';
+      var lbl = document.createElement('div'); lbl.className = 'tc-srclbl';
+      lbl.textContent = 'Sources · checked ' + (card.checked_at || 'today')
+                      + (card.support === 'snippet' ? ' · one source only' : '');
+      src.appendChild(lbl);
+      card.sources.forEach(function (s0) {
+        var a = document.createElement('a');
+        a.href = s0.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.textContent = s0.title || s0.url; a.className = 'tc-srclink';
+        src.appendChild(a);
+      });
+      el.appendChild(src);
+    }
     (card.warnings || []).forEach(function (w) {
       var wn = document.createElement('div'); wn.className = 'tc-warn'; wn.textContent = w; el.appendChild(wn);
     });

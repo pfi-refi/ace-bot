@@ -594,8 +594,8 @@ BUILD_ON_SCREEN = {
 START_TASK = {
     "name": "start_task",
     "description": (
-        "Start a longer Google Workspace task that runs in the BACKGROUND while you keep "
-        "talking. Use it when Brady asks you to CREATE a Google Spreadsheet. He does not need "
+        "Start a longer task that runs in the BACKGROUND while you keep talking — building a "
+        "Google Sheet, or researching something on the live internet. He does not need "
         "a screen open and you must not tell him to watch one — a small progress card appears "
         "wherever he is. You get back a task id and a state, which will be 'queued'. "
         "ACKNOWLEDGE IT IN ONE SHORT SENTENCE AND SAY NOTHING ABOUT THE RESULT: it has not run "
@@ -609,8 +609,19 @@ START_TASK = {
         "properties": {
             "capability": {
                 "type": "string",
-                "enum": ["create_spreadsheet"],
-                "description": "The supported task. Only create_spreadsheet today.",
+                "enum": ["create_spreadsheet", "research"],
+                "description": (
+                    "create_spreadsheet — build a Google Sheet. "
+                    "research — look something up on the live internet and come back with "
+                    "sources and the date checked. Use research whenever Brady asks what "
+                    "something costs, what is current, or what someone is doing now; do NOT "
+                    "answer those from memory."
+                ),
+            },
+            "question": {
+                "type": "string",
+                "description": ("For research: the question, in full. Include what he "
+                                "actually wants to know, not a keyword."),
             },
             "title": {
                 "type": "string",
@@ -633,7 +644,9 @@ START_TASK = {
                 ),
             },
         },
-        "required": ["capability", "title", "rows"],
+        # Only the capability is universally required; the handler refuses a task whose
+        # own fields are missing rather than inventing them.
+        "required": ["capability"],
     },
 }
 

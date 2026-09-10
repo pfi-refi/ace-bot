@@ -1248,3 +1248,19 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   .tc-x { min-width: 44px; min-height: 44px; }
   @keyframes tc-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 }
+
+/* Research cards carry their evidence: the answer, then the sources and the date they were
+   checked. An answer without them is exactly what this replaced, so the links are part of
+   the card rather than a detail behind a tap. (2026-09-09) */
+.tc-answer { margin-top: 6px; color: #dce8e4; font-size: 12.5px; line-height: 1.5;
+  max-height: 190px; overflow-y: auto; }
+.tc-src { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.tc-srclbl { font-family: var(--mono); font-size: 9px; letter-spacing: .1em;
+  text-transform: uppercase; color: #7d8f8b; }
+.tc-srclink { color: #53e7ff; font-size: 11.5px; text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-srclink:hover { text-decoration: underline; }
+@media (max-width: 560px) {
+  .tc-answer { font-size: 13.5px; max-height: 160px; }
+  .tc-srclink { font-size: 12.5px; padding: 4px 0; }
+}

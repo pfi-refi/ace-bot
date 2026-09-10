@@ -153,6 +153,57 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   ok('work accepted while the page is hidden still completes',
      hiddenState === 'completed', hiddenState);
 
+  // ── research: the answer never appears without its sources ──────────────────
+  // Clear EVERY card first, including sticky approvals — those have no close button by
+  // design, so they have to be answered. A leftover approval sat on top of the research
+  // card and the screenshot caught the wrong one.
+  await p.evaluate(async () => {
+    const live = await fetch('/actions?limit=50', { headers: { Authorization: 'Bearer dev' } })
+      .then(r => r.json());
+    for (const c of live.live || []) {
+      await fetch('/actions/' + c.task_id + '/deny', { method: 'POST',
+        headers: { Authorization: 'Bearer dev' } });
+    }
+    document.querySelectorAll('.task-card .tc-x').forEach(x => x.click());
+  });
+  await p.waitForTimeout(400);
+  await p.evaluate(() => document.querySelectorAll('.task-card .tc-x').forEach(x => x.click()));
+  await raise('research');
+  await p.waitForSelector('.task-card[data-state="completed"]', { timeout: 8000 });
+  await p.waitForTimeout(350);          // let the fade-in finish before photographing it
+  await shot('10-desktop-research');
+  // Target the RESEARCH card by name: an empty locator makes .every() pass vacuously, so
+  // grabbing "the first completed card" hid a missing card behind a green tick.
+  const rc = p.locator('.task-card', { hasText: 'Research' }).first();
+  await rc.waitFor({ timeout: 8000 });
+  const rtext = await rc.innerText();
+  ok('the research card was found at all', await rc.count() === 1);
+  ok('...and it lists at least one source', await rc.locator('.tc-srclink').count() > 0);
+  ok('a research card shows the answer', /Northwind Helper is \$20/.test(rtext));
+  ok('...with both its sources listed', await rc.locator('.tc-srclink').count() === 2);
+  // innerText is uppercased by CSS on the label, so every text assertion here is
+  // case-insensitive on purpose.
+  ok('...and the date they were checked', /checked \d{4}-\d{2}-\d{2}/i.test(rtext), rtext.slice(0, 120));
+  ok('...and the honest limit it flagged', /could not confirm/i.test(rtext));
+  const hrefs = await rc.locator('.tc-srclink').evaluateAll(a => a.map(x => x.href));
+  ok('the source links are real and open safely',
+     hrefs.every(h => /^https:\/\//.test(h))
+     && (await rc.locator('.tc-srclink').first().getAttribute('rel')).includes('noopener'),
+     hrefs.join(' | '));
+
+  // ── the connector inventory names settings but never their values ────────────
+  const inv = await p.evaluate(() => fetch('/connectors', {
+    headers: { Authorization: 'Bearer dev' } }).then(r => r.json()));
+  const blob = JSON.stringify(inv);
+  ok('the inventory lists both connectors', inv.connectors.length === 2,
+     inv.connectors.map(c => c.name).join(', '));
+  ok('...names settings without values',
+     blob.includes('MCP_SERVER_URL') && !blob.includes('http://127.0.0.1:8791/mcp'));
+  ok('...separates configured from tested',
+     inv.connectors.every(c => 'configured' in c && 'reachable' in c));
+  ok('...and marks unenabled actions with a reason',
+     inv.connectors.some(c => (c.actions || []).some(a => !a.enabled && a.not_enabled_because)));
+
   // ── phone ────────────────────────────────────────────────────────────────────
   await p.setViewportSize({ width: 390, height: 844 });
   await p.evaluate(() => {
@@ -197,6 +248,25 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   await raise('failure');
   await p.waitForSelector('.task-card[data-state="failed"]', { timeout: 5000 });
   await shot('08-phone-failure');
+  // Reload first: after a long run the layer holds several cards with their own dismiss
+  // timers, and the tall research card is the one that has to be photographed cleanly.
+  await p.reload({ waitUntil: 'networkidle' });
+  await raise('research');
+  await p.waitForSelector('.task-card[data-state="completed"]', { timeout: 8000 });
+  await p.waitForTimeout(400);
+  const phoneR = await p.evaluate(() => {
+    const c = document.querySelector('.task-card'); const r = c.getBoundingClientRect();
+    return { overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+             bottom: Math.round(window.innerHeight - r.bottom),
+             fits: r.height < window.innerHeight * 0.75 };
+  });
+  ok('phone: a research card still fits and clears the controls',
+     phoneR.overflow <= 0 && phoneR.bottom >= 100 && phoneR.fits, JSON.stringify(phoneR));
+  ok('phone: it shows its sources too', await p.locator('.tc-srclink').count() > 0);
+  ok('phone: the caveat is not printed twice',
+     (await p.locator('.task-card').first().innerText())
+       .split('read the answer for which parts').length - 1 <= 1);
+  await shot('11-phone-research');
   await raise('working');
   await p.waitForTimeout(300);
   await shot('09-phone-working');

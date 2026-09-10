@@ -117,6 +117,32 @@ try:
                                         "Sharing this outside your account needs your OK.")
             await _tr._broadcast(out)
             return {"card": _tasks.card(out)}
+        if kind == "research":
+            # A fake Anthropic client: no network, no spend. Exercises the research card's
+            # answer + sources + date-checked rendering.
+            class _C:
+                def __init__(self): self.messages = self
+                async def create(self, **kw):
+                    cite = lambda u, t: type("X", (), {"url": u, "title": t})()
+                    blk = type("B", (), {"text": (
+                        "Northwind Helper is $20/month on the flat plan; Cedar Assist bills "
+                        "per request at $0.004. I could not confirm Cedar's 2026 volume tier."),
+                        "citations": [cite("https://northwind.example/pricing", "Northwind pricing"),
+                                      cite("https://cedar.example/docs/pricing", "Cedar pricing")]})()
+                    return type("R", (), {"content": [blk], "usage": type("U", (), {
+                        "server_tool_use": type("S", (), {"web_search_requests": 2})()})()})()
+            # A distinct question per call, for the same reason the success fixture varies its
+            # title: an identical request correctly returns the finished task (and its
+            # already-running dismiss timer), which is right behaviour and a useless fixture.
+            _demo_n[0] += 1
+            q = f"What do the sample assistants cost? ({_demo_n[0]})"
+            v, t = _tasks.accept("research", {"question": q})
+            _tasks.claim(t["id"])
+            out = await _tr._execute(t["id"], None) if False else None
+            res = await _cp.research({"question": q, "_client": _C()}, None)
+            done = _tasks.completed(t["id"], res, (res.get("limits") or [""])[0])
+            await _tr._broadcast(done)
+            return {"card": _tasks.card(done)}
         v, t = _tasks.accept("create_spreadsheet", {"title": "Working demo", "rows": rows})
         out = _tasks.working(t["id"], "Writing the rows")
         await _tr._broadcast(out)

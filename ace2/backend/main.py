@@ -697,6 +697,44 @@ async def board_mapping_preview():
     }
 
 
+@app.get("/connectors", dependencies=[Depends(require_auth)])
+async def connectors_inventory(probe: bool = False):
+    """What Ace is connected to, what each connection may do, and what has actually been
+    tested. No credential value is ever returned — settings appear by name with a set flag.
+
+    `probe=true` additionally runs ONE read per connector to establish reachability. It is
+    off by default so opening the panel costs nothing.
+    """
+    from . import connectors as cn
+    from .integrations import mcp_client
+
+    # TESTED comes from real verified runs, not from a claim in a table: a capability that
+    # has completed here marks the tools its connector uses.
+    tested = {}
+    try:
+        for t in await asyncio.to_thread(task_store.recent, 100):
+            if t["state"] != task_store.COMPLETED:
+                continue
+            spec = capabilities.REGISTRY.get(t["capability"]) or {}
+            conn = cn.get(spec.get("connector") or "")
+            for tool, a in (conn.get("actions") or {}).items():
+                if a.get("via_capability") == t["capability"] or a.get("kind") == cn.READ:
+                    tested.setdefault(tool, t.get("settled_at") or t.get("created_at"))
+    except Exception as e:
+        logger.warning("connector inventory: tested lookup failed: %s", type(e).__name__)
+
+    reachable, identity = {}, {}
+    if probe:
+        try:
+            reachable["google_workspace"] = bool(mcp_client.enabled()
+                                                 and await mcp_client.tool_schemas())
+        except Exception:
+            reachable["google_workspace"] = False
+        reachable["web_research"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    identity["google_workspace"] = capabilities.EXPECTED_USER or ""
+    return cn.inventory(reachable=reachable, tested=tested, identity=identity)
+
+
 # ── MCP PROBE: settle the two unknowns without spending a model call ────────────
 # The spreadsheet capability needs two facts nobody can currently state: the real argument
 # names the server's tools take, and WHICH GOOGLE ACCOUNT the connection acts as. The second

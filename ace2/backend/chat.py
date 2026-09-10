@@ -39,7 +39,7 @@ from pathlib import Path
 import pytz
 from anthropic import AsyncAnthropic
 
-from . import brain, daybank, history, tools
+from . import brain, capabilities, connectors, daybank, history, tools
 from . import tasks as tasks_mod
 from . import ops
 from .integrations.calendar_api import (
@@ -3321,19 +3321,32 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     a = dict(block.input)
                     cap = (a.get("capability") or "").strip()
                     rows = a.get("rows") or []
+                    question = (a.get("question") or "").strip()
+                    task_args, task_title, missing = {}, "", ""
+                    if cap == "create_spreadsheet":
+                        if not (a.get("title") or "").strip() or not rows:
+                            missing = ("A title and the contents are both required, and I "
+                                       "will not make either up. Ask Brady for whichever is "
+                                       "missing.")
+                        task_args = {"title": a.get("title"), "rows": rows,
+                                     "bold_header": bool(a.get("bold_header"))}
+                        task_title = (a.get("title") or "").strip()[:120]
+                    elif cap == "research":
+                        if not question:
+                            missing = ("No question came through. Ask Brady what he wants "
+                                       "looked up, in one short sentence.")
+                        task_args = {"question": question}
+                        task_title = question[:120]
                     if not cap:
                         result = ("No task type came through. Ask Brady what he wants in one "
                                   "short sentence.")
-                    elif not (a.get("title") or "").strip() or not rows:
-                        result = ("A title and the contents are both required, and I will not "
-                                  "make either up. Ask Brady for whichever is missing.")
+                    elif missing:
+                        result = missing
                     else:
                         card = await taskrunner.dispatch(
-                            cap,
-                            {"title": a.get("title"), "rows": rows,
-                             "bold_header": bool(a.get("bold_header"))},
+                            cap, task_args,
                             origin=("voice" if fast else "typed"),
-                            title=(a.get("title") or "").strip()[:120])
+                            title=task_title)
                         await emit("task", card)
                         st = card.get("state")
                         if st == tasks_mod.FAILED and not card.get("task_id"):
@@ -3419,7 +3432,27 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 if is_ui:
                     result = await _run_ui_tool(block.name, use_args, emit)
                 elif mcp_client.is_mcp_tool(block.name):
-                    result = await mcp_client.call(block.name, use_args)
+                    # THE REGISTRY DECIDES, NOT THE PROVIDER (2026-09-09). A connector
+                    # publishes whatever it likes; connectors.py says which of those Ace may
+                    # call. Two things this closes: a tool nobody has decided how to verify
+                    # cannot be reached at all, and a write that HAS a verified capability
+                    # cannot be called around it — typed chat still carried raw
+                    # mcp_create_spreadsheet beside start_task, so an equivalent request
+                    # could still take the unverified path that failed on 9 September.
+                    _ok, _why = connectors.allowed(block.name)
+                    _via = connectors.action(connectors.connector_of(block.name),
+                                             block.name).get("via_capability")
+                    if not _ok:
+                        result = (f"NOT AVAILABLE — {_why}. Nothing ran. Tell Brady plainly "
+                                  f"and do not describe this as done.")
+                    elif _via and _via in capabilities.REGISTRY:
+                        result = (f"USE start_task INSTEAD. {block.name} creates something "
+                                  f"without checking it afterwards, which is how a "
+                                  f"spreadsheet got reported as built when it did not exist. "
+                                  f"Call start_task with capability '{_via}' and the same "
+                                  f"details. NOTHING HAS BEEN CREATED by this call.")
+                    else:
+                        result = await mcp_client.call(block.name, use_args)
                 else:
                     result = await _dispatch_write(block.name, use_args)
                 await emit("tool", {"name": block.name, "label": label, "status": "done", "ui": is_ui})
