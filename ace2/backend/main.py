@@ -758,6 +758,8 @@ async def diag_mcp_schemas(match: str = ""):
     """The argument names the MCP server actually publishes. No tool is called."""
     from .integrations import mcp_client
     out = []
+    # tool_schemas() performs the lazy load itself, so this one is already safe on a cold
+    # process — noted because the sibling probe below was not.
     for sch in await mcp_client.tool_schemas():
         if match and match.lower() not in sch["name"].lower():
             continue
@@ -782,8 +784,18 @@ async def diag_mcp_whoami(query: str = "AI Assistant Cost Pricing Analysis"):
     if not mcp_client.enabled():
         return {"ok": False, "error": "MCP is not configured on this server"}
     tool = "mcp_search_drive_files"
-    if tool not in _PROBE_READS or not mcp_client.is_mcp_tool(tool):
-        return {"ok": False, "error": f"{tool} is not available as a read probe"}
+    if tool not in _PROBE_READS:
+        return {"ok": False, "error": f"{tool} is not on the read-probe allow-list"}
+    # The tool names come from schemas the client loads LAZILY, so on a cold process
+    # is_mcp_tool() is False for everything until something triggers a load — and this
+    # diagnostic then reported the connector as unavailable when it was merely untouched.
+    # Found straight after the 20349aa deploy: the first call failed, the second succeeded
+    # only because /diag/mcp had loaded the schemas in between.
+    await mcp_client.tool_schemas()
+    if not mcp_client.is_mcp_tool(tool):
+        return {"ok": False,
+                "error": f"{tool} is not published by this connector "
+                         f"(loaded {len(await mcp_client.tool_schemas())} tools)"}
     raw = await mcp_client.call(tool, {"query": query})
     emails = sorted(set(capabilities._EMAIL_RE.findall(raw or "")))
     return {

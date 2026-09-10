@@ -1083,3 +1083,27 @@ class WhereTheFileActuallyGoes(unittest.TestCase):
         f2 = self._sheet_fake(self.FOLDER_HIT, inside=False)
         out2 = run(cp.create_spreadsheet({"title": "T", "rows": ROWS, "folder": "Deals"}, f2))
         self.assertTrue(any("does not list it there" in w for w in out2["warnings"]))
+
+
+class TheProbeWorksOnAColdProcess(unittest.TestCase):
+    """Found on the live service immediately after deploying 20349aa: /diag/mcp/whoami
+    reported the connector unavailable, then worked seconds later — because MCP schemas load
+    lazily and nothing had triggered the load yet. A diagnostic that depends on a side effect
+    of another endpoint is worse than no diagnostic."""
+
+    def test_whoami_loads_the_schemas_before_checking_for_the_tool(self):
+        from backend import main
+        src = Path(main.__file__).read_text()
+        seg = src.split("async def diag_mcp_whoami")[1].split("async def ")[0]
+        self.assertIn("await mcp_client.tool_schemas()", seg)
+        # ...and the load must come BEFORE the availability check it feeds.
+        self.assertLess(seg.index("await mcp_client.tool_schemas()"),
+                        seg.index("is_mcp_tool(tool)"))
+
+    def test_the_allow_list_is_still_checked_first(self):
+        from backend import main
+        src = Path(main.__file__).read_text()
+        seg = src.split("async def diag_mcp_whoami")[1].split("async def ")[0]
+        self.assertLess(seg.index("_PROBE_READS"),
+                        seg.index("await mcp_client.tool_schemas()"),
+                        'a tool off the allow-list must be refused without touching MCP')
