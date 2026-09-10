@@ -3145,6 +3145,10 @@ async def _dispatch_write(name: str, args: dict, sink: dict = None) -> str:
 # did go through". A handler whose entire job is honesty was manufacturing completion claims.
 # (Codex, 2026-09-10.)
 OP_DONE, OP_FAILED, OP_QUEUED, OP_READ = "done", "failed", "queued", "read"
+# A proposal parked in the Review tray DEFINITELY did not execute — it is waiting on Brady.
+# It needs its own state: OP_FAILED would say it was refused, and OP_UNKNOWN would say it
+# "may have taken effect", which is the opposite of true. (Reviewer's open item 2.)
+OP_REVIEW = "review"
 OP_UNKNOWN = "unknown"          # it ran; whether it changed anything is NOT established
 OP_UI = "ui"                    # painted a screen; nothing in anyone's data changed at all
 
@@ -3229,10 +3233,11 @@ def interrupted_note(ops_list: list) -> str:
     construction: the refusal's own words are not in this string at all.
     """
     done = [o for o in (ops_list or []) if o.get("state") == OP_DONE]
+    review = [o for o in (ops_list or []) if o.get("state") == OP_REVIEW]
     queued = [o for o in (ops_list or []) if o.get("state") == OP_QUEUED]
     unsure = [o for o in (ops_list or []) if o.get("state") == OP_UNKNOWN]
     failed = [o for o in (ops_list or []) if o.get("state") == OP_FAILED]
-    if not (done or queued or unsure or failed):
+    if not (done or queued or unsure or failed or review):
         # Still '' for a genuinely empty turn, and for one that only READ or only painted a
         # screen: nothing was asked of the world, so there is nothing to report about it.
         return ""
@@ -3243,6 +3248,13 @@ def interrupted_note(ops_list: list) -> str:
     if queued:
         lines.append("Started and still running (NOT finished):")
         lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in queued[:4]]
+    waiting = [o for o in (ops_list or []) if o.get("state") == OP_REVIEW]
+    if waiting:
+        # Named by TOOL only. The result text is written at the model ("Ask Brady to open
+        # Review…"), and chat.py has form on raw tool strings resurfacing in the thread as
+        # things Ace supposedly said.
+        lines.append("Waiting on your approval in Review — prepared, NOT done: "
+                     + ", ".join(sorted({str(o.get("tool")) for o in waiting})))
     if unsure:
         lines.append("Outcome NOT confirmed — these may or may not have taken effect:")
         lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in unsure[:4]]
@@ -3627,6 +3639,11 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                             result = "Review storage unavailable. Nothing executed. Tell Brady the action is blocked."
                     else:
                         result = "STOP: action is waiting in Review. Do not call it again or claim it ran."
+                    # RECORDED BEFORE THE CONTINUE. This branch returned without touching
+                    # turn_ops, so an interrupted turn that had parked something for approval
+                    # wrote no assistant row at all — Brady's words with silence beneath them,
+                    # the exact hole this whole repair exists to close.
+                    turn_ops.append({"tool": block.name, "text": result, "state": OP_REVIEW})
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                     continue
                 label = tools.TOOL_LABELS.get(block.name) or \

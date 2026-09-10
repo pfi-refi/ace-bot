@@ -2018,3 +2018,53 @@ class TheRefusalSurvivesBeingReAsked(unittest.TestCase):
                  mcp_search_drive_files=_hit("Deals", FOLDER_ID))
         out = run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "refused"}))
         self.assertEqual(out["file_id"], FOLDER_ID)
+
+
+class TheAllowlistHoldsAtEveryEntryPoint(unittest.TestCase):
+    """Reviewer's open items 3 and 4. sanitize_args ran only at the HTTP route, so a future
+    in-process caller could reopen the hole; and ARG_KEYS is hand-maintained, so a handler
+    that starts reading a new key silently stops receiving it."""
+
+    def test_dispatch_sanitises_even_when_the_route_did_not(self):
+        from backend import taskrunner
+        src = Path(taskrunner.__file__).read_text()
+        seg = src.split("async def dispatch(")[1]
+        self.assertIn("sanitize_args", seg)
+        # ...and before the request key is derived from them.
+        self.assertLess(seg.index("sanitize_args"), seg.index("tasks.accept"))
+
+    def test_the_attack_keys_are_stripped_by_the_function_itself(self):
+        clean = cp.sanitize_args("create_folder", {
+            "name": "Deals", "start_fresh": True,
+            "use_existing_folder_id": "1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "_client": object()})
+        self.assertEqual(clean, {"name": "Deals"})
+
+    def test_an_unknown_capability_keeps_nothing(self):
+        self.assertEqual(cp.sanitize_args("launch_rocket", {"x": 1}), {})
+
+    def test_every_registered_capability_has_an_allowlist(self):
+        for name in cp.REGISTRY:
+            self.assertIn(name, cp.ARG_KEYS, f"{name} has no ARG_KEYS entry, so the HTTP "
+                                             f"route would strip every argument it is sent")
+
+    def test_the_allowlist_covers_what_the_handlers_actually_read(self):
+        """The silent failure the reviewer flagged: a handler starts reading a new args key
+        and quietly stops receiving it. This reads the handler source for args.get("…")
+        and asserts each key is allowlisted."""
+        import re as _re
+        src = Path(cp.__file__).read_text()
+        for name, spec in cp.REGISTRY.items():
+            fn = spec["handler"].__name__
+            body = src.split(f"async def {fn}(")[1].split("\nasync def ")[0]
+            read = set(_re.findall(r'args\.get\(\s*["\']([a-z_]+)["\']', body))
+            read -= {"_client"}          # test-injection hook, deliberately never allowlisted
+            missing = sorted(read - set(cp.ARG_KEYS.get(name, ())))
+            self.assertEqual(missing, [], f"{fn} reads {missing} but ARG_KEYS does not allow "
+                                          f"them — they would arrive empty from the route")
+
+    def test_the_resolution_keys_are_never_allowlisted(self):
+        """start_fresh / use_existing_folder_id are the forged-authorisation keys. They must
+        not be reachable from a caller through any capability."""
+        for name, keys in cp.ARG_KEYS.items():
+            for forbidden in ("start_fresh", "use_existing_folder_id", "_client"):
+                self.assertNotIn(forbidden, keys, f"{name} exposes {forbidden}")

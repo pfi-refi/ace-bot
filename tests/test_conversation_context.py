@@ -873,3 +873,62 @@ class AScreenRenderIsNotAMutation(unittest.TestCase):
             chat.classify_result("capture_item",
                                  "⚠️ Previous attempt's outcome is unknown.",
                                  outcome=ops_mod.UNKNOWN), chat.OP_UNKNOWN)
+
+
+class AParkedProposalIsRecordedAsWaiting(unittest.TestCase):
+    """Reviewer's open item 2: the Review-gate branch returned without touching turn_ops, so
+    an interrupted turn that had parked something for approval wrote NO assistant row —
+    Brady's words with silence beneath them, the hole this whole repair exists to close.
+
+    The reviewer declined to fix it naively because "REVIEW REQUIRED." is not a refusal
+    opening, so appending it without a state would have classified as OP_UNKNOWN — reporting
+    something that definitely did not run as "may have taken effect"."""
+
+    PARKED = ("REVIEW REQUIRED. Nothing executed. Exact details saved in Review, proposal "
+              "abc123. Ask Brady to open Review to approve or reject.")
+
+    def op(self, tool="send_email"):
+        return [{"tool": tool, "text": self.PARKED, "state": chat.OP_REVIEW}]
+
+    def test_a_parked_proposal_is_no_longer_silent(self):
+        note = chat.interrupted_note(self.op())
+        self.assertNotEqual(note, "")
+        self.assertIn("Waiting on your approval", note)
+        self.assertIn("send_email", note)
+
+    def test_it_is_never_described_as_done_or_as_maybe_done(self):
+        note = chat.interrupted_note(self.op())
+        self.assertIn("NOT done", note)
+        self.assertNotIn("DID go through", note)
+        self.assertNotIn("may or may not have taken effect", note)
+
+    def test_the_prose_aimed_at_the_model_is_not_replayed(self):
+        """chat.py has form on raw tool strings resurfacing in the thread as things Ace said."""
+        note = chat.interrupted_note(self.op())
+        for phrase in ("Ask Brady", "proposal abc123", "Nothing executed"):
+            self.assertNotIn(phrase, note)
+
+    def test_it_sits_alongside_a_real_completion_without_contaminating_it(self):
+        from backend import ops as _ops
+        note = chat.interrupted_note(
+            [{"tool": "capture_item", "text": "◆ Captured: prescription",
+              "state": chat.classify_result("capture_item", "◆ Captured: prescription",
+                                            outcome=_ops.COMPLETED)}] + self.op())
+        self.assertIn("prescription", note.split("Waiting on your approval")[0])
+        self.assertIn("send_email", note)
+
+    def test_several_parked_proposals_are_listed_once_each(self):
+        note = chat.interrupted_note(self.op("send_email") + self.op("send_email")
+                                     + self.op("delete_calendar_event"))
+        self.assertEqual(note.count("send_email"), 1)
+        self.assertIn("delete_calendar_event", note)
+
+    def test_the_branch_records_before_it_returns(self):
+        src = Path(chat.__file__).read_text()
+        branch = src.split('result = "STOP: action is waiting in Review.')[1].split(
+            "\n                    continue")[0]
+        self.assertIn("turn_ops.append", branch)
+        self.assertIn("OP_REVIEW", branch)
+
+    def test_review_is_its_own_state_not_failed_or_unknown(self):
+        self.assertNotIn(chat.OP_REVIEW, (chat.OP_FAILED, chat.OP_UNKNOWN, chat.OP_DONE))

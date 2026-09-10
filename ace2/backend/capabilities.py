@@ -1297,7 +1297,11 @@ REGISTRY["create_folder"] = {
 ARG_KEYS = {
     "create_spreadsheet": ("title", "rows", "bold_header", "folder", "formatting",
                            "value_input_option"),
-    "create_doc": ("title", "blocks", "folder"),
+    # `formatting` was missing here while create_doc reads it, so the "this connection cannot
+    # apply headings or bold" warning could never fire for a request that came through the
+    # HTTP route — found by the drift test below, which is exactly the silent failure the
+    # reviewer predicted for a hand-maintained list.
+    "create_doc": ("title", "blocks", "folder", "formatting"),
     "create_folder": ("name", "parent_folder_id"),
     "research": ("question", "max_searches"),
 }

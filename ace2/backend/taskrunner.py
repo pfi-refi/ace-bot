@@ -170,6 +170,13 @@ async def dispatch(capability: str, args: dict, origin: str = "voice",
     # number in a table that no execution path read. Admission now happens INSIDE accept(),
     # in the same transaction that creates the row — checking here and inserting there let
     # three concurrent requests all see room and all spend.
+    # SANITISE HERE TOO (reviewer's open item 4). The HTTP route already allowlists, but the
+    # guard that matters — tasks.request_key — is computed from these args, and ANY extra key
+    # changes the hash, so an unresolved create is never found and the duplicate guard is
+    # never consulted. Leaving that protection at one call site meant a future in-process
+    # caller could reopen it silently. Idempotent: the route's already-clean dict is unchanged,
+    # and chat.py only ever sends allowlisted keys.
+    args = capabilities.sanitize_args(capability, args or {})
     spec = capabilities.REGISTRY.get(capability) or {}
     daily_cap, day = 0, ""
     if spec.get("costs_money"):
