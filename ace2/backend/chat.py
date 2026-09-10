@@ -1814,13 +1814,18 @@ def _commitment_lines(turns: list, now=None, limit: int = 12,
         when = local(t.get("ts"))
         said.append((when, text))
 
-    def render(rows, header, budget):
+    def render(rows, header, budget, dated=False):
         if not rows:
             return ""
         lines, used, omitted = [], 0, []
         for when, text in reversed(rows[-limit:]):          # newest first while filling
-            entry = "  - %s \u201c%s\u201d" % (
-                when.strftime("%-I:%M %p ET") if when else "time unknown", text)
+            # PRIOR DAYS CARRY THEIR DATE (2026-09-10). Today's lines need only a time — the
+            # header says which day that is. An earlier line showing "8:28 AM ET" with no date
+            # is ambiguous the moment two days are present, and the whole point of this block
+            # is that the model can tell when something was said.
+            stamp = ("time unknown" if not when
+                     else when.strftime("%b %-d, %-I:%M %p ET" if dated else "%-I:%M %p ET"))
+            entry = "  - %s \u201c%s\u201d" % (stamp, text)
             if used + len(entry) > budget:
                 omitted.append((when, text))
                 continue
@@ -1847,7 +1852,7 @@ def _commitment_lines(turns: list, now=None, limit: int = 12,
         prior_rows,
         "\n\nEARLIER DAYS, for context only (NOT today's plan — do not read a 'today' or "
         "'tomorrow' in these as meaning today):",
-        max(800, total_chars // 4))
+        max(800, total_chars // 4), dated=True)
     return today_block, prior_block
 
 

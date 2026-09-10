@@ -446,7 +446,10 @@ class ResearchIsSourcedOrItIsNothing(unittest.TestCase):
                          ["https://northwind.example/pricing",
                           "https://review.example/northwind"])
         self.assertRegex(out["checked_at"], r"^\d{4}-\d{2}-\d{2}$")
-        self.assertEqual(out["support"], cp.SUPPORT_SOURCE)
+        # Two citations do NOT make it verified — the connector returns citations, not pages
+        # it read, so confidence is never inferred from how many links came back.
+        self.assertEqual(out["support"], cp.SUPPORT_SNIPPET)
+        self.assertTrue(any("not pages I read end to end" in l for l in out["limits"]))
 
     def test_an_uncited_answer_is_refused_rather_than_presented_as_research(self):
         c = _Client(_Resp([_Block("I believe it is about $20.")], searches=0))
@@ -455,11 +458,35 @@ class ResearchIsSourcedOrItIsNothing(unittest.TestCase):
         self.assertIn("could not retrieve any sources", str(e.exception))
         self.assertIn("recollection", str(e.exception))
 
-    def test_a_single_source_is_flagged_as_indicative(self):
+    def test_a_single_source_says_so_explicitly(self):
         c = _Client(_Resp([_Block("It is $20.", [_Cite("https://one.example/x")])], searches=1))
         out = _research(c)
         self.assertEqual(out["support"], cp.SUPPORT_SNIPPET)
-        self.assertTrue(any("indicative" in l for l in out["limits"]))
+        self.assertTrue(any("Only one source" in l for l in out["limits"]))
+
+    def test_two_contradicting_sources_are_not_called_agreement(self):
+        c = _Client(_Resp([_Block("Northwind is $20. Another page says $35.",
+                                  [_Cite("https://a.example/p", "A"),
+                                   _Cite("https://b.example/p", "B")])]))
+        out = _research(c)
+        self.assertEqual(out["support"], cp.SUPPORT_SNIPPET)
+        self.assertTrue(any("whether they agree" in l for l in out["limits"]),
+                        'two sources must not imply the sources agree')
+
+    def test_the_configured_maximum_beats_what_the_model_asks_for(self):
+        import os
+        was = os.environ.get("ACE2_RESEARCH_MAX_SEARCHES")
+        os.environ["ACE2_RESEARCH_MAX_SEARCHES"] = "2"
+        try:
+            c = _Client(_Resp([_Block("x", [_Cite("https://a.example")])], searches=1))
+            _research(c, max_searches=8)
+            self.assertEqual(c.calls[0]["tools"][0]["max_uses"], 2,
+                             'the caller talked the budget up past the server limit')
+        finally:
+            if was is None:
+                os.environ.pop("ACE2_RESEARCH_MAX_SEARCHES", None)
+            else:
+                os.environ["ACE2_RESEARCH_MAX_SEARCHES"] = was
 
     def test_a_link_written_in_prose_is_not_counted_as_a_citation(self):
         c = _Client(_Resp([_Block("See https://madeup.example/page for details.")]))
@@ -639,3 +666,137 @@ class WhenTheConnectorHasNoMetadataTool(unittest.TestCase):
         out = run(cp.create_spreadsheet({"title": "T", "rows": ROWS}, f))
         self.assertTrue(out["url"])
         self.assertEqual(out["access"], "unknown")
+
+
+# ── AGAINST THE REAL PROVIDER, REPLAYED ────────────────────────────────────────
+# tests/fixtures/live_google_mcp.json holds the ACTUAL schemas and response bodies captured
+# from Brady's live google_workspace MCP server (Codex, 2026-09-09/10, over Railway SSH).
+# These replace guesswork: the fake below rejects arguments the real schema rejects, and
+# returns the real text. Both adapter defects Codex found would fail here.
+import json as _json
+
+_LIVE = _json.loads((Path(__file__).parent / "fixtures" / "live_google_mcp.json").read_text())
+LIVE_SCHEMAS, LIVE_RESP = _LIVE["schemas"], _LIVE["responses"]
+
+
+class LiveReplay:
+    """A provider that behaves like the real one: same argument contract, same text back."""
+
+    def __init__(self, **override):
+        self.calls, self.override = [], override
+
+    async def __call__(self, tool, args):
+        self.calls.append((tool, dict(args)))
+        sch = LIVE_SCHEMAS.get(tool)
+        if sch:
+            props = set((sch.get("properties") or {}).keys())
+            # additionalProperties=false on every one of these tools.
+            unknown = [k for k in args if k not in props]
+            if unknown and sch.get("additionalProperties") is False:
+                return f"⚠️ MCP {tool} reported an error: unexpected keyword {unknown[0]!r}"
+            missing = [k for k in (sch.get("required") or []) if k not in args]
+            if missing:
+                return f"⚠️ MCP {tool} reported an error: missing {missing[0]!r}"
+        if tool in self.override:
+            v = self.override[tool]
+            return v(args) if callable(v) else v
+        if tool == "mcp_create_spreadsheet":
+            return LIVE_RESP["create_result"]
+        if tool == "mcp_modify_sheet_values":
+            return LIVE_RESP["write"]
+        if tool == "mcp_read_sheet_values":
+            return LIVE_RESP["read"]
+        if tool == "mcp_search_drive_files":
+            # The real search text, retargeted at whatever id this run created. Same declared
+            # shape (including "Last Edited By: Name <email>"), so the parser is exercised
+            # exactly as it will be live.
+            made = next((cp.extract_id(r) for t, r in [("c", LIVE_RESP["create_result"])]), "")
+            return LIVE_RESP["old_file_search"].replace(
+                "1kfs_qmLhf-fD-h7VWlQAT5fX3KVtgiRacSWTRpFyFKI", made or "")
+        return "⚠️ MCP tool unavailable"
+
+
+# The rows the live sheet actually holds, so a replay run verifies for real.
+LIVE_ROWS = [["Client", "Annual income", "Status"],
+             ["Fictional Alex", "50000", "TEST ONLY"],
+             ["Fictional Jordan", "72000", "TEST ONLY"]]
+
+
+class AgainstTheRealProviderContract(unittest.TestCase):
+    def setUp(self):
+        self._was = cp.EXPECTED_USER
+        cp.EXPECTED_USER = "pfi@platinumfortuneimpact.com"
+
+    def tearDown(self):
+        cp.EXPECTED_USER = self._was
+
+    def test_the_real_schemas_use_range_name_not_range(self):
+        # Pinning the fact itself, so a future edit back to `range` fails loudly.
+        for tool in ("mcp_modify_sheet_values", "mcp_read_sheet_values"):
+            props = set((LIVE_SCHEMAS[tool].get("properties") or {}).keys())
+            self.assertIn("range_name", props)
+            self.assertNotIn("range", props)
+            self.assertIs(LIVE_SCHEMAS[tool].get("additionalProperties"), False)
+
+    def test_a_full_run_against_the_replayed_provider_verifies(self):
+        f = LiveReplay()
+        out = run(cp.create_spreadsheet(
+            {"title": "ACE INTEGRATION TEST — Fictional data — 2026-09-09",
+             "rows": LIVE_ROWS}, f))
+        self.assertEqual(out["file_id"], "1PhlT7Yxn9ZAX-yO4-g6Vu85mkZtWfJgrw0b3hJqXlY4")
+        self.assertEqual(out["cells_verified"], 9)
+        self.assertEqual(out["access"], "ok")
+
+    def test_it_sends_range_name_and_an_explicit_value_input_option(self):
+        f = LiveReplay()
+        run(cp.create_spreadsheet({"title": "T", "rows": LIVE_ROWS}, f))
+        write = next(a for t, a in f.calls if t == "mcp_modify_sheet_values")
+        self.assertIn("range_name", write)
+        self.assertNotIn("range", write)
+        self.assertEqual(write["value_input_option"], "RAW")
+        read = next(a for t, a in f.calls if t == "mcp_read_sheet_values")
+        self.assertIn("range_name", read)
+        self.assertNotIn("range", read)
+
+    def test_the_real_read_text_parses_to_the_real_grid(self):
+        self.assertEqual(cp._cells(LIVE_RESP["read"]), LIVE_ROWS)
+
+    def test_the_original_pricing_sheet_read_parses_too(self):
+        # The file Ace was accused of inventing. It exists, and its header row reads back.
+        grid = cp._cells(LIVE_RESP["original_sheet_read"])
+        self.assertEqual(len(grid), 2)
+        self.assertEqual(grid[0][0], "Assistant Name")
+        self.assertEqual(grid[1][0], "ChatGPT (OpenAI)")
+
+    def test_the_real_create_text_yields_the_real_id(self):
+        self.assertEqual(cp.extract_id(LIVE_RESP["create_result"]),
+                         "1PhlT7Yxn9ZAX-yO4-g6Vu85mkZtWfJgrw0b3hJqXlY4")
+
+    def test_ownership_is_read_from_the_real_search_shape(self):
+        f = LiveReplay()
+        out = run(cp.create_spreadsheet({"title": "AI Assistant Cost Pricing Analysis",
+                                         "rows": LIVE_ROWS}, f))
+        self.assertEqual(out["owner"], "pfi@platinumfortuneimpact.com")
+        self.assertIn("your own account", out["access_evidence"])
+
+    def test_a_different_creating_account_is_reported_as_no_access(self):
+        cp.EXPECTED_USER = "someone.else@example.com"
+        f = LiveReplay()
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "AI Assistant Cost Pricing Analysis",
+                                       "rows": LIVE_ROWS}, f))
+        self.assertIn("is not the one you sign in with", str(e.exception))
+        self.assertIn("file does not exist", str(e.exception))
+
+    def test_an_unknown_read_format_is_refused_not_guessed(self):
+        f = LiveReplay(mcp_read_sheet_values="Here are your values, roughly speaking.")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_spreadsheet({"title": "T", "rows": LIVE_ROWS}, f))
+        self.assertIn("unverified", str(e.exception))
+
+    def test_a_row_line_that_will_not_parse_yields_nothing(self):
+        self.assertEqual(cp._cells("Row  1: ['a', <object>]"), [])
+
+    def test_parsing_never_executes_anything(self):
+        # ast.literal_eval cannot call. If this ever regressed to eval, this would raise.
+        self.assertEqual(cp._cells("Row  1: [__import__('os').system('true')]"), [])

@@ -127,13 +127,20 @@ _COLS = ("id, request_key, capability, args, origin, state, title, detail, resul
          "settled_at, spoken_at")
 
 
-def accept(capability: str, args: dict, origin: str = "voice", title: str = "") -> tuple:
+def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
+           daily_cap: int = 0, day: str = "") -> tuple:
     """(verdict, task) — 'created' | 'existing' | 'unavailable'.
 
     'existing' is the whole point: a repeated transcript, a second tab, or a retried
     delivery finds the task that is already running or already finished instead of starting
     a second one. A request whose earlier attempt FAILED is allowed to start again, because
     a failure Brady can see and re-ask for is not a duplicate.
+
+    `daily_cap` admits a PAID capability in the SAME transaction that creates its row, which
+    is the only way the count can be trusted: checking in one transaction and inserting in
+    another lets three concurrent requests all see room and all spend. Returns 'over_cap'
+    with the usage instead. The day lock is always taken BEFORE the request-key lock so two
+    transactions can never grab them in opposite orders and deadlock.
     """
     if not enabled():
         return "unavailable", None
@@ -143,6 +150,16 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "") 
         with db._conn() as c, c.cursor() as cur:
             # One writer at a time for this key, so two simultaneous dispatches cannot both
             # miss each other's row and both insert.
+            if daily_cap and daily_cap > 0:
+                cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                            (716296, f"{capability}:{day}"))
+                cur.execute("SELECT count(*) FROM ace_tasks WHERE capability = %s "
+                            "AND state <> %s AND created_at >= %s::date "
+                            "AND created_at < (%s::date + interval '1 day')",
+                            (capability, CANCELLED, day, day))
+                used = int(cur.fetchone()[0] or 0)
+                if used >= daily_cap:
+                    return "over_cap", {"used": used, "cap": daily_cap}
             cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (716295, key))
             cur.execute(f"SELECT {_COLS} FROM ace_tasks WHERE request_key = %s "
                         f"AND created_at > now() - %s::interval ORDER BY created_at DESC LIMIT 1",
@@ -361,6 +378,43 @@ def cancel(task_id: str, reason: str = "") -> tuple:
         return False, got
     out = _advance(task_id, CANCELLED, detail=(reason or "cancelled by Brady")[:300])
     return (out.get("state") == CANCELLED), out
+
+
+def reserve_daily(capability: str, cap: int, day: str) -> tuple:
+    """(ok, used, cap) — atomically take one of today's slots for a paid capability.
+
+    A declared cap is not a cap. This is the admission gate that makes ACE2_RESEARCH_DAILY_CAP
+    real: it counts today's tasks and inserts the reservation inside ONE transaction, taking a
+    lock keyed to the capability and day, so two concurrent voice turns — or a restarted
+    worker — cannot both look, both see room, and both spend.
+
+    Reservations live in the tasks table itself, so a restart cannot forget them, and a task
+    that FAILED still counts: the money was spent whether or not the answer was useful.
+
+    NOTE: this is the REPORTING view. Admission itself happens inside accept(), in the same
+    transaction as the insert — counting here and inserting later is exactly how a race gets
+    through, which it did.
+    """
+    if not enabled():
+        return False, 0, cap
+    if cap <= 0:
+        return True, 0, cap
+    try:
+        ready()
+        with db._conn() as c, c.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                        (716296, f"{capability}:{day}"))
+            cur.execute("SELECT count(*) FROM ace_tasks WHERE capability = %s "
+                        "AND state <> %s AND created_at >= %s::date "
+                        "AND created_at < (%s::date + interval '1 day')",
+                        (capability, CANCELLED, day, day))
+            used = int(cur.fetchone()[0] or 0)
+            return (used < cap), used, cap
+    except Exception as e:
+        # FAIL CLOSED on a paid capability: if the ledger cannot be read we cannot know what
+        # has already been spent today, and guessing costs real money.
+        logger.error("tasks.reserve_daily failed: %s", e)
+        return False, 0, cap
 
 
 def retry(task_id: str) -> dict:

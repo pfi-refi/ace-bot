@@ -1,0 +1,248 @@
+{
+ "_source": "Captured from Brady's LIVE google_workspace MCP server on 2026-09-09/10 by Codex, over Railway SSH inside the private network. These are the real schemas and the real response bodies \u2014 not approximations. Tests parse these so the adapter is checked against what the provider actually says.",
+ "schemas": {
+  "mcp_search_drive_files": {
+   "additionalProperties": false,
+   "properties": {
+    "user_google_email": {
+     "type": "string",
+     "description": "The user's Google email address. Required.",
+     "default": "pfi@platinumfortuneimpact.com"
+    },
+    "query": {
+     "type": "string",
+     "description": "The search query string. Supports Google Drive search operators.\n         NOTE: Owner-based queries ('user@example.com' in owners) DO NOT WORK in Shared Drives\n         because files are owned by the shared drive itself, not individual users.\n         For recent files by a specific user in Shared Drives, search by modifiedTime\n         and use order_by='modifiedTime desc' instead."
+    },
+    "page_size": {
+     "default": 10,
+     "type": "integer",
+     "description": "The maximum number of files to return. Defaults to 10."
+    },
+    "page_token": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Page token from a previous response's nextPageToken to retrieve the next page of results."
+    },
+    "drive_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "ID of the shared drive to search. If None, behavior depends on `corpora` and `include_items_from_all_drives`."
+    },
+    "include_items_from_all_drives": {
+     "default": true,
+     "type": "boolean",
+     "description": "Whether shared drive items should be included in results. Defaults to True. This is effective when not specifying a `drive_id`."
+    },
+    "corpora": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Bodies of items to query (e.g., 'user', 'domain', 'drive', 'allDrives').\n                     If 'drive_id' is specified and 'corpora' is None, it defaults to 'drive'.\n                     Otherwise, Drive API default behavior applies. Prefer 'user' or 'drive' over 'allDrives' for efficiency."
+    },
+    "file_type": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Restrict results to a specific file type. Accepts a friendly\n                       name ('folder', 'document'/'doc', 'spreadsheet'/'sheet',\n                       'presentation'/'slides', 'form', 'drawing', 'pdf', 'shortcut',\n                       'script', 'site', 'jam'/'jamboard') or any raw MIME type\n                       string (e.g. 'application/pdf'). Defaults to None (all types)."
+    },
+    "detailed": {
+     "default": true,
+     "type": "boolean",
+     "description": "Whether to include size, modified time, and link in results. Defaults to True."
+    },
+    "order_by": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Sort order. Comma-separated list of sort keys with optional 'desc' modifier.\n                      Valid keys: 'createdTime', 'folder', 'modifiedByMeTime', 'modifiedTime',\n                      'name', 'name_natural', 'quotaBytesUsed', 'recency', 'sharedWithMeTime',\n                      'starred', 'viewedByMeTime'. Example: 'modifiedTime desc' or 'folder,modifiedTime desc,name'.\n                      Defaults to None (Drive API default ordering)."
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "mcp_get_drive_file_content": {
+   "additionalProperties": false,
+   "properties": {
+    "user_google_email": {
+     "type": "string",
+     "description": "The user\u2019s Google email address.",
+     "default": "pfi@platinumfortuneimpact.com"
+    },
+    "file_id": {
+     "type": "string",
+     "description": "Drive file ID."
+    }
+   },
+   "required": [
+    "file_id"
+   ],
+   "type": "object"
+  },
+  "mcp_read_sheet_values": {
+   "additionalProperties": false,
+   "properties": {
+    "user_google_email": {
+     "type": "string",
+     "description": "The user's Google email address. Required.",
+     "default": "pfi@platinumfortuneimpact.com"
+    },
+    "spreadsheet_id": {
+     "type": "string",
+     "description": "The ID of the spreadsheet. Required."
+    },
+    "range_name": {
+     "default": "A1:Z1000",
+     "type": "string",
+     "description": "The range to read (e.g., \"Sheet1!A1:D10\", \"A1:D10\"). Defaults to \"A1:Z1000\"."
+    },
+    "include_hyperlinks": {
+     "default": false,
+     "type": "boolean",
+     "description": "If True, also fetch hyperlink metadata for the range.\nDefaults to False to avoid expensive includeGridData requests."
+    },
+    "include_notes": {
+     "default": false,
+     "type": "boolean",
+     "description": "If True, also fetch cell notes for the range.\nDefaults to False to avoid expensive includeGridData requests."
+    },
+    "include_formulas": {
+     "default": false,
+     "type": "boolean",
+     "description": "If True, also fetch raw formula strings for cells that\ncontain formulas. Useful for identifying cross-sheet references before writing\nback to a range. Defaults to False to avoid an extra API request."
+    }
+   },
+   "required": [
+    "spreadsheet_id"
+   ],
+   "type": "object"
+  },
+  "mcp_modify_sheet_values": {
+   "additionalProperties": false,
+   "properties": {
+    "user_google_email": {
+     "type": "string",
+     "description": "The user's Google email address. Required.",
+     "default": "pfi@platinumfortuneimpact.com"
+    },
+    "spreadsheet_id": {
+     "type": "string",
+     "description": "The ID of the spreadsheet. Required."
+    },
+    "range_name": {
+     "type": "string",
+     "description": "The range to modify (e.g., \"Sheet1!A1:D10\", \"A1:D10\"). Required."
+    },
+    "values": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "items": {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "2D array of values to write/update. Can be a JSON string or Python list. Required unless clear_values=True."
+    },
+    "value_input_option": {
+     "default": "USER_ENTERED",
+     "type": "string",
+     "description": "How to interpret input values (\"RAW\" or \"USER_ENTERED\"). Defaults to \"USER_ENTERED\"."
+    },
+    "clear_values": {
+     "default": false,
+     "type": "boolean",
+     "description": "If True, clears the range instead of writing values. Defaults to False."
+    }
+   },
+   "required": [
+    "spreadsheet_id",
+    "range_name"
+   ],
+   "type": "object"
+  },
+  "mcp_create_spreadsheet": {
+   "additionalProperties": false,
+   "properties": {
+    "user_google_email": {
+     "type": "string",
+     "description": "The user's Google email address. Required.",
+     "default": "pfi@platinumfortuneimpact.com"
+    },
+    "title": {
+     "type": "string",
+     "description": "The title of the new spreadsheet. Required."
+    },
+    "sheet_names": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "List of sheet names to create. If not provided, creates one sheet with default name."
+    }
+   },
+   "required": [
+    "title"
+   ],
+   "type": "object"
+  }
+ },
+ "responses": {
+  "write": "Successfully updated range 'Test!A1:C3' in spreadsheet 1PhlT7Yxn9ZAX-yO4-g6Vu85mkZtWfJgrw0b3hJqXlY4 for pfi@platinumfortuneimpact.com. Updated: 9 cells, 3 rows, 3 columns.",
+  "read": "Successfully read 3 rows from range 'Test!A1:C3' in spreadsheet 1PhlT7Yxn9ZAX-yO4-g6Vu85mkZtWfJgrw0b3hJqXlY4 for pfi@platinumfortuneimpact.com:\nRow  1: ['Client', 'Annual income', 'Status']\nRow  2: ['Fictional Alex', '50000', 'TEST ONLY']\nRow  3: ['Fictional Jordan', '72000', 'TEST ONLY']",
+  "original_sheet_read": "Successfully read 2 rows from range 'A1:G2' in spreadsheet 1kfs_qmLhf-fD-h7VWlQAT5fX3KVtgiRacSWTRpFyFKI for pfi@platinumfortuneimpact.com:\nRow  1: ['Assistant Name', 'Base Cost / Pricing Model', 'Monthly Subscription (if applicable)', 'Per-Request Cost (if applicable)', 'Key Features', 'Best Use Case', 'Notes']\nRow  2: ['ChatGPT (OpenAI)', 'Freemium tiered; Free / Go / Plus / Pro / Business & Enterprise custom', 'Free $0; Go $8; Plus $20; Pro $100; Business/Enterprise custom', 'API billed per token (GPT-5.2 family, varies by model)', 'Broad general assistant, ~150 msgs/3hr on Plus (GPT-5.2), voice, image gen, agent mode, largest ecosystem/plugins', 'General productivity, writing, broad consumer use, most-expensed business app in 2026', 'Free tier has visible limits (ads, tighter caps); Pro tier added April 2026 as answer to Claude Max']",
+  "old_file_search": "Found 1 files for pfi@platinumfortuneimpact.com matching 'trashed = false and name = 'AI Assistant Cost Pricing Analysis'':\n- Name: \"AI Assistant Cost Pricing Analysis\" (ID: 1kfs_qmLhf-fD-h7VWlQAT5fX3KVtgiRacSWTRpFyFKI, Type: application/vnd.google-apps.spreadsheet, Size: 3220, Created: 2026-09-09T23:23:02.461Z, Modified: 2026-09-09T23:23:25.408Z, Last Edited By: Brady McGraw <pfi@platinumfortuneimpact.com>) Link: https://docs.google.com/spreadsheets/d/1kfs_qmLhf-fD-h7VWlQAT5fX3KVtgiRacSWTRpFyFKI/edit?usp=drivesdk",
+  "create_result": "Successfully created spreadsheet 'ACE INTEGRATION TEST \u2014 Fictional data \u2014 2026-09-09' for pfi@platinumfortuneimpact.com. ID: 1PhlT7Yxn9ZAX-yO4-g6Vu85mkZtWfJgrw0b3hJqXlY4 | URL: https://docs.google.com/spreadsheets/d/1PhlT7Yxn9ZAX-yO4-g6Vu85mkZtWfJgrw0b3hJqXlY4/edit?ouid=117793931123552247088 | Locale: en_US"
+ }
+}

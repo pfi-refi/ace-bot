@@ -114,6 +114,10 @@ def extract_id(text: str) -> str:
                 stack.extend(cur)
     except Exception:
         pass
+    # The real create_spreadsheet answer is prose: "... ID: <id> | URL: https://.../d/<id>/edit"
+    m = re.search(r"\bID:\s*([A-Za-z0-9_-]{25,80})", t)
+    if m:
+        return m.group(1)
     m = _URL_ID_RE.search(t)
     if m:
         return m.group(1)
@@ -142,9 +146,31 @@ def a1(rows: list) -> str:
     return f"A1:{last}{n}"
 
 
+_ROW_RE = re.compile(r"^Row\s+(\d+):\s*(\[.*\])\s*$")
+
+
 def _cells(text: str) -> list:
-    """Rows out of a read-back, whatever shape the provider used to say them."""
+    """Rows out of a read-back, in the formats this provider actually uses.
+
+    Captured live 2026-09-09 (tests/fixtures/live_google_mcp.json). read_sheet_values does
+    NOT return JSON — it returns a success sentence and then one line per row:
+
+        Successfully read 3 rows from range 'Test!A1:C3' in spreadsheet <id> for <email>:
+        Row  1: ['Client', 'Annual income', 'Status']
+        Row  2: ['Fictional Alex', '50000', 'TEST ONLY']
+
+    The old parser fell through to its tab-separated branch and read each of those as ONE
+    cell, so every requested coordinate mismatched and a correct sheet would have been
+    reported as wrong. Structured content is preferred where the provider sends it; this
+    exact declared shape is parsed explicitly; anything else is REFUSED rather than guessed
+    at, because a wrong guess here silently changes what "verified" means.
+
+    ast.literal_eval only — never eval. It parses literals and cannot execute anything, so a
+    hostile cell cannot do more than fail to parse.
+    """
     t = (text or "").strip()
+    if not t:
+        return []
     try:
         blob = json.loads(t)
         if isinstance(blob, dict):
@@ -155,7 +181,24 @@ def _cells(text: str) -> list:
             return blob
     except Exception:
         pass
-    return [[c.strip() for c in ln.split("\t")] for ln in t.splitlines() if ln.strip()]
+    import ast as _ast
+    rows, saw_row_line = {}, False
+    for line in t.splitlines():
+        m = _ROW_RE.match(line.strip())
+        if not m:
+            continue
+        saw_row_line = True
+        try:
+            parsed = _ast.literal_eval(m.group(2))
+        except Exception:
+            return []          # a row we cannot read is not a row we may assume
+        rows[int(m.group(1))] = list(parsed) if isinstance(parsed, (list, tuple)) else [parsed]
+    if saw_row_line:
+        # Row numbers are the provider's own, and they are 1-based within the range read.
+        return [rows.get(i + 1, []) for i in range(max(rows))] if rows else []
+    if "\t" in t:
+        return [[c.strip() for c in ln.split("\t")] for ln in t.splitlines() if ln.strip()]
+    return []                  # unknown format: refuse, do not improvise
 
 
 def cell_ref(row: int, col: int) -> str:
@@ -333,8 +376,14 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
             receipt)
     await say("Writing the rows")
     rng = a1(rows)
+    # range_name, NOT range — confirmed against the live schema, which sets
+    # additionalProperties=false, so `range` is rejected outright rather than ignored.
+    # RAW rather than the provider default USER_ENTERED: what Brady asked for is what lands,
+    # and a read-back then means something. USER_ENTERED would let Google reinterpret "1-2"
+    # as a date and turn a correct write into a verification failure.
     wrote = await call("mcp_modify_sheet_values",
-                       {"spreadsheet_id": file_id, "range": rng, "values": rows})
+                       {"spreadsheet_id": file_id, "range_name": rng, "values": rows,
+                        "value_input_option": args.get("value_input_option") or "RAW"})
     if _looks_like_error(wrote):
         raise Failed(f"the spreadsheet was created but the rows would not write: "
                      f"{str(wrote)[:160]}", {**receipt, "partial": True})
@@ -344,7 +393,8 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
         raise Cancelled("Stopped after the rows were written. The contents have not been "
                         "checked, so treat them as unverified.", {**receipt, "partial": True})
     await say("Checking every cell against what you asked for")
-    got = await call("mcp_read_sheet_values", {"spreadsheet_id": file_id, "range": rng})
+    got = await call("mcp_read_sheet_values",
+                     {"spreadsheet_id": file_id, "range_name": rng})
     if _looks_like_error(got):
         raise Failed(f"the spreadsheet could not be read back, so it is not verified: "
                      f"{str(got)[:160]}", {**receipt, "partial": True})
@@ -366,7 +416,7 @@ async def create_spreadsheet(args: dict, call, progress=None, known=None,
                         "value, so " + ", ".join(formulas[:4]) + " could not be checked.")
 
     # ── 4. CAN THE PERSON WHO ASKED ACTUALLY OPEN IT? ──────────────────────────
-    owner, access, how = await _owner_of(file_id, call)
+    owner, access, how = await _owner_of(file_id, call, title)
     if access == "no_access":
         raise Failed(
             f"the spreadsheet exists and is correct, but the connected account "
@@ -425,7 +475,7 @@ async def _find_created(title: str, marker: str, call) -> dict:
     return {"candidates": ids} if ids else {}
 
 
-async def _owner_of(file_id: str, call) -> tuple:
+async def _owner_of(file_id: str, call, title_hint: str = "") -> tuple:
     """(owner, access, evidence) where access is 'ok' | 'no_access' | 'unknown'.
 
     Two things Codex was right about, both fixed here.
@@ -473,25 +523,36 @@ async def _owner_of(file_id: str, call) -> tuple:
             return owner, "no_access", "you are not in the file's permission list"
         # An owner with no permission list proves nothing about whether he can open it.
         return owner, "unknown", "the provider returned no permission list to check against"
-    # NO METADATA TOOL ON THIS CONNECTION (found by testing against Brady's live server,
-    # 2026-09-10). It publishes 25 tools and neither get_drive_file_metadata nor
-    # get_drive_file_info is among them, so the permission-based check above can never run
-    # here and every sheet would carry "I could not confirm anything".
+    # NO METADATA TOOL ON THIS CONNECTION (confirmed live, 2026-09-10). The server publishes
+    # 25 tools and neither get_drive_file_metadata nor get_drive_file_info is among them, so
+    # the permission check above can never run here.
     #
-    # What CAN be established is weaker but real: whether the connection can find the file it
-    # just made. That proves the file exists and is reachable by the account Ace is connected
-    # as — which is exactly the thing that was NOT true on 9 September, when the link resolved
-    # to nothing. It does not prove the connected account is Brady's, so it is reported as its
-    # own finding and never upgraded to "ok".
+    # search_drive_files DOES return an account, in its own declared shape:
+    #   - Name: "..." (ID: <id>, ..., Last Edited By: Brady McGraw <pfi@example.com>) Link: ...
+    # For a file this task created seconds ago, the last editor IS the account that created
+    # it. That is real evidence about where the file landed — narrower than a permission
+    # record, and labelled as what it is rather than promoted to "you own it".
     try:
-        found = await call("mcp_search_drive_files", {"query": f"'{file_id}' in parents or "
-                                                               f"name != ''"})
+        found = await call("mcp_search_drive_files",
+                           {"query": f"trashed = false and name = '{title_hint}'"}) \
+            if title_hint else ""
     except Exception:
         found = ""
     if found and not _looks_like_error(found) and file_id in str(found):
+        seg = str(found).split(file_id, 1)[1][:400]
+        m = re.search(r"Last Edited By:[^<]*<([^>]+)>", seg)
+        who = (m.group(1) or "").lower() if m else ""
+        if who and EXPECTED_USER and who == EXPECTED_USER:
+            return who, "ok", "your own account created it, per Drive"
+        if who and EXPECTED_USER:
+            return who, "no_access", (f"Drive says {who} created it, which is not the account "
+                                      f"you sign in with")
+        if who:
+            return who, "reachable", (f"Drive says {who} created it; ACE2_GOOGLE_USER is not "
+                                      f"set, so I cannot check that against your account")
         return "", "reachable", ("Ace's own connection can see this file, so it exists and is "
                                  "not orphaned — but this connector cannot tell me which "
-                                 "Google account that is, so I cannot promise it opens for you")
+                                 "Google account that is")
     return "", "unknown", "the provider exposes no file-metadata tool on this connection"
 
 
@@ -567,7 +628,12 @@ async def research(args: dict, call, progress=None, known=None,
     question = (args.get("question") or "").strip()
     if not question:
         raise Failed("no question was given, so there was nothing to look up")
-    max_searches = max(1, min(int(args.get("max_searches") or 5), 8))
+    # THE SERVER'S LIMIT WINS. This read the caller's number or a literal 5 and ignored
+    # ACE2_RESEARCH_MAX_SEARCHES entirely, so the configured per-task maximum capped nothing.
+    # A model choosing its own budget is not a budget.
+    _cfg = max(1, int(os.environ.get("ACE2_RESEARCH_MAX_SEARCHES", "5") or 5))
+    _asked = int(args.get("max_searches") or _cfg)
+    max_searches = max(1, min(_asked, _cfg, 8))
     client = args.get("_client")          # injected by tests; real client resolved below
 
     async def say(msg):
@@ -629,10 +695,22 @@ async def research(args: dict, call, progress=None, known=None,
             limits.append("Ace flagged parts of this as unconfirmed — read the answer for "
                           "which parts.")
             break
-    support = SUPPORT_SOURCE if len(sources) >= 2 else SUPPORT_SNIPPET
-    if support == SUPPORT_SNIPPET:
-        limits.append("Only one source backs this. Treat specific figures as indicative "
-                      "until a second source agrees.")
+    # EVIDENCE IS NOT A HEADCOUNT (2026-09-10). This set "source" whenever two citations came
+    # back, so two snippets, two unrelated pages, or two sources that CONTRADICT each other
+    # all read as verified — while one authoritative pricing page read as weak. Counting
+    # citations measures how much was linked, not how well anything was established.
+    #
+    # This connector returns citations, not retrieved page bodies, so it genuinely cannot
+    # tell a snippet from a read page. The honest report is that limitation, stated once,
+    # rather than a confidence level inferred from arithmetic.
+    support = SUPPORT_SNIPPET
+    limits.append(
+        "These are search citations, not pages I read end to end, so treat any specific "
+        "figure, price or date as needing a look at the source before you act on it."
+        + ("" if len(sources) > 1 else " Only one source backs this."))
+    if len(sources) > 1:
+        limits.append("Sources are listed in the order they were cited. I have not checked "
+                      "whether they agree with each other — open two if a number matters.")
 
     return {
         "question": question,

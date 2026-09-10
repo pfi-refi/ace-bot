@@ -18,6 +18,12 @@ def t(role, content, mins):
     return {'role': role, 'content': content, 'ts': ts.isoformat()}
 
 
+# The morning these fixtures belong to. pytz needs localize(); passing tzinfo= yields the
+# 1883 LMT offset and shifts every rendered time by 56 minutes.
+FIXTURE_NOW = chat.EASTERN.localize(datetime(2026, 9, 9, 9, 0))
+NEXT_DAY = chat.EASTERN.localize(datetime(2026, 9, 10, 9, 0))
+
+
 # The 9 September sequence, including the ASR re-flushes that ate four of sixteen slots.
 MORNING = [
     t('user', 'No, we are good to roll. I am out DoorDashing right now, like I was '
@@ -57,7 +63,12 @@ class TheBriefsInput(unittest.TestCase):
         return chat._brief_thread(MORNING)
 
     def commitments(self):
-        return chat._user_commitments(MORNING)
+        # FROZEN TO THE FIXTURE'S OWN DAY (2026-09-10). These turns are dated 9 September and
+        # this read the wall clock, so the suite passed on the 9th and failed on the 10th —
+        # when the same statements are correctly demoted to prior-day context. That is the
+        # code behaving properly, so the fixture supplies its own clock and the day-later
+        # behaviour is pinned separately below.
+        return chat._user_commitments(MORNING, now=FIXTURE_NOW)
 
     def test_the_gym_correction_survives(self):
         """The brief said 'you hit the gym this morning' 40 minutes after he said otherwise."""
@@ -96,6 +107,17 @@ class TheBriefsInput(unittest.TestCase):
         self.assertIn('OUTRANK', c)
         self.assertIn('his words', c)
         self.assertIn('DoorDashing', c)
+
+    def test_read_a_day_later_the_same_words_are_not_todays(self):
+        """The failure that exposed the floating clock, kept as the contract.
+
+        Read on 10 September, 9 September's statements must NOT appear under TODAY — that is
+        the whole point of separating his own words from prior context, and it is what stops
+        'I'll call them today' becoming today's commitment tomorrow."""
+        later = chat._user_commitments(MORNING, now=NEXT_DAY)
+        self.assertNotIn('SAID TODAY', later)
+        self.assertIn('DoorDashing', later, 'it should still be there, just dated')
+        self.assertIn('Sep 9', later, 'and carry the day it was actually said')
 
     def test_assistant_lines_are_not_in_the_testimony_block(self):
         self.assertNotIn('Here is your full day', self.commitments())

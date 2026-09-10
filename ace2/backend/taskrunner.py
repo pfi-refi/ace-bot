@@ -14,7 +14,9 @@ starting anything.
 import asyncio
 import logging
 
-from . import capabilities, tasks
+from datetime import datetime, timezone
+
+from . import capabilities, connectors, tasks
 
 logger = logging.getLogger("ace2.taskrunner")
 
@@ -144,7 +146,25 @@ async def dispatch(capability: str, args: dict, origin: str = "voice",
     if not capabilities.supported(capability):
         return {"state": tasks.FAILED, "error": f"{capability} is not a supported task",
                 "sticky": True, "title": "Not supported", "auto_dismiss_ms": 0}
-    verdict, t = tasks.accept(capability, args, origin=origin, title=title)
+    # PAID CAPABILITIES ARE ADMITTED, NOT JUST ADVERTISED (2026-09-10). The daily cap was a
+    # number in a table that no execution path read. Admission now happens INSIDE accept(),
+    # in the same transaction that creates the row — checking here and inserting there let
+    # three concurrent requests all see room and all spend.
+    spec = capabilities.REGISTRY.get(capability) or {}
+    daily_cap, day = 0, ""
+    if spec.get("costs_money"):
+        conn = connectors.get(spec.get("connector") or "")
+        daily_cap = int(conn.get("daily_task_cap") or 0)
+        day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    verdict, t = await asyncio.to_thread(tasks.accept, capability, args, origin, title,
+                                         daily_cap, day)
+    if verdict == "over_cap":
+        # Refused BEFORE a row exists, so a declined request never looks like work.
+        return {"state": tasks.FAILED, "sticky": True, "auto_dismiss_ms": 0,
+                "title": spec.get("title") or capability,
+                "error": (f"That would be paid lookup number {t['used'] + 1} today and the "
+                          f"daily limit is {t['cap']}. I have not run it. Raise "
+                          f"ACE2_RESEARCH_DAILY_CAP if you want more.")}
     if verdict == "unavailable":
         # Fail closed, like ops.py: without the record that makes a task single-use we
         # cannot tell a redelivery from a new request, and the failure mode is two documents.

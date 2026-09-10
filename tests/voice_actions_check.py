@@ -477,6 +477,64 @@ try:
     assert "C2" in outW["error"], outW["error"]
     assert tasks.card(outW)["action"] is None, 'a wrong sheet still offered a link'
 
+    # ── 16. THE PAID DAILY CAP IS ENFORCED, NOT ADVERTISED ─────────────────────
+    # It used to be a number in the inventory that no execution path read.
+    from ace2.backend import connectors as _cn
+    _was_cap = _cn.CONNECTORS["web_research"]["daily_task_cap"]
+    _cn.CONNECTORS["web_research"]["daily_task_cap"] = 2
+
+    class _FakeClient:
+        def __init__(self): self.messages, self.n = self, 0
+        async def create(self, **kw):
+            self.n += 1
+            cite = lambda u: type("X", (), {"url": u, "title": u})()
+            blk = type("B", (), {"text": "an answer", "citations": [cite("https://a.example")]})()
+            return type("R", (), {"content": [blk], "usage": type("U", (), {
+                "server_tool_use": type("S", (), {"web_search_requests": 1})()})()})()
+
+    _client = _FakeClient()
+    import ace2.backend.capabilities as _capmod
+    _real_research = _capmod.REGISTRY["research"]["handler"]
+
+    async def _research_with_fake(a, call, progress=None, known=None, checkpoint=None,
+                                  should_stop=None):
+        return await _real_research({**a, "_client": _client}, call, progress, known,
+                                    checkpoint, should_stop)
+
+    _capmod.REGISTRY["research"]["handler"] = _research_with_fake
+    try:
+        cards = []
+        for i in range(4):
+            cards.append(run(taskrunner.dispatch("research", {"question": f"q{i}?"})))
+            for _ in range(200):
+                tid_ = cards[-1].get("task_id")
+                if not tid_ or tasks.get(tid_)["state"] in tasks.TERMINAL:
+                    break
+                run(asyncio.sleep(0.02))
+        admitted = [c for c in cards if c.get("task_id")]
+        refused = [c for c in cards if not c.get("task_id")]
+        assert len(admitted) == 2, f'the cap admitted {len(admitted)}, expected 2'
+        assert len(refused) == 2, f'{len(refused)} refusals, expected 2'
+        assert "daily limit" in refused[0]["error"], refused[0]["error"]
+        assert refused[0]["sticky"] is True and refused[0]["auto_dismiss_ms"] == 0
+        assert _client.n == 2, f'the provider was called {_client.n} times past a cap of 2'
+
+        # ...and a REFUSAL leaves no task row pretending to be work
+        rows_now = [t for t in tasks.recent(50) if t["capability"] == "research"]
+        assert len(rows_now) == 2, f'{len(rows_now)} research rows for 2 admitted tasks'
+
+        # RACE: three simultaneous requests at a cap of 3 with 2 already used must admit ONE.
+        _cn.CONNECTORS["web_research"]["daily_task_cap"] = 3
+        raced = run(asyncio.gather(
+            taskrunner.dispatch("research", {"question": "race a?"}),
+            taskrunner.dispatch("research", {"question": "race b?"}),
+            taskrunner.dispatch("research", {"question": "race c?"})))
+        got = [c for c in raced if c.get("task_id")]
+        assert len(got) == 1, f'{len(got)} admitted in a race with one slot left'
+    finally:
+        _capmod.REGISTRY["research"]["handler"] = _real_research
+        _cn.CONNECTORS["web_research"]["daily_task_cap"] = _was_cap
+
     print('PASS: a dispatched request is never reported as done; the link is built from a '
           'provider id that survived a read-back; duplicate dispatch, a re-spaced transcript '
           'and three tabs make ONE document; a lost response after creation resumes from the '
@@ -490,6 +548,8 @@ try:
           'never retried into a second document and survives the dedup window; a checkpoint '
           'that will not write stops the create; cancellation before, during and after the '
           'create reports stopping rather than cancelled and keeps the receipt for anything '
-          'that already existed; and a wrong cell value fails verification by coordinate.')
+          'that already existed; a wrong cell value fails verification by coordinate; and the '
+          'paid daily cap admits exactly its limit, refuses the rest without creating a task, '
+          'and holds under three simultaneous requests for one remaining slot.')
 finally:
     server.cleanup(); tmp.cleanup()
