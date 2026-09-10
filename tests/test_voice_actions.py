@@ -507,11 +507,15 @@ class ResearchIsSourcedOrItIsNothing(unittest.TestCase):
         self.assertTrue(any("unconfirmed" in l for l in out["limits"]))
         self.assertEqual(out["warnings"], out["limits"])
 
-    def test_a_failed_search_says_nothing_was_charged_for_it(self):
+    def test_a_failed_search_does_not_promise_a_refund_it_cannot_see(self):
+        # A lost response can arrive after the provider has already searched and billed.
         c = _Client(boom=RuntimeError("upstream down"))
         with self.assertRaises(cp.Failed) as e:
             _research(c)
-        self.assertIn("nothing to report", str(e.exception).lower())
+        msg = str(e.exception).lower()
+        self.assertIn("nothing to report", msg)
+        self.assertIn("may still have run and been billed", msg)
+        self.assertNotIn("nothing was charged", msg)
 
     def test_no_question_no_search(self):
         c = _Client(_Resp([_Block("x", [_Cite("https://a.example")])]))

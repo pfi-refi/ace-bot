@@ -666,8 +666,14 @@ async def research(args: dict, call, progress=None, known=None,
             model=_RESEARCH_MODEL, max_tokens=1600, tools=[tool],
             messages=[{"role": "user", "content": prompt}])
     except Exception as e:
-        raise Failed(f"the search did not run ({type(e).__name__}), so there is nothing to "
-                     f"report. Nothing was charged for a result you did not get.")
+        # DO NOT PROMISE A REFUND WE CANNOT SEE (Codex, 2026-09-10). This used to say
+        # "nothing was charged", which we have no way to establish: a timeout or a dropped
+        # response can arrive AFTER the provider has already run searches and billed for
+        # them. The honest line names the uncertainty and points at the invoice, which is
+        # the only authority on what was actually spent.
+        raise Failed(f"the search did not come back ({type(e).__name__}), so I have nothing "
+                     f"to report. It may still have run and been billed before the response "
+                     f"was lost — the API invoice is the only thing that settles that.")
 
     blocks = list(getattr(resp, "content", []) or [])
     text = "".join(getattr(b, "text", "") or "" for b in blocks).strip()
