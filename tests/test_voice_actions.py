@@ -211,3 +211,49 @@ class TheVoiceToolCannotClaimAResult(unittest.TestCase):
         self.assertEqual(cp.REGISTRY["create_spreadsheet"]["handler"], cp.create_spreadsheet)
         self.assertEqual(tools.START_TASK["input_schema"]["properties"]["capability"]["enum"],
                          ["create_spreadsheet"])
+
+
+class TheProbeIsReadOnly(unittest.TestCase):
+    """The diagnostic that settles the account and argument-name questions must not be a
+    back door into calling writes."""
+
+    def test_only_read_tools_are_probeable(self):
+        from backend import main
+        for name in main._PROBE_READS:
+            self.assertFalse(
+                any(v in name for v in ("create", "modify", "send", "delete", "import",
+                                        "manage", "shareable")),
+                f"{name} is not a read")
+
+    def test_the_write_and_sharing_tools_are_not_in_the_probe_list(self):
+        from backend import main
+        for name in ("mcp_create_spreadsheet", "mcp_send_gmail_message",
+                     "mcp_get_drive_shareable_link", "mcp_modify_sheet_values",
+                     "mcp_modify_doc_text", "mcp_manage_event"):
+            self.assertNotIn(name, main._PROBE_READS)
+
+
+class TheUncoveredWritesAreVisible(unittest.TestCase):
+    """Codex's rule: a newly-enabled MCP write should show up as a gap, not a silent hole.
+    These are the ones the 9 September failure ran through."""
+
+    NAMES = ["mcp_create_doc", "mcp_create_drive_file", "mcp_create_drive_folder",
+             "mcp_create_spreadsheet", "mcp_modify_sheet_values", "mcp_send_gmail_message",
+             "mcp_get_drive_shareable_link", "mcp_read_sheet_values"]
+
+    def test_the_gap_is_reported_not_hidden(self):
+        from backend import chat, ops
+        un = ops.uncovered_mcp_writes(self.NAMES, set(chat._CONFIRM_ALWAYS))
+        self.assertIn("mcp_create_spreadsheet", un)
+        self.assertIn("mcp_create_doc", un)
+
+    def test_reads_are_not_counted_as_writes(self):
+        from backend import chat, ops
+        un = ops.uncovered_mcp_writes(self.NAMES, set(chat._CONFIRM_ALWAYS))
+        self.assertNotIn("mcp_read_sheet_values", un)
+
+    def test_gated_writes_are_not_counted_as_uncovered(self):
+        from backend import chat, ops
+        un = ops.uncovered_mcp_writes(self.NAMES, set(chat._CONFIRM_ALWAYS))
+        self.assertNotIn("mcp_send_gmail_message", un)
+        self.assertNotIn("mcp_get_drive_shareable_link", un)

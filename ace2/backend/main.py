@@ -697,6 +697,66 @@ async def board_mapping_preview():
     }
 
 
+# ── MCP PROBE: settle the two unknowns without spending a model call ────────────
+# The spreadsheet capability needs two facts nobody can currently state: the real argument
+# names the server's tools take, and WHICH GOOGLE ACCOUNT the connection acts as. The second
+# is the likely reason Brady saw "file does not exist" — a file created by another identity
+# is invisible to him. Both are answerable read-only, so they should not require a paid turn
+# or a guess.
+#
+# Deliberately narrow: schemas are already in memory and cost nothing, and the live call is
+# allow-listed to READ tools by exact name. Nothing here can create, modify, send or share.
+_PROBE_READS = frozenset({
+    "mcp_search_drive_files", "mcp_get_drive_file_content", "mcp_read_sheet_values",
+    "mcp_get_doc_content", "mcp_list_calendars", "mcp_list_tasks",
+})
+
+
+@app.get("/diag/mcp/schemas", dependencies=[Depends(require_auth)])
+async def diag_mcp_schemas(match: str = ""):
+    """The argument names the MCP server actually publishes. No tool is called."""
+    from .integrations import mcp_client
+    out = []
+    for sch in await mcp_client.tool_schemas():
+        if match and match.lower() not in sch["name"].lower():
+            continue
+        props = (sch.get("input_schema") or {}).get("properties") or {}
+        out.append({"name": sch["name"],
+                    "args": sorted(props),
+                    "required": (sch.get("input_schema") or {}).get("required") or []})
+    return {"count": len(out), "tools": out}
+
+
+@app.get("/diag/mcp/whoami", dependencies=[Depends(require_auth)])
+async def diag_mcp_whoami(query: str = "AI Assistant Cost Pricing Analysis"):
+    """Which account does this connection act as, and can it see a named file?
+
+    One READ against Drive. It answers the question the 9 September failure turned on:
+    whether files Ace creates land somewhere Brady can actually open. `query` defaults to
+    the spreadsheet from that night, so this doubles as the check for whether it was ever
+    created at all.
+    """
+    from . import capabilities
+    from .integrations import mcp_client
+    if not mcp_client.enabled():
+        return {"ok": False, "error": "MCP is not configured on this server"}
+    tool = "mcp_search_drive_files"
+    if tool not in _PROBE_READS or not mcp_client.is_mcp_tool(tool):
+        return {"ok": False, "error": f"{tool} is not available as a read probe"}
+    raw = await mcp_client.call(tool, {"query": query})
+    emails = sorted(set(capabilities._EMAIL_RE.findall(raw or "")))
+    return {
+        "ok": not capabilities._looks_like_error(raw),
+        "query": query,
+        "accounts_seen": emails,
+        "expected_user": capabilities.EXPECTED_USER or "(ACE2_GOOGLE_USER is not set)",
+        "matches_expected": bool(capabilities.EXPECTED_USER
+                                 and capabilities.EXPECTED_USER in emails),
+        "found_ids": capabilities._ID_RE.findall(raw or "")[:5],
+        "raw": (raw or "")[:1500],
+    }
+
+
 # ── VOICE-TO-ACTION: tasks live on the server, not in a panel ───────────────────
 # Every route here is addressed by task id, and none of them executes anything a surface
 # has not already accepted. A closed card, a hidden page or a dropped socket changes who is
