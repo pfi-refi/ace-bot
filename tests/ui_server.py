@@ -117,6 +117,28 @@ try:
                                         "Sharing this outside your account needs your OK.")
             await _tr._broadcast(out)
             return {"card": _tasks.card(out)}
+        if kind == "doc":
+            _demo_n[0] += 1
+            name = f"Fictional client summary {_demo_n[0]}"
+            blocks = ["Fictional client summary.", "Northwind Helper is on the flat plan.",
+                      "Cedar Assist bills per request."]
+
+            async def _dfake(tool, a):
+                import asyncio as _a, json as _jj
+                await _a.sleep(0.3)
+                if tool == "mcp_create_doc":
+                    return ("Successfully created document. ID: 1DemoDocAAAAAAAAAAAAAAAAAAAAAAAAAA "
+                            "| URL: https://docs.google.com/document/d/"
+                            "1DemoDocAAAAAAAAAAAAAAAAAAAAAAAAAA/edit")
+                if tool == "mcp_get_doc_content":
+                    return "\n\n".join(blocks)
+                if tool == "mcp_search_drive_files":
+                    return ('Found 1 files:\n- Name: "x" (ID: 1DemoDocAAAAAAAAAAAAAAAAAAAAAAAAAA, '
+                            'Last Edited By: Brady McGraw <brady@example.com>) Link: x')
+                return "(no content returned)"
+            return {"card": await _tr.dispatch("create_doc",
+                                               {"title": name, "blocks": blocks},
+                                               origin="voice", title=name, call=_dfake)}
         if kind == "research":
             # A fake Anthropic client: no network, no spend. Exercises the research card's
             # answer + sources + date-checked rendering.

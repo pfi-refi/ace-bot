@@ -204,6 +204,33 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   ok('...and marks unenabled actions with a reason',
      inv.connectors.some(c => (c.actions || []).some(a => !a.enabled && a.not_enabled_because)));
 
+  // ── a verified Doc, and the Connections page ────────────────────────────────
+  await p.evaluate(() => document.querySelectorAll('.task-card .tc-x').forEach(x => x.click()));
+  await raise('doc');
+  await p.waitForSelector('.task-card[data-state="completed"]', { timeout: 10000 });
+  await p.waitForTimeout(350);
+  const dc = p.locator('.task-card', { hasText: 'Fictional client summary' }).first();
+  ok('a Doc task completes with a verified link',
+     /docs\.google\.com\/document\/d\//.test(
+       await dc.locator('.tc-go').getAttribute('href') || ''));
+  await shot('13-desktop-doc');
+
+  await p.click('#more-btn').catch(() => {});
+  await p.waitForTimeout(200);
+  await p.click('#connections-open');
+  await p.waitForSelector('#ace-review[open]', { timeout: 5000 });
+  await p.waitForTimeout(1200);
+  const conn = await p.locator('#ace-review').innerText();
+  ok('the Connections page names both services',
+     /Google Workspace/i.test(conn) && /Internet research/i.test(conn), conn.slice(0, 90));
+  ok('...says what Ace can do in plain words', /can read|can create/i.test(conn));
+  ok('...marks untried actions honestly', /not tried yet/i.test(conn));
+  ok('...explains what is unavailable and why',
+     /unavailable/i.test(conn) && /Slides/i.test(conn));
+  ok('...never shows a credential value', !/https?:\/\/[^\s]*railway\.internal/i.test(conn));
+  await shot('14-desktop-connections');
+  await p.evaluate(() => document.getElementById('ace-review').close());
+
   // ── phone ────────────────────────────────────────────────────────────────────
   await p.setViewportSize({ width: 390, height: 844 });
   await p.evaluate(() => {

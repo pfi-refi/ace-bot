@@ -349,7 +349,8 @@ class TheVerifiedHandlerCannotBeBypassed(unittest.TestCase):
 
     def test_unregistered_creates_are_refused_outright(self):
         from backend import connectors as cn
-        for tool in ("mcp_create_doc", "mcp_create_drive_file", "mcp_import_to_google_slides"):
+        for tool in ("mcp_create_drive_file", "mcp_import_to_google_slides",
+                     "mcp_import_to_google_doc"):
             ok, why = cn.allowed(tool)
             self.assertFalse(ok, tool)
             self.assertTrue(why)
@@ -626,9 +627,13 @@ class TheInventoryTellsTheTruthAndKeepsSecrets(unittest.TestCase):
 
     def test_a_disabled_action_says_why(self):
         g = self._c("google_workspace")
+        slides = next(a for a in g["actions"] if a["tool"] == "mcp_import_to_google_slides")
+        self.assertFalse(slides["enabled"])
+        # Slides is off because of what the CONNECTOR lacks, not a decision we could revisit.
+        self.assertIn("no Slides create or read tool", slides["not_enabled_because"])
         doc = next(a for a in g["actions"] if a["tool"] == "mcp_create_doc")
-        self.assertFalse(doc["enabled"])
-        self.assertIn("no verified capability", doc["not_enabled_because"])
+        self.assertTrue(doc["enabled"], 'Docs create is verifiable and now enabled')
+        self.assertEqual(doc["via_capability"], "create_doc")
 
     def test_each_action_states_what_would_count_as_proof(self):
         g = self._c("google_workspace")
@@ -851,3 +856,121 @@ class TestedComesFromRealReceipts(unittest.TestCase):
         src = Path(taskrunner.__file__).read_text()
         self.assertIn('except capabilities.Failed as e:\n        if used:', src)
         self.assertIn('except capabilities.Cancelled as e:\n        if used:', src)
+
+
+# ── GOOGLE DOCS AND DRIVE FOLDERS ──────────────────────────────────────────────
+DOC_BLOCKS = ["Fictional client summary.", "Northwind Helper is on the flat plan.",
+              "Cedar Assist bills per request."]
+
+
+class DocsCreate(unittest.TestCase):
+    def setUp(self):
+        self._was = cp.EXPECTED_USER
+        cp.EXPECTED_USER = "pfi@platinumfortuneimpact.com"
+
+    def tearDown(self):
+        cp.EXPECTED_USER = self._was
+
+    def _fake(self, **over):
+        made = ("Successfully created document 'Notes'. ID: 1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "
+                "| URL: https://docs.google.com/document/d/1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/edit")
+        body = "\n\n".join(DOC_BLOCKS)
+        base = {"mcp_create_doc": made, "mcp_get_doc_content": body,
+                "mcp_search_drive_files": (
+                    'Found 1 files for pfi@platinumfortuneimpact.com matching \'x\':\n'
+                    '- Name: "Notes" (ID: 1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, '
+                    'Last Edited By: Brady McGraw <pfi@platinumfortuneimpact.com>) Link: x')}
+        base.update(over)
+        return Fake(**base)
+
+    def test_it_writes_the_body_at_creation_and_never_touches_modify_doc_text(self):
+        f = self._fake()
+        out = run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f))
+        called = [t for t, _ in f.calls]
+        self.assertIn("mcp_create_doc", called)
+        # The gated overwrite tool is never used, so no approval rule needs relaxing.
+        self.assertNotIn("mcp_modify_doc_text", called)
+        create_args = next(a for t, a in f.calls if t == "mcp_create_doc")
+        self.assertIn("content", create_args)
+        self.assertEqual(out["url"],
+                         "https://docs.google.com/document/d/1DocIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/edit")
+
+    def test_it_reads_the_document_back(self):
+        f = self._fake()
+        run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f))
+        self.assertIn("mcp_get_doc_content", [t for t, _ in f.calls])
+
+    def test_a_missing_paragraph_is_caught(self):
+        f = self._fake(mcp_get_doc_content=DOC_BLOCKS[0] + "\n\n" + DOC_BLOCKS[2])
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f))
+        self.assertIn("missing", str(e.exception))
+
+    def test_shuffled_sections_are_caught(self):
+        f = self._fake(mcp_get_doc_content="\n\n".join(reversed(DOC_BLOCKS)))
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f))
+        self.assertIn("out of order", str(e.exception))
+
+    def test_an_empty_read_back_is_not_a_success(self):
+        f = self._fake(mcp_get_doc_content="")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f))
+        self.assertIn("unverified", str(e.exception))
+
+    def test_no_id_means_no_link(self):
+        f = self._fake(mcp_create_doc="Created the document for you.")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS}, f))
+        self.assertIn("without a document id", str(e.exception))
+
+    def test_nothing_is_invented(self):
+        f = self._fake()
+        for bad in ({"blocks": DOC_BLOCKS}, {"title": "Notes", "blocks": []}):
+            with self.assertRaises(cp.Failed):
+                run(cp.create_doc(bad, f))
+        self.assertEqual(f.calls, [])
+
+    def test_formatting_is_declared_unsupported(self):
+        f = self._fake()
+        out = run(cp.create_doc({"title": "Notes", "blocks": DOC_BLOCKS,
+                                 "formatting": True}, f))
+        self.assertTrue(any("formatting is not" in w for w in out["warnings"]))
+
+
+class DriveFolderCreate(unittest.TestCase):
+    def _fake(self, **over):
+        base = {"mcp_create_drive_folder":
+                "Created folder 'Deals'. ID: 1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "mcp_search_drive_files":
+                'Found 1 files:\n- Name: "Deals" (ID: 1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA) Link: x'}
+        base.update(over)
+        return Fake(**base)
+
+    def test_it_confirms_the_folder_is_really_there(self):
+        f = self._fake()
+        out = run(cp.create_folder({"name": "Deals"}, f))
+        self.assertIn("mcp_search_drive_files", [t for t, _ in f.calls])
+        self.assertTrue(out["url"].endswith("1FolderAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+
+    def test_a_folder_that_does_not_come_back_is_not_verified(self):
+        f = self._fake(mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f))
+        self.assertIn("not verified", str(e.exception))
+
+
+class SlidesIsBlockedByTheConnectorNotByChoice(unittest.TestCase):
+    def test_there_is_no_slides_create_or_read_tool(self):
+        from backend import connectors as cn
+        acts = cn.get("google_workspace")["actions"]
+        slides = [t for t in acts if "slide" in t]
+        self.assertEqual(slides, ["mcp_import_to_google_slides"])
+        self.assertEqual(acts["mcp_import_to_google_slides"]["approval"], cn.NEVER)
+        self.assertIn("no Slides create or read tool",
+                      acts["mcp_import_to_google_slides"]["why"])
+
+    def test_start_task_does_not_offer_slides(self):
+        from backend import tools
+        self.assertNotIn("create_slides",
+                         tools.START_TASK["input_schema"]["properties"]["capability"]["enum"])

@@ -609,9 +609,12 @@ START_TASK = {
         "properties": {
             "capability": {
                 "type": "string",
-                "enum": ["create_spreadsheet", "research"],
+                "enum": ["create_spreadsheet", "create_doc", "create_folder", "research"],
                 "description": (
                     "create_spreadsheet — build a Google Sheet. "
+                    "create_doc — write a Google Doc (put the text in `blocks`, one entry "
+                    "per paragraph, in order). "
+                    "create_folder — make a Drive folder (`name`). "
                     "research — look something up on the live internet and come back with "
                     "sources and the date checked. Use research whenever Brady asks what "
                     "something costs, what is current, or what someone is doing now; do NOT "
@@ -622,6 +625,17 @@ START_TASK = {
                 "type": "string",
                 "description": ("For research: the question, in full. Include what he "
                                 "actually wants to know, not a keyword."),
+            },
+            "blocks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": ("For create_doc: the document text, one paragraph per entry, "
+                                "in the order they should appear. Real content only — if he "
+                                "has not said what goes in it, ask before calling this."),
+            },
+            "name": {
+                "type": "string",
+                "description": "For create_folder: the folder name.",
             },
             "title": {
                 "type": "string",

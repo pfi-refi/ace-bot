@@ -743,3 +743,210 @@ REGISTRY["research"] = {
     "connector": "web_research",
     "costs_money": True,
 }
+
+
+# ── GOOGLE DOCS ────────────────────────────────────────────────────────────────
+def doc_url(file_id: str) -> str:
+    if not file_id:
+        raise Failed("no document id, so there is no link to give")
+    return f"https://docs.google.com/document/d/{file_id}/edit"
+
+
+def compare_ordered(wanted: list, got_text: str) -> list:
+    """Which requested blocks are missing, or arrived out of order.
+
+    Codex's point on Docs: a document is a stream, not a grid, so the cell-coordinate check
+    used for Sheets does not apply — but "every paragraph appears somewhere" is too weak,
+    because it passes a document whose sections were shuffled. Each block must appear AFTER
+    the one before it, which catches both a missing block and a reordered one.
+    """
+    hay = " ".join((got_text or "").split()).lower()
+    missing, cursor = [], 0
+    for i, block in enumerate(wanted or []):
+        needle = " ".join(str(block).split()).lower()
+        if not needle:
+            continue
+        at = hay.find(needle, cursor)
+        if at < 0:
+            # Present, but not after what should precede it.
+            missing.append({"block": str(block)[:80],
+                            "why": "out of order" if hay.find(needle) >= 0 else "missing"})
+        else:
+            cursor = at + len(needle)
+    return missing
+
+
+async def create_doc(args: dict, call, progress=None, known=None,
+                     checkpoint=None, should_stop=None) -> dict:
+    """Create a Google Doc, then READ IT BACK and confirm its content, in order.
+
+    No approval-relaxation question arises here, and it is worth saying why: the live
+    create_doc takes `content` directly, so the body goes in at creation. Nothing needs to
+    overwrite an existing document, so `modify_doc_text` — the tool that IS gated because it
+    destroys content — is never called. The narrowed rule Codex and I were debating turned
+    out to be unnecessary once the real schema was read.
+    """
+    title = (args.get("title") or "").strip()
+    blocks = [b for b in (args.get("blocks") or []) if str(b).strip()]
+    if not title:
+        raise Failed("no title was given, so nothing was created")
+    if not blocks:
+        raise Failed("no content was given, so nothing was created")
+    known = known or {}
+
+    async def say(msg):
+        if progress:
+            await progress(msg)
+
+    async def stopping():
+        return bool(should_stop and await should_stop())
+
+    async def mark(patch):
+        if checkpoint and (await checkpoint(patch)) is False:
+            raise Failed("I could not record what I was about to do, and I will not create "
+                         "something I cannot keep track of. Nothing was attempted.")
+
+    body = "\n\n".join(str(b).strip() for b in blocks)
+    file_id = str(known.get("file_id") or "").strip()
+    if not file_id and str(known.get("create_state") or "") == "unknown":
+        await say("Checking whether the earlier attempt already created it")
+        found = await _find_created(title, str(known.get("create_marker") or ""), call)
+        if found.get("file_id"):
+            file_id = found["file_id"]
+            await mark({"file_id": file_id, "url": doc_url(file_id),
+                        "create_state": "confirmed"})
+        else:
+            raise Failed(
+                "An earlier attempt dispatched a create and never learned the outcome. I have "
+                f"NOT created another one. Check Drive for '{title}' and tell me which way to "
+                "go.", {"create_state": "unknown"})
+
+    if not file_id:
+        if await stopping():
+            raise Cancelled("Stopped before anything was created.", {})
+        marker = uuid.uuid4().hex[:12]
+        await mark({"create_state": "dispatched", "create_marker": marker,
+                    "create_title": title})
+        await say("Creating the document")
+        try:
+            made = await call("mcp_create_doc", {"title": title, "content": body})
+        except Exception as e:
+            await mark({"create_state": "unknown"})
+            raise Failed(f"The create request went out and never came back "
+                         f"({type(e).__name__}). A document may or may not have been made — "
+                         f"I will not send another until that is settled.",
+                         {"create_state": "unknown", "create_marker": marker})
+        if _looks_like_error(made):
+            await mark({"create_state": "refused"})
+            raise Failed(f"the provider refused to create it: {str(made)[:200]}")
+        file_id = extract_id(made)
+        if not file_id:
+            await mark({"create_state": "unknown"})
+            raise Failed("the provider answered without a document id, so there is nothing to "
+                         "link to and it is not safe to say this was created",
+                         {"create_state": "unknown", "create_marker": marker})
+        await mark({"file_id": file_id, "url": doc_url(file_id), "create_state": "confirmed"})
+
+    receipt = {"file_id": file_id, "url": doc_url(file_id), "create_state": "confirmed"}
+
+    if await stopping():
+        raise Cancelled("Stopped after the document was created but before its contents were "
+                        "checked. It exists — the link is here.", receipt)
+    await say("Reading it back to check the contents")
+    got = await call("mcp_get_doc_content", {"document_id": file_id})
+    if _looks_like_error(got) or not str(got).strip():
+        raise Failed(f"the document could not be read back, so its contents are unverified: "
+                     f"{str(got)[:160]}", {**receipt, "partial": True})
+    missing = compare_ordered(blocks, str(got))
+    if missing:
+        detail = "; ".join(f"{m['why']}: {m['block']!r}" for m in missing[:3])
+        more = f" and {len(missing) - 3} more" if len(missing) > 3 else ""
+        raise Failed(f"the document does not read back as written — {detail}{more}",
+                     {**receipt, "partial": True, "missing": missing[:20]})
+
+    warnings = []
+    owner, access, how = await _owner_of(file_id, call, title)
+    if access == "no_access":
+        raise Failed(f"the document exists and is correct, but {how}, so the link will not "
+                     f"open for you. Nothing was shared to work around that.",
+                     {**receipt, "owner": owner})
+    if access in ("unknown", "reachable"):
+        warnings.append(f"On access: {how}.")
+    if args.get("formatting"):
+        warnings.append("Headings, bold and layout are not something this connection can "
+                        "apply — the text is all in, the formatting is not.")
+    return {**receipt, "action_label": "Open document", "title": title,
+            "blocks_written": len(blocks), "blocks_verified": len(blocks),
+            "owner": owner or "", "access": access, "access_evidence": how,
+            "link_kind": "owner-access URL — no sharing permission was created or changed",
+            "warnings": warnings}
+
+
+# ── DRIVE FOLDER ───────────────────────────────────────────────────────────────
+async def create_folder(args: dict, call, progress=None, known=None,
+                        checkpoint=None, should_stop=None) -> dict:
+    """Create a Drive folder and confirm it is really there before linking to it."""
+    name = (args.get("name") or "").strip()
+    if not name:
+        raise Failed("no folder name was given, so nothing was created")
+    known = known or {}
+
+    async def mark(patch):
+        if checkpoint and (await checkpoint(patch)) is False:
+            raise Failed("I could not record what I was about to do, so I did not do it.")
+
+    file_id = str(known.get("file_id") or "").strip()
+    if not file_id:
+        if should_stop and await should_stop():
+            raise Cancelled("Stopped before anything was created.", {})
+        marker = uuid.uuid4().hex[:12]
+        await mark({"create_state": "dispatched", "create_marker": marker,
+                    "create_title": name})
+        if progress:
+            await progress("Creating the folder")
+        payload = {"folder_name": name}
+        if args.get("parent_folder_id"):
+            payload["parent_folder_id"] = args["parent_folder_id"]
+        try:
+            made = await call("mcp_create_drive_folder", payload)
+        except Exception as e:
+            await mark({"create_state": "unknown"})
+            raise Failed(f"the create went out and never came back ({type(e).__name__}); a "
+                         f"folder may or may not exist", {"create_state": "unknown"})
+        if _looks_like_error(made):
+            raise Failed(f"the provider refused to create it: {str(made)[:200]}")
+        file_id = extract_id(made)
+        if not file_id:
+            await mark({"create_state": "unknown"})
+            raise Failed("the provider answered without a folder id, so there is nothing to "
+                         "link to", {"create_state": "unknown"})
+        await mark({"file_id": file_id, "create_state": "confirmed"})
+
+    if progress:
+        await progress("Checking it is really there")
+    found = await call("mcp_search_drive_files",
+                       {"query": f"trashed = false and name = '{name}'"})
+    if _looks_like_error(found) or file_id not in str(found):
+        raise Failed("the folder was created but does not come back in a Drive search, so it "
+                     "is not verified", {"file_id": file_id, "partial": True})
+    owner, access, how = await _owner_of(file_id, call, name)
+    return {"file_id": file_id,
+            "url": f"https://drive.google.com/drive/folders/{file_id}",
+            "action_label": "Open folder", "title": name,
+            "owner": owner or "", "access": access, "access_evidence": how,
+            "link_kind": "owner-access URL — no sharing permission was created or changed",
+            "warnings": [] if access == "ok" else [f"On access: {how}."]}
+
+
+REGISTRY["create_doc"] = {
+    "handler": create_doc,
+    "title": "Document",
+    "verb": "Writing a document",
+    "connector": "google_workspace",
+}
+REGISTRY["create_folder"] = {
+    "handler": create_folder,
+    "title": "Folder",
+    "verb": "Making a folder",
+    "connector": "google_workspace",
+}

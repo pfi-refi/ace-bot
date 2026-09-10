@@ -3336,6 +3336,19 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                         task_args = {"title": a.get("title"), "rows": rows,
                                      "bold_header": bool(a.get("bold_header"))}
                         task_title = (a.get("title") or "").strip()[:120]
+                    elif cap == "create_doc":
+                        blocks = [b for b in (a.get("blocks") or []) if str(b).strip()]
+                        if not (a.get("title") or "").strip() or not blocks:
+                            missing = ("A title and the text are both required, and I will "
+                                       "not invent either. Ask Brady for whichever is "
+                                       "missing.")
+                        task_args = {"title": a.get("title"), "blocks": blocks}
+                        task_title = (a.get("title") or "").strip()[:120]
+                    elif cap == "create_folder":
+                        if not (a.get("name") or "").strip():
+                            missing = "No folder name came through. Ask Brady what to call it."
+                        task_args = {"name": a.get("name")}
+                        task_title = (a.get("name") or "").strip()[:120]
                     elif cap == "research":
                         if not question:
                             missing = ("No question came through. Ask Brady what he wants "

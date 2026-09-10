@@ -79,19 +79,26 @@ CONNECTORS = {
                                 "approval_when": "destructive"},
             # available on the provider, NOT enabled here. Listed so the boundary is visible
             # rather than implicit: nobody has decided how these should be verified yet.
-            "mcp_create_doc": {"kind": CREATE, "approval": NEVER,
-                               "why": "no verified capability yet — would repeat the "
-                                      "unverified-create failure"},
+            "mcp_create_doc": {"kind": CREATE, "approval": NONE,
+                               "via_capability": "create_doc"},
+            "mcp_get_doc_content": {"kind": READ, "approval": NONE},
             "mcp_create_drive_file": {"kind": CREATE, "approval": NEVER,
                                       "why": "no verified capability yet"},
-            "mcp_create_drive_folder": {"kind": CREATE, "approval": NEVER,
-                                        "why": "no verified capability yet"},
+            "mcp_create_drive_folder": {"kind": CREATE, "approval": NONE,
+                                        "via_capability": "create_folder"},
             "mcp_import_to_google_doc": {"kind": CREATE, "approval": NEVER,
                                          "why": "no verified capability yet"},
             "mcp_import_to_google_sheets": {"kind": CREATE, "approval": NEVER,
                                             "why": "use create_spreadsheet, which verifies"},
+            # NOT A DESIGN CHOICE — A FACT ABOUT THIS CONNECTOR (2026-09-10). It publishes
+            # an IMPORTER and no create-from-scratch and no read tool for Slides, so Ace
+            # cannot author a deck from a description here, and could not check one if it
+            # did. Enabling it would mean creating something nobody can verify.
             "mcp_import_to_google_slides": {"kind": CREATE, "approval": NEVER,
-                                            "why": "no verified capability yet"},
+                                            "why": "this connector has no Slides create or "
+                                                   "read tool — only an importer for a file "
+                                                   "that already exists, so a deck could not "
+                                                   "be authored or checked"},
         },
     },
     "web_research": {
