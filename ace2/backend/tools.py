@@ -671,6 +671,17 @@ START_TASK = {
     },
 }
 
+# WHAT EACH NATIVE TOOL DOES, DECLARED (2026-09-10, Codex). An interrupted turn has to say
+# which operations actually changed something, and inferring that from a tool's ANSWER is how
+# a calendar read ended up listed as a completed mutation. These are stated, not guessed.
+NATIVE_READS = frozenset({
+    "get_calendar_range", "read_gmail", "read_personal_gmail", "search_gmail",
+    "search_personal_gmail", "search_drive", "recall", "read_own_code",
+})
+NATIVE_MUTATIONS = frozenset({
+    "delete_calendar_event", "send_email", "set_privacy",
+})
+
 # Short present-tense labels for the WS `tool` event (the orb shows "◈ CREATING EVENT…")
 # Anthropic SERVER-side web search (2026-07-31): executed by the API itself — no executor
 # here, no scraper, no extra vendor. Appended to the TYPED loop only (chat.py); voice stays

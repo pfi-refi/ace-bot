@@ -3037,7 +3037,7 @@ async def stage_pass(user_text: str, emit, prior=None):
         logger.warning("stage_pass failed: %s", e)
 
 
-async def _run_and_settle(name: str, args: dict, key: str) -> str:
+async def _run_and_settle(name: str, args: dict, key: str, sink: dict = None) -> str:
     """Execute one write and record what it ACTUALLY did. Runs as its own task so that a
     superseded voice turn cancelling its AWAIT cannot leave the journal unsettled — the
     thread was never stoppable anyway (see ops.py).
@@ -3058,13 +3058,22 @@ async def _run_and_settle(name: str, args: dict, key: str) -> str:
                 + ("The request may already have gone through — check before retrying."
                    if state == ops.UNKNOWN else "Nothing was sent; it is safe to try again."))
         await asyncio.to_thread(ops.settle, key, state, text)
+        _sink(sink, state)
         raise
     state, text, record_id = ops.classify(result)
+    _sink(sink, state)
     await asyncio.to_thread(ops.settle, key, state, text, record_id)
     return text
 
 
-async def _dispatch_write(name: str, args: dict) -> str:
+def _sink(sink, state):
+    """Record the journal's verdict where the turn can read it. The verdict is the evidence —
+    an interrupted turn must not re-derive "did this happen" from the sentence it produced."""
+    if sink is not None:
+        sink["state"] = state
+
+
+async def _dispatch_write(name: str, args: dict, sink: dict = None) -> str:
     """Run a write exactly once, whatever ElevenLabs does to the turn around it.
 
     Barge-in is preserved: the caller is still cancellable and Ace still stops talking.
@@ -3073,23 +3082,31 @@ async def _dispatch_write(name: str, args: dict) -> str:
     an invisible maybe. An interrupted-with-unknown-outcome action is reported, never
     silently replayed."""
     if name not in ops.JOURNALLED:
-        return str(await asyncio.to_thread(tools.execute, name, args))
+        out = str(await asyncio.to_thread(tools.execute, name, args))
+        # Not journalled, so there is no verdict to read. A read is a read; anything else is
+        # UNKNOWN rather than assumed done.
+        _sink(sink, ops.COMPLETED if name in tools.NATIVE_READS else ops.UNKNOWN)
+        return out
     verdict, key, prior_receipt = await asyncio.to_thread(ops.begin, name, args)
     if verdict == "unavailable":
         # Fail CLOSED. Without the journal we cannot tell a redelivery from a new request,
         # and for an external provider that means a silent double-booking. Say plainly that
         # nothing was attempted, so the request is preserved rather than half-claimed.
+        _sink(sink, ops.UNAVAILABLE)
         return ("\u26a0\ufe0f NOT DONE — I could not reach the record that stops this from "
                 "being done twice, so I did not attempt it. Tell Brady it still needs doing "
                 "and try again shortly. Do not claim it happened.")
     if verdict == "duplicate":
+        _sink(sink, ops.COMPLETED)      # it DID happen, just not on this turn
         return prior_receipt or "Already done moments ago — not repeated."
     if verdict == "in_flight":
+        _sink(sink, ops.UNKNOWN)
         return ("STOP: this exact action is already running from a previous turn. Do not "
                 "send it again. Say it is in progress and wait.")
     if verdict == "unknown":
+        _sink(sink, ops.UNKNOWN)
         return "\u26a0\ufe0f " + (prior_receipt or "Previous attempt's outcome is unknown.")
-    task = asyncio.create_task(_run_and_settle(name, args, key))
+    task = asyncio.create_task(_run_and_settle(name, args, key, sink))
     try:
         return str(await asyncio.shield(task))
     except asyncio.CancelledError:
@@ -3107,37 +3124,59 @@ async def _dispatch_write(name: str, args: dict) -> str:
 # did go through". A handler whose entire job is honesty was manufacturing completion claims.
 # (Codex, 2026-09-10.)
 OP_DONE, OP_FAILED, OP_QUEUED, OP_READ = "done", "failed", "queued", "read"
+OP_UNKNOWN = "unknown"          # it ran; whether it changed anything is NOT established
 
-# Exact openings this codebase uses to mean "this did not happen". Matched at the start, so a
-# result that merely mentions one of these words in passing is not misread as a refusal.
+# Exact openings this codebase uses to mean "this did not happen". Still checked, but only as
+# one source of NEGATIVE evidence — never as the thing that decides success.
 _REFUSAL_OPENINGS = (
     "\u26a0", "NOT AVAILABLE", "USE start_task INSTEAD", "NOT COMPLETED", "STOP:",
-    "NOT STARTED", "Review storage unavailable", "Already done moments ago",
-    "No task text came through", "Already sent that to the screen",
+    "NOT STARTED", "Review storage unavailable", "No task text came through",
 )
 
+# The journal's own verdicts, mapped to what a surface may say. ops already draws exactly the
+# distinctions that matter, including REPORTED = "the executor claimed it, nothing verified".
+_OPS_MEANING = {
+    ops.COMPLETED: OP_DONE,
+    ops.REPORTED: OP_UNKNOWN,
+    ops.UNKNOWN: OP_UNKNOWN,
+    ops.FAILED_BEFORE_DISPATCH: OP_FAILED,
+    ops.UNAVAILABLE: OP_FAILED,
+    ops.NEEDS_REVIEW: OP_FAILED,
+}
 
-def classify_result(name: str, text: str, is_read: bool = False) -> str:
-    """What one tool call actually achieved, from the SHAPE of the codebase's own answers."""
+
+def classify_result(name: str, text: str, is_read: bool = False,
+                    outcome: str = "", card_state: str = "") -> str:
+    """What one tool call achieved, from EVIDENCE rather than from its prose.
+
+    Rewritten after Codex pointed out the previous version was still a refusal-prefix sniffer
+    whose default was success — so any answer it did not recognise became "this went through".
+    Success is now positive-only: the journal's verdict, a declared read, or a task card's
+    real state. Anything unrecognised is UNKNOWN, which no surface reports as done.
+    """
     t = (text or "").strip()
     if not t:
         return OP_FAILED
     if any(t.startswith(x) for x in _REFUSAL_OPENINGS):
         return OP_FAILED
-    if name == "start_task":
-        # A dispatched task is accepted work, NOT finished work — the whole point of the
-        # task system. It must never be reported as something that went through.
-        return OP_QUEUED
-    return OP_READ if is_read else OP_DONE
+    if card_state:
+        # A dispatched task reports its OWN state; "accepted" is never "finished".
+        return {"completed": OP_DONE, "failed": OP_FAILED,
+                "cancelled": OP_FAILED}.get(card_state, OP_QUEUED)
+    if is_read or name in tools.NATIVE_READS:
+        return OP_READ
+    if outcome:
+        return _OPS_MEANING.get(outcome, OP_UNKNOWN)
+    return OP_UNKNOWN
 
 
-def interrupted_note(ops: list) -> str:
-    """The history line an interrupted turn leaves behind, or '' if there is nothing true
-    to say. Separated out so it can be tested on real tool output rather than by reading
-    the source."""
-    done = [o for o in (ops or []) if o.get("state") == OP_DONE]
-    queued = [o for o in (ops or []) if o.get("state") == OP_QUEUED]
-    if not done and not queued:
+def interrupted_note(ops_list: list) -> str:
+    """The history line an interrupted turn leaves behind, or '' when there is nothing true
+    to say. Tested by execution, not by reading the source."""
+    done = [o for o in (ops_list or []) if o.get("state") == OP_DONE]
+    queued = [o for o in (ops_list or []) if o.get("state") == OP_QUEUED]
+    unsure = [o for o in (ops_list or []) if o.get("state") == OP_UNKNOWN]
+    if not (done or queued or unsure):
         return ""
     lines = ["\u26a0 INTERRUPTED — the call cut off before I answered."]
     if done:
@@ -3146,7 +3185,13 @@ def interrupted_note(ops: list) -> str:
     if queued:
         lines.append("Started and still running (NOT finished):")
         lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in queued[:4]]
-    lines.append("Anything else he asked for was not done — check before saying otherwise.")
+    if unsure:
+        lines.append("Outcome NOT confirmed — these may or may not have taken effect:")
+        lines += [f"  \u2022 {str(o.get('text'))[:180]}" for o in unsure[:4]]
+    # A write shielded by _dispatch_write can settle AFTER this turn ends, so this list is not
+    # a complete account of the turn and must not be read as one.
+    lines.append("This is only what I saw before the line dropped — a write can finish after "
+                 "that, so check the record rather than assuming anything else was skipped.")
     return "\n".join(lines)
 
 
@@ -3435,6 +3480,14 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                                       f"show when it is done. Do NOT say it is built, ready or "
                                       f"open. Do NOT give a link. Then carry on the "
                                       f"conversation normally.")
+                    # Recorded HERE, before the continue — this branch never reached the
+                    # classification below, so a dispatched task was invisible to an
+                    # interrupted turn's record entirely (Codex, 2026-09-10).
+                    turn_ops.append({
+                        "tool": "start_task", "text": result,
+                        "state": classify_result(
+                            "start_task", result,
+                            card_state=(card.get("state") if "card" in dir() or card else ""))})
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id,
                                          "content": result})
                     continue
@@ -3500,6 +3553,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 label = tools.TOOL_LABELS.get(block.name) or \
                     block.name.removeprefix("mcp_").replace("_", " ").upper()
                 await emit("tool", {"name": block.name, "label": label, "status": "running", "ui": is_ui})
+                _outcome = {}
                 if is_ui:
                     result = await _run_ui_tool(block.name, use_args, emit)
                 elif mcp_client.is_mcp_tool(block.name):
@@ -3525,17 +3579,19 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                     else:
                         result = await mcp_client.call(block.name, use_args)
                 else:
-                    result = await _dispatch_write(block.name, use_args)
+                    result = await _dispatch_write(block.name, use_args, _outcome)
                 await emit("tool", {"name": block.name, "label": label, "status": "done", "ui": is_ui})
                 if not is_ui:
                     await emit("confirmation", {"text": result})
                     confirmations.append(result)
                 # Classified HERE, where the tool and its answer are both in hand — not
                 # re-derived from prose later.
-                _is_read = connectors.action(
-                    connectors.connector_of(block.name), block.name).get("kind") == "read"
+                _is_read = (connectors.action(connectors.connector_of(block.name),
+                                              block.name).get("kind") == "read"
+                            or block.name in tools.NATIVE_READS)
                 turn_ops.append({"tool": block.name, "text": result,
-                                 "state": classify_result(block.name, result, _is_read)})
+                                 "state": classify_result(block.name, result, _is_read,
+                                                          outcome=_outcome.get("state", ""))})
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

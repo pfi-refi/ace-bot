@@ -1170,13 +1170,35 @@ class FolderCreationHasTheSameRetryGuard(unittest.TestCase):
         self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
         self.assertIn("have NOT made another one", str(e.exception))
 
-    def test_it_resumes_from_the_one_the_lost_attempt_made(self):
-        found = 'Found 1 files:\n- Name: "Deals" (ID: 1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB) x'
-        f = Fake(mcp_create_drive_folder="should not be called",
-                 mcp_search_drive_files=found)
-        out = run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "unknown"}))
+    def test_it_resumes_only_when_the_marker_proves_identity(self):
+        found = ('Found 1 files:\n- Name: "Deals MK123" '
+                 '(ID: 1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB) x')
+        f = Fake(mcp_create_drive_folder="should not be called", mcp_search_drive_files=found)
+        out = run(cp.create_folder({"name": "Deals"}, f,
+                                   known={"create_state": "unknown", "create_marker": "MK123"}))
         self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
         self.assertTrue(out["url"].endswith("1FolderBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
+
+    def test_a_name_match_alone_never_adopts_an_existing_folder(self):
+        """Codex, 2026-09-10: a "Deals" folder created in 2020 was being claimed as this
+        task's output, and everything filed into it afterwards. A name is not an identity."""
+        stranger = ('Found 1 files:\n- Name: "Deals" '
+                    '(ID: 1Folder2020AAAAAAAAAAAAAAAAAAAAAAA, Created: 2020-04-01T00:00:00Z) x')
+        f = Fake(mcp_create_drive_folder="should not be called",
+                 mcp_search_drive_files=stranger)
+        with self.assertRaises(cp.Failed) as e:
+            run(cp.create_folder({"name": "Deals"}, f,
+                                 known={"create_state": "unknown",
+                                        "create_marker": "NEW_ATTEMPT"}))
+        self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
+        self.assertIn("will not adopt an existing folder", str(e.exception))
+
+    def test_dispatched_without_an_id_is_guarded_too(self):
+        f = Fake(mcp_create_drive_folder="should not be called",
+                 mcp_search_drive_files="Found 0 files")
+        with self.assertRaises(cp.Failed):
+            run(cp.create_folder({"name": "Deals"}, f, known={"create_state": "dispatched"}))
+        self.assertNotIn("mcp_create_drive_folder", [t for t, _ in f.calls])
 
     def test_two_candidates_refuse_to_be_guessed_between(self):
         two = ('Found 2 files:\n- Name: "Deals" (ID: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) x\n'

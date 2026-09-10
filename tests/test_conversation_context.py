@@ -195,8 +195,14 @@ class AnInterruptedVoiceTurnLeavesAnHonestRecord(unittest.TestCase):
     def ops(self, *pairs):
         return [{"tool": t, "text": x, "state": chat.classify_result(t, x)} for t, x in pairs]
 
+    def op(self, tool, text, **kw):
+        return [{"tool": tool, "text": text,
+                 "state": chat.classify_result(tool, text, **kw)}]
+
     def test_a_real_completion_is_reported(self):
-        note = chat.interrupted_note(self.ops(("capture_item", self.CAPTURED)))
+        from backend import ops as _ops
+        note = chat.interrupted_note(
+            self.op("capture_item", self.CAPTURED, outcome=_ops.COMPLETED))
         self.assertIn("DID go through", note)
         self.assertIn("Pick up prescription", note)
 
@@ -206,15 +212,18 @@ class AnInterruptedVoiceTurnLeavesAnHonestRecord(unittest.TestCase):
             self.assertEqual(note, "", f"a refusal was written to history: {text[:40]}")
 
     def test_a_refusal_beside_a_success_does_not_ride_along(self):
-        note = chat.interrupted_note(self.ops(
-            ("capture_item", self.CAPTURED), ("mcp_create_doc", self.NOT_AVAIL),
-            ("mcp_create_spreadsheet", self.REDIRECT)))
+        from backend import ops as _ops
+        note = chat.interrupted_note(
+            self.op("capture_item", self.CAPTURED, outcome=_ops.COMPLETED)
+            + self.ops(("mcp_create_doc", self.NOT_AVAIL),
+                       ("mcp_create_spreadsheet", self.REDIRECT)))
         self.assertIn("Pick up prescription", note)
         self.assertNotIn("NOT AVAILABLE", note)
         self.assertNotIn("USE start_task", note)
 
     def test_a_dispatched_task_is_running_not_finished(self):
-        note = chat.interrupted_note(self.ops(("start_task", self.QUEUED)))
+        note = chat.interrupted_note(
+            self.op("start_task", self.QUEUED, card_state="queued"))
         self.assertIn("still running", note)
         self.assertNotIn("DID go through", note)
 
@@ -222,17 +231,68 @@ class AnInterruptedVoiceTurnLeavesAnHonestRecord(unittest.TestCase):
         self.assertEqual(chat.interrupted_note([]), "")
         self.assertEqual(chat.interrupted_note(self.ops(("send_email", self.GLYPH))), "")
 
-    def test_it_warns_that_the_rest_was_not_done(self):
-        note = chat.interrupted_note(self.ops(("capture_item", self.CAPTURED)))
-        self.assertIn("was not done", note)
+    def test_it_does_not_claim_the_rest_was_skipped(self):
+        """A shielded write can settle after the turn ends, so this list is not a complete
+        account of it and must not read as one (Codex, 2026-09-10)."""
+        from backend import ops as _ops
+        note = chat.interrupted_note(
+            self.op("capture_item", self.CAPTURED, outcome=_ops.COMPLETED))
+        self.assertNotIn("was not done", note)
+        self.assertIn("can finish after that", note)
 
-    def test_a_read_is_not_a_completed_mutation(self):
+    def test_a_native_read_is_not_a_completed_mutation(self):
+        """get_calendar_range is not in the MCP registry, so the call-site lookup returned
+        is_read=False and it was listed under "these DID go through"."""
+        self.assertEqual(chat.classify_result("get_calendar_range", "Mon 3pm Ken"),
+                         chat.OP_READ)
+        self.assertEqual(chat.interrupted_note(self.op("get_calendar_range", "Mon 3pm")), "")
+
+    def test_an_unrecognised_answer_is_unknown_not_done(self):
+        """The old classifier defaulted to success, so anything it did not recognise became
+        a completion claim."""
+        self.assertEqual(chat.classify_result("mystery_tool", "It seems fine."),
+                         chat.OP_UNKNOWN)
+        note = chat.interrupted_note(self.op("mystery_tool", "It seems fine."))
+        self.assertIn("NOT confirmed", note)
+        self.assertNotIn("DID go through", note)
+
+    def test_a_claimed_but_unverified_write_is_not_reported_as_done(self):
+        from backend import ops as _ops
+        # ops.REPORTED means the executor returned prose — claimed, nothing verified.
+        self.assertEqual(
+            chat.classify_result("add_task", "Added it", outcome=_ops.REPORTED),
+            chat.OP_UNKNOWN)
+
+    def test_journal_failures_are_failures(self):
+        from backend import ops as _ops
+        for st in (_ops.FAILED_BEFORE_DISPATCH, _ops.UNAVAILABLE, _ops.NEEDS_REVIEW):
+            self.assertEqual(chat.classify_result("add_task", "x", outcome=st),
+                             chat.OP_FAILED)
+
+    def test_a_finished_task_card_is_done_and_a_failed_one_is_not(self):
+        self.assertEqual(chat.classify_result("start_task", "already made",
+                                              card_state="completed"), chat.OP_DONE)
+        for st in ("failed", "cancelled"):
+            self.assertEqual(chat.classify_result("start_task", "x", card_state=st),
+                             chat.OP_FAILED)
+
+    def test_an_mcp_read_is_not_a_completed_mutation(self):
         self.assertEqual(
             chat.classify_result("mcp_read_sheet_values", "Row  1: ['a']", is_read=True),
             chat.OP_READ)
-        note = chat.interrupted_note([{"tool": "mcp_read_sheet_values", "text": "rows",
-                                       "state": chat.OP_READ}])
-        self.assertEqual(note, "", 'a read is not something that "went through"')
+        self.assertEqual(chat.interrupted_note([{"tool": "mcp_read_sheet_values",
+                                                 "text": "rows", "state": chat.OP_READ}]), "",
+                         'a read is not something that "went through"')
+
+    def test_start_task_is_recorded_before_its_branch_returns(self):
+        """That branch appends its tool_result and continues, so it never reached the
+        classification below and a dispatched task was invisible to the record."""
+        src = Path(chat.__file__).read_text()
+        # Split on the STATEMENT, not the word — the comment above it says "before the
+        # continue", which a naive split cuts at.
+        branch = src.split('if block.name == "start_task":')[1].split("\n                    continue")[0]
+        self.assertIn("turn_ops.append", branch)
+        self.assertIn("card_state", branch)
 
     def test_an_empty_result_is_a_failure_not_a_success(self):
         self.assertEqual(chat.classify_result("capture_item", ""), chat.OP_FAILED)

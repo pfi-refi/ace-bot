@@ -963,11 +963,16 @@ async def create_folder(args: dict, call, progress=None, known=None,
     file_id = str(known.get("file_id") or "").strip()
     # THE SAME GUARD THE OTHER TWO HAVE (Codex, 2026-09-10). This handler was missing it, so a
     # create whose response was lost would be dispatched a SECOND time on the next attempt.
-    # A folder is cheap to duplicate and confusing to find twice, and "it probably never
-    # reached the provider" is exactly the assumption that has been wrong every other time.
-    if not file_id and str(known.get("create_state") or "") == "unknown":
+    #
+    # AND IT MUST NOT ADOPT A STRANGER (Codex again). A first pass here took a single
+    # name match as proof the lost attempt had made it — so a "Deals" folder created in 2020
+    # would have been claimed as this task's output, and everything filed into it afterwards.
+    # A name is not an identity. Only the task's own marker proves that, and without it the
+    # match is a CANDIDATE for Brady to resolve.
+    if not file_id and str(known.get("create_state") or "") in ("unknown", "dispatched"):
         if progress:
             await progress("Checking whether the earlier attempt already made it")
+        marker = str(known.get("create_marker") or "")
         found = await call("mcp_search_drive_files",
                            {"query": "mimeType = 'application/vnd.google-apps.folder' "
                                      f"and trashed = false and name = '{q(name)}'"})
@@ -976,16 +981,19 @@ async def create_folder(args: dict, call, progress=None, known=None,
             for m in re.finditer(r"ID:\s*([A-Za-z0-9_-]{25,80})", str(found)):
                 if m.group(1) not in ids:
                     ids.append(m.group(1))
-        if len(ids) == 1:
+        if marker and marker in str(found) and len(ids) == 1:
             file_id = ids[0]
             await mark({"file_id": file_id, "create_state": "confirmed",
-                        "reconciled": "found the folder the lost attempt made"})
+                        "reconciled": "the provider marker matched"})
         else:
             raise Failed(
-                f"An earlier attempt to make '{name}' never came back, and I cannot tell "
+                f"An earlier attempt to make '{name}' never came back, and nothing proves "
                 + (f"which of the {len(ids)} folders with that name it made"
-                   if ids else "whether it was made at all")
-                + ". I have NOT made another one. Look in Drive and tell me which way to go.",
+                   if len(ids) > 1 else
+                   "that any folder with that name is the one it made" if ids else
+                   "whether it was made at all")
+                + ". I have NOT made another one and I will not adopt an existing folder on "
+                  "a name match. Tell me which to use, or to start fresh.",
                 {"create_state": "unknown", "candidates": ids[:5]})
 
     if not file_id:
