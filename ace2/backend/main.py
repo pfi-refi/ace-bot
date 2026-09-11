@@ -174,12 +174,27 @@ def _next_filler() -> str:
 # started, so a multi-second tool call (esp. an mcp_→Google round-trip on a screen handoff)
 # never leaves dead air long enough for ElevenLabs to cut the call. Rotated so it never
 # repeats the same word back-to-back.
-_CONTINUERS = ("still on it", "one sec", "almost there", "bear with me", "hang tight", "just a moment")
+_CONTINUERS = ("still on it", "one sec", "almost there", "bear with me", "hang tight",
+               "just a moment", "nearly there", "give me a beat", "working on it",
+               "with you shortly", "stay with me")
 
 
 def _continuer_cycler():
-    """A per-call generator so each turn's continuers are ordered and don't repeat."""
-    i = 0
+    """A per-call generator so each turn's continuers are ordered and don't repeat.
+
+    STARTS SOMEWHERE RANDOM (2026-09-10, Brady: "maybe add a couple fillers so it's not always
+    the same"). The index used to begin at 0 every turn, so the first thing he ever heard on a
+    slow turn was "still on it" — every single time. Rotation only varied WITHIN a turn, which
+    is the one place he was least likely to notice.
+
+    These stay a fixed list rather than model-written. They are injected by the adapter while
+    the model is busy, so there is nothing to ask; and _NOISE_CONT below strips them from the
+    transcript by exact match before it goes back to the model — Ace mimicking his own filler
+    is the babble spiral Brady already hit once. A generated filler could not be stripped that
+    way. Add to this tuple and the scrubber follows automatically.
+    """
+    import random
+    i = random.randrange(len(_CONTINUERS))
     while True:
         yield _CONTINUERS[i % len(_CONTINUERS)]
         i += 1
@@ -198,6 +213,24 @@ _NOISE_LINES = (
     "Sorry — that took me a beat too long. Ask me again?",
     "Hit a snag on my end — give me a second and ask me again.",
 )
+
+
+def _resume_break(text: str, after_tool: bool) -> str:
+    """Separate a text block that resumes AFTER a tool call from the one before it.
+
+    A TOOL CALL IS A SENTENCE BREAK (2026-09-10, heard on a real call). The model streams
+    text, calls a tool, then streams more text, and the deltas reached ElevenLabs glued:
+    "…for you on screen right now.Building that now — you'll see it pop up". One missing
+    space, but it is the seam between two separate thoughts and it gets read as one breath.
+
+    Only this boundary gets a separator. Mid-sentence tokens stream with no space between
+    them on purpose, so a blanket rule would insert spaces inside words.
+
+    Module level, not a closure, so the test executes this exact function.
+    """
+    if after_tool and text[:1] not in ("", " ", "\n", "\t"):
+        return " " + text
+    return text
 
 
 def _strip_voice_noise(text: str) -> str:
@@ -2063,11 +2096,14 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # first-token deadline fed exactly when it's actually at risk (silent tool phase).
         spoke = {"any": False}
         status_said = set()   # tool names whose status word already played this turn
+        resumed = {"after_tool": False}   # see _resume_break
 
         async def emit(event_type, payload):
             if event_type == "delta":
                 spoke["any"] = True
-                await queue.put(("delta", payload.get("text", "")))
+                text = _resume_break(payload.get("text", ""), resumed["after_tool"])
+                resumed["after_tool"] = False
+                await queue.put(("delta", text))
             elif event_type in ("final", "done"):
                 await queue.put(("done", None))
             elif event_type == "error":
@@ -2092,6 +2128,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # sweep — so Brady can SEE each action land (voice used to show nothing on the
                 # screen). The SPOKEN status below is still deduped so the audio isn't a chant.
                 await publish_stage_event("tool", payload)
+                resumed["after_tool"] = True     # whatever the model says next is a new thought
                 name = payload.get("name")
                 if name in status_said or len(status_said) >= 4:
                     return

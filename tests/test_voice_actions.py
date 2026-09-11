@@ -2068,3 +2068,79 @@ class TheAllowlistHoldsAtEveryEntryPoint(unittest.TestCase):
         for name, keys in cp.ARG_KEYS.items():
             for forbidden in ("start_fresh", "use_existing_folder_id", "_client"):
                 self.assertNotIn(forbidden, keys, f"{name} exposes {forbidden}")
+
+
+# ── SPOKEN-SEAM TESTS (2026-09-10, from a real call) ───────────────────────────
+# Transcript of the 10 Sept supervised call, verbatim:
+#   "I'll build that document for you on screen right now.Building that now — you'll see it"
+#   "...I'll let you know as soon as it's done.Done — "Voice Check September 10th" is built"
+# The model streams text, calls a tool, streams more text. Both blocks reached ElevenLabs
+# glued, and it read the run-on as one breath.
+class VoiceSeamTests(unittest.TestCase):
+    def test_a_tool_call_is_a_sentence_break(self):
+        """Text resumed after a tool call gets a separator; mid-sentence tokens do not.
+
+        Drives the REAL _resume_break, not a copy of its rule."""
+        from ace2.backend.main import _resume_break
+        resumed = {"after_tool": False}
+        out = []
+
+        def emit_delta(text):
+            out.append(_resume_break(text, resumed["after_tool"]))
+            resumed["after_tool"] = False
+
+        # streamed token by token, exactly as the model produces it
+        for tok in ("I'll build", " that document", " for you", " right now."):
+            emit_delta(tok)
+        resumed["after_tool"] = True                     # START_TASK dispatched here
+        for tok in ("Building", " that now", " — you'll see it"):
+            emit_delta(tok)
+
+        joined = "".join(out)
+        self.assertNotIn("now.Building", joined)
+        self.assertIn("now. Building", joined)
+        # the reported bug, and nothing else: no space was inserted inside a word
+        self.assertIn("I'll build that document", joined)
+
+    def test_the_route_uses_the_shared_rule(self):
+        """Guard against the rule drifting back into a closure copy."""
+        import inspect
+        from ace2.backend import main as m
+        src = inspect.getsource(m)
+        self.assertIn("_resume_break(payload.get(\"text\", \"\"), resumed[\"after_tool\"])", src)
+
+    def test_a_separator_is_not_doubled(self):
+        """A resumed block that already starts with whitespace is left alone."""
+        from ace2.backend.main import _resume_break
+        self.assertEqual(_resume_break(" Building", True), " Building")
+        self.assertEqual(_resume_break("\nBuilding", True), "\nBuilding")
+        self.assertEqual(_resume_break("", True), "")
+        self.assertEqual(_resume_break("Building", False), "Building")
+
+    def test_continuers_do_not_always_open_the_same_way(self):
+        """The cycler used to start at index 0 every turn, so the first filler Brady ever
+        heard on a slow turn was 'still on it' — every time."""
+        from ace2.backend.main import _continuer_cycler
+        firsts = {next(_continuer_cycler()) for _ in range(60)}
+        self.assertGreater(len(firsts), 1, "every turn opens with the same continuer")
+
+    def test_every_continuer_and_filler_is_scrubbed_from_history(self):
+        """THE BABBLE-SPIRAL GUARD. ElevenLabs resends the whole transcript each turn, so an
+        injected filler the scrubber misses is one Ace reads back and starts mimicking. Adding
+        a phrase to the tuple without the scrubber following it reopens that defect, so this
+        asserts the property for EVERY entry rather than a sampled few."""
+        from ace2.backend.main import _CONTINUERS, _FILLERS, _strip_voice_noise
+        for c in _CONTINUERS:
+            self.assertEqual(_strip_voice_noise(f"{c}… Booked it for Tuesday."),
+                             "Booked it for Tuesday.", f"continuer not scrubbed: {c}")
+        for f in _FILLERS:
+            self.assertEqual(_strip_voice_noise(f"{f} Booked it for Tuesday."),
+                             "Booked it for Tuesday.", f"filler not scrubbed: {f}")
+
+    def test_real_speech_is_not_scrubbed(self):
+        """The scrubber must not eat Ace's actual words."""
+        from ace2.backend.main import _strip_voice_noise
+        for kept in ("One second-floor unit is still open.",
+                     "Almost there on the Rebecca packet — two signatures left.",
+                     "Still on it? No — that one closed Tuesday."):
+            self.assertEqual(_strip_voice_noise(kept), kept)
