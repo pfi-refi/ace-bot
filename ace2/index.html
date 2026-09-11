@@ -77,19 +77,30 @@
     <button class="qa qa-cmd" id="command-btn" title="Your full board — tasks & pipeline"><span class="qg">◧</span>Command</button>
     <button class="qa" data-panel="inbox" title="Work + personal inbox"><span class="qg">✉</span>Inbox</button>
     <button class="qa" data-panel="timeline" title="Today's schedule"><span class="qg">▤</span>Schedule</button>
-    <button class="qa qa-more" id="more-btn" title="Everything else" aria-expanded="false"><span class="qg">⋯</span>More</button>
-    <div id="quick-more" class="hidden">
-      <button class="qa" id="review-open">Review actions</button>
-      <button class="qa" id="activity-open">Recent activity</button>
-      <button class="qa" id="connections-open">Connections</button>
-      <button class="qa" id="draft-open">Saved week</button>
-      <button class="qa" id="pulse-btn" title="How's my business looking? (⌘K works too)"><span class="qg">▦</span>Pulse</button>
-      <button class="qa qa-plan" id="plan-week-btn" title="Ace asks you a few questions, then builds your week"><span class="qg">◈</span>Plan my week</button>
-      <button class="qa" data-msg="Give me my morning brief."><span class="qg">☀</span>Brief</button>
-      <button class="qa qa-graph" id="graph-btn" title="The knowledge graph — your whole book as a live map"><span class="qg">◉</span>Graph</button>
-      <button class="qa" data-panel="memory" title="What Ace knows"><span class="qg">◆</span>Memory</button>
-      <button class="qa" data-panel="weather" title="Weather"><span class="qg">◍</span>Weather</button>
-      <button class="qa" id="cool-btn" title="Cool mode — stops the ambient animation and live blur so the laptop stops cooking"><span class="qg">❄</span>Cool</button>
+    <button class="qa qa-more" id="more-btn" title="More tools" aria-expanded="false" aria-controls="quick-more"><span class="qg">⋯</span>More</button>
+    <div id="quick-more" class="hidden" role="region" aria-label="More tools">
+      <div class="more-head"><span>MORE TOOLS</span><button id="more-close" type="button" aria-label="Close more tools">✕</button></div>
+      <div class="more-groups">
+        <section class="more-group" aria-labelledby="more-group-0"><h2 id="more-group-0">Planning</h2>
+          <button class="qa qa-plan" id="plan-week-btn" title="Ace asks you a few questions, then builds your week"><span class="qg">◈</span>Plan my week</button>
+          <button class="qa" id="draft-open">Saved week</button>
+          <button class="qa" data-msg="Give me my morning brief."><span class="qg">☀</span>Brief</button>
+          <button class="qa" id="pulse-btn" title="How's my business looking? (⌘K works too)"><span class="qg">▦</span>Pulse</button>
+        </section>
+        <section class="more-group" aria-labelledby="more-group-1"><h2 id="more-group-1">Ace’s Work</h2>
+          <button class="qa" id="review-open">Review actions</button>
+          <button class="qa" id="activity-open">Recent activity</button>
+        </section>
+        <section class="more-group" aria-labelledby="more-group-2"><h2 id="more-group-2">Knowledge</h2>
+          <button class="qa" data-panel="memory" title="What Ace knows"><span class="qg">◆</span>Memory</button>
+          <button class="qa qa-graph" id="graph-btn" title="The knowledge graph — your whole book as a live map"><span class="qg">◉</span>Graph</button>
+        </section>
+        <section class="more-group" aria-labelledby="more-group-3"><h2 id="more-group-3">Settings & tools</h2>
+          <button class="qa" id="connections-open">Connections</button>
+          <button class="qa" data-panel="weather" title="Weather"><span class="qg">◍</span>Weather</button>
+          <button class="qa" id="cool-btn" title="Cool mode — stops the ambient animation and live blur so the laptop stops cooking"><span class="qg">❄</span>Cool</button>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -101,8 +112,8 @@
     </button>
     <!-- CAPTURE ANYTHING — a plain file input (no `capture` attr) so iOS offers Camera *and*
          Photos *and* Files, and desktop gets a normal picker. Drag-and-drop hits the same path. -->
-    <button id="clip-btn" class="icon-btn" title="Capture — photo, PDF, or voice memo">📎</button>
-    <input id="capture-file" type="file" accept="image/*,application/pdf,audio/*" multiple hidden>
+    <button id="clip-btn" class="icon-btn" title="Upload photos, PDFs, meeting notes, or voice memos">📎</button>
+    <input id="capture-file" type="file" accept="image/*,application/pdf,audio/*,.txt,.md,.docx" multiple hidden>
     <textarea id="chat-input" rows="1" placeholder="Talk to Ace…" autocomplete="off"></textarea>
     <button id="voice-toggle" class="icon-btn" title="Spoken replies on/off" aria-pressed="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

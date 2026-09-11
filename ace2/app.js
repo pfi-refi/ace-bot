@@ -2977,7 +2977,7 @@
   // Snap a whiteboard, drop a statement, hum a voice memo — Ace reads/hears it, files the
   // facts to memory and the actions to the board, then tells you what he got. The 📎 button,
   // the iOS camera roll and desktop drag-and-drop all land on this one pipeline.
-  var captureBusy = false;
+  var captureBusy = false, captureQueue = [];
 
   // Phone photos are 3-12MB; the vision ceiling is 5MB and Brady is usually on cellular.
   // Downscale in-browser to a 1568px long edge (the model's native tile) and re-encode JPEG.
@@ -3003,7 +3003,7 @@
           ctx.drawImage(img, 0, 0, c.width, c.height);
           c.toBlob(function (b) {
             // If the canvas blanked out (iOS) the blob is tiny — fall back to the original file.
-            finish(b && b.size > 3000 ? new File([b], 'capture.jpg', { type: 'image/jpeg' }) : file);
+            finish(b && b.size > 3000 ? new File([b], (file.name || 'capture').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' }) : file);
           }, 'image/jpeg', 0.86);
         } catch (e) { finish(file); }
       };
@@ -3042,13 +3042,19 @@
     }).then(function (d) {
       if (d && d.ok) {
         replaceBubble(bubble, d.summary);
+        if (d.text && bubble) {
+          var details = document.createElement('details');
+          var heading = document.createElement('summary'); heading.textContent = 'View saved source text';
+          var source = document.createElement('div'); source.style.whiteSpace = 'pre-wrap'; source.textContent = d.text;
+          details.appendChild(heading); details.appendChild(source); bubble.appendChild(details);
+        }
         speak(d.summary);
         if (d.todos_count && cmd && cmd.open) cmdFetch().then(cmdRender).catch(function () {});
       } else {
         replaceBubble(bubble, '⚠️ ' + ((d && d.error) || "Couldn't read that one."));
       }
     }).catch(function () {
-      replaceBubble(bubble, '⚠️ Capture failed — the link dropped. Try that again.');
+      replaceBubble(bubble, '⚠️ The upload connection dropped; filing may have finished. Check the board before uploading again.');
     });
   }
 
@@ -3056,33 +3062,69 @@
   // ONE AFTER ANOTHER — each screenshot is its own read + filing, and sequencing keeps the
   // link and the model from being hammered by 4 parallel uploads.
   function captureFiles(list) {
-    if (!list || !list.length || captureBusy) return;
-    var files = Array.prototype.slice.call(list);
+    if (!list || !list.length) return;
+    captureQueue = captureQueue.concat(Array.prototype.slice.call(list));
+    if (captureBusy) { addAceMessage('📎 Added to the upload queue.'); return; }
     captureBusy = true;
-    if (files.length > 1) addAceMessage('📎 Reading ' + files.length + ' files, one at a time…');
-    (function next(i) {
-      if (i >= files.length) { captureBusy = false; return; }
-      captureOne(files[i]).then(function () { next(i + 1); });
-    })(0);
+    (function next() {
+      if (!captureQueue.length) { captureBusy = false; return; }
+      captureOne(captureQueue.shift()).then(next);
+    })();
   }
 
-  // MORE drawer (2026-08-26): the dock keeps four buttons you'd tap without wanting to talk;
-  // Pulse / Plan my week / Brief are REQUESTS you can just say, so they live behind this.
+  // A non-modal tools panel: keep the existing handlers and move only its container.
   (function () {
     var mb = document.getElementById('more-btn'), drawer = document.getElementById('quick-more');
     if (!mb || !drawer) return;
+    document.getElementById('app').appendChild(drawer);
+    function position() {
+      if (drawer.classList.contains('hidden')) return;
+      var viewport = window.visualViewport;
+      var left = viewport ? viewport.offsetLeft : 0, top = viewport ? viewport.offsetTop : 0;
+      var width = viewport ? viewport.width : window.innerWidth;
+      var height = viewport ? viewport.height : window.innerHeight;
+      drawer.style.width = Math.min(420, width - 24) + 'px';
+      drawer.style.maxHeight = Math.max(80, height - 24) + 'px';
+      var anchor = mb.getBoundingClientRect(), box = drawer.getBoundingClientRect();
+      var rail = window.matchMedia('(min-width: 900px) and (min-height: 560px)').matches;
+      var x = rail ? anchor.right + 16 : left + (width - box.width) / 2;
+      var y = rail ? anchor.bottom - box.height : anchor.top - box.height - 10;
+      drawer.style.left = Math.max(left + 12, Math.min(x, left + width - box.width - 12)) + 'px';
+      drawer.style.top = Math.max(top + 12, Math.min(y, top + height - box.height - 12)) + 'px';
+    }
+    function close(restore) {
+      drawer.classList.add('hidden'); mb.classList.remove('active');
+      mb.setAttribute('aria-expanded', 'false');
+      if (restore) mb.focus({preventScroll: true});
+    }
     mb.addEventListener('click', function () {
-      var open = drawer.classList.toggle('hidden') === false;
-      mb.classList.toggle('active', open);
-      mb.setAttribute('aria-expanded', String(open));
+      if (!drawer.classList.contains('hidden')) { close(true); return; }
+      drawer.classList.remove('hidden'); mb.classList.add('active');
+      mb.setAttribute('aria-expanded', 'true'); position();
+      drawer.querySelector('.qa').focus({preventScroll: true});
     });
-    // tapping anything inside closes it again, so the dock returns to four
+    document.getElementById('more-close').addEventListener('click', function () { close(true); });
     drawer.addEventListener('click', function (e) {
-      if (e.target.closest('.qa')) {
-        drawer.classList.add('hidden'); mb.classList.remove('active');
-        mb.setAttribute('aria-expanded', 'false');
+      if (e.target.closest('.qa')) close(drawer.contains(document.activeElement));
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !drawer.classList.contains('hidden')) {
+        e.preventDefault(); close(true);
       }
     });
+    document.addEventListener('pointerdown', function (e) {
+      if (!drawer.classList.contains('hidden') && !drawer.contains(e.target) && !mb.contains(e.target)) {
+        close(drawer.contains(document.activeElement));
+      }
+    });
+    document.addEventListener('focusin', function (e) {
+      if (!drawer.classList.contains('hidden') && !drawer.contains(e.target) && e.target !== mb) close(false);
+    });
+    window.addEventListener('resize', position);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', position);
+      window.visualViewport.addEventListener('scroll', position);
+    }
   })();
 
   $('clip-btn').addEventListener('click', function () { $('capture-file').click(); });
@@ -3091,7 +3133,7 @@
     var files = e.target.files ? Array.prototype.slice.call(e.target.files) : [];
     e.target.value = '';        // so the SAME file picked twice still fires change
     if (!files.length) return;
-    captureBusy = false;        // a fresh pick ALWAYS wins — never let a stuck flag swallow it silently
+
     setChat(true);              // guarantee he SEES the read, even if he tapped 📎 from the orb dashboard
     captureFiles(files);
   });

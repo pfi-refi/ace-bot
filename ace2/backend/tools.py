@@ -717,9 +717,16 @@ START_TASK = {
 # are reported as outcome-not-confirmed rather than as done, and chat._dispatch_write reads
 # this set to decide that. A native tool in NEITHER set is treated as a possible mutation
 # with an unknown outcome — the safe default — and logged as an undeclared gap.
+TOOLS.append({
+    "name": "read_attachment",
+    "description": "Read a previously uploaded photo, PDF, meeting note, or audio transcript. Use capture_id from the conversation; omit only for the latest upload. Supply question to inspect original image/PDF details (uses a model call); omit for stored text. Do not guess unseen attachment content.",
+    "input_schema": {"type":"object", "properties": {
+        "capture_id":{"type":"string"}, "question":{"type":"string"}}, "additionalProperties":False}
+})
+
 NATIVE_READS = frozenset({
     "get_calendar_range", "read_gmail", "read_personal_gmail", "search_gmail",
-    "search_personal_gmail", "search_drive", "recall", "read_own_code",
+    "search_personal_gmail", "search_drive", "recall", "read_own_code", "read_attachment",
 })
 NATIVE_MUTATIONS = frozenset({
     "delete_calendar_event", "send_email", "set_privacy",
@@ -733,6 +740,7 @@ NATIVE_MUTATIONS = frozenset({
 WEB_SEARCH = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
 
 TOOL_LABELS = {
+    "read_attachment": "READING ATTACHMENT",
     "web_search": "SEARCHING THE WEB",
     "create_calendar_event": "CREATING EVENT",
     "reschedule_calendar_event": "MOVING EVENT",
@@ -1110,7 +1118,10 @@ def _do_get_calendar_range(start_offset_days=0, num_days=7, **_):
     return get_calendar_range(start_offset_days, num_days)
 
 
+from .capture_store import read_attachment
+
 _DISPATCH = {
+    "read_attachment": read_attachment,
     "create_calendar_event": _do_create_calendar_event,
     "reschedule_calendar_event": _do_reschedule_calendar_event,
     "delete_calendar_event": _do_delete_calendar_event,

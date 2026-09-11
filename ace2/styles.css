@@ -933,10 +933,26 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
 /* Discreet toggle is a VOICE-only concern — hide it in chat mode (typed is private anyway) */
 body.mode-chat #discreet-btn { display: none; }
 
-/* MORE drawer (2026-08-26) — the dock's secondary bank, hidden until asked for. */
-#quick-more { display: contents; }
+/* Grouped tools float above the dock without adding eleven dashboard buttons. */
+#quick-more { position: fixed; z-index: 65; width: min(420px, calc(100vw - 24px));
+  overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box;
+  border: 1px solid rgba(69,255,166,.25); border-radius: 14px;
+  background: #091318; box-shadow: 0 18px 60px rgba(0,0,0,.6); padding: 12px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom)); }
 #quick-more.hidden { display: none; }
+.more-head { display: flex; align-items: center; justify-content: space-between;
+  font: 10px var(--mono); letter-spacing: .18em; color: var(--aurora); margin-bottom: 10px; }
+#more-close { width: 44px; height: 44px; border: 1px solid rgba(150,168,180,.2);
+  border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; }
+.more-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; }
+.more-group { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.more-group h2 { margin: 0 0 3px; font: 10px var(--mono); color: var(--text-faint);
+  letter-spacing: .08em; text-transform: uppercase; }
+#quick-more .qa { width: 100%; min-height: 44px; text-align: left; padding: 10px;
+  white-space: normal; overflow-wrap: anywhere; font-size: 10px; letter-spacing: .6px; }
+#quick-more button:focus-visible { outline: 2px solid var(--aurora); outline-offset: 2px; }
 .qa.qa-more.active { color: var(--aurora); border-color: rgba(69,255,166,.4); }
+@media (max-width: 360px) { .more-groups { grid-template-columns: 1fr; } }
 
 /* ================================================================== COOL MODE (2026-09-01)
    Brady: "my laptop gets sooooo hot in like 2 minutes."
