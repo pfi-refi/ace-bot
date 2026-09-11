@@ -2144,3 +2144,70 @@ class VoiceSeamTests(unittest.TestCase):
                      "Almost there on the Rebecca packet — two signatures left.",
                      "Still on it? No — that one closed Tuesday."):
             self.assertEqual(_strip_voice_noise(kept), kept)
+
+
+# ── KEEP-ALIVE TESTS (2026-09-10, after a call died with custom_llm_error) ──────
+# ElevenLabs' llm cascade timeout is how long it waits for our endpoint before declaring the
+# LLM dead. It was 4 seconds and their field caps at 15, so the gaps have to fit under it.
+class VoiceKeepAliveTests(unittest.TestCase):
+    def _gaps(self, ticks, budget=3):
+        """Replay the loop's quiet-tick rule and return (spoken, gap_in_ticks) per tick."""
+        from ace2.backend.main import MAX_QUIET_MISSES
+        spoken, out, misses = 0, [], 0
+        for _ in range(ticks):
+            misses += 1
+            if misses > MAX_QUIET_MISSES:
+                out.append("bail")
+                break
+            if misses % 2 == 0 and spoken < budget:
+                spoken += 1
+                out.append("speak")
+            else:
+                out.append("silent-keepalive")
+        return out
+
+    def test_every_quiet_tick_still_puts_bytes_on_the_wire(self):
+        """The failure: after the 3-continuer budget Ace went quiet AND so did the stream,
+        leaving 12s gaps against a 4s timeout."""
+        for step in self._gaps(14):
+            self.assertNotEqual(step, "dead-air",
+                                "a tick produced nothing — that is what tripped the timeout")
+        self.assertTrue(all(s in ("speak", "silent-keepalive", "bail") for s in self._gaps(14)))
+
+    def test_the_longest_silent_gap_is_one_tick(self):
+        """Max gap between emissions must stay under the 15s ceiling. One tick is 4s."""
+        steps = self._gaps(14)
+        self.assertEqual(len(steps), 14, "a tick was skipped, which reopens a multi-tick gap")
+
+    def test_ace_still_only_speaks_three_times(self):
+        """The babble-spiral cap is unchanged — this fix is about the line, not the audio."""
+        self.assertEqual(self._gaps(14).count("speak"), 3)
+
+    def test_a_hung_tool_still_ends_the_turn(self):
+        """Keeping the stream alive must not keep a dead call alive forever."""
+        from ace2.backend.main import MAX_QUIET_MISSES
+        self.assertIn("bail", self._gaps(MAX_QUIET_MISSES + 3))
+
+    def test_a_silent_keepalive_says_nothing(self):
+        """It must be a valid streaming chunk that contributes no speech."""
+        import json
+        from ace2.backend.main import _sse_chunk
+        raw = _sse_chunk(1757, "ace", "")
+        self.assertTrue(raw.startswith("data: ") and raw.endswith("\n\n"))
+        body = json.loads(raw[len("data: "):].strip())
+        self.assertEqual(body["choices"][0]["delta"]["content"], "")
+        self.assertIsNone(body["choices"][0]["finish_reason"])
+
+    def test_a_spoken_chunk_carries_its_words(self):
+        import json
+        from ace2.backend.main import _sse_chunk
+        body = json.loads(_sse_chunk(1757, "ace", "one sec… ")[len("data: "):].strip())
+        self.assertEqual(body["choices"][0]["delta"]["content"], "one sec… ")
+
+    def test_the_loop_uses_the_shared_builder(self):
+        """Guard against a hand-rolled chunk drifting back in and skipping the keep-alive."""
+        import inspect
+        from ace2.backend import main as m
+        src = inspect.getsource(m)
+        self.assertIn('yield _sse_chunk(created, model, "")', src)
+        self.assertIn("if misses > MAX_QUIET_MISSES:", src)

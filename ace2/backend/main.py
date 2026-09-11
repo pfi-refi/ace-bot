@@ -179,6 +179,17 @@ _CONTINUERS = ("still on it", "one sec", "almost there", "bear with me", "hang t
                "with you shortly", "stay with me")
 
 
+# How many 4s waits of silence before Ace gives up on a turn. Was 8 (~36s), chosen when every
+# quiet tick was genuinely dead air on the wire. Now that the stream keeps ticking silently, a
+# long turn is no longer indistinguishable from a hung one, so a real piece of work gets room:
+# ~64s. Still bounded — an actually hung tool must not hold a billing call open indefinitely.
+#
+# This is a CEILING, not a target. A turn that needs this long should be dispatching a task and
+# answering with a card (create_doc answers in ~4s that way). Raising it further would paper
+# over that instead of fixing it.
+MAX_QUIET_MISSES = 15
+
+
 def _continuer_cycler():
     """A per-call generator so each turn's continuers are ordered and don't repeat.
 
@@ -213,6 +224,35 @@ _NOISE_LINES = (
     "Sorry — that took me a beat too long. Ask me again?",
     "Hit a snag on my end — give me a second and ask me again.",
 )
+
+
+def _sse_chunk(created: int, model: str, content: str) -> str:
+    """One OpenAI-format streaming chunk.
+
+    `content=""` is a SILENT KEEP-ALIVE: valid in the streaming contract, appends nothing to
+    what ElevenLabs speaks, but it is bytes on the wire — which is the whole point. See
+    _KEEPALIVE_WHY.
+    """
+    import json as _json
+    return "data: " + _json.dumps({
+        "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
+        "created": created, "model": model,
+        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+    }) + "\n\n"
+
+
+# WHY A SILENT CHUNK EXISTS (2026-09-10, after a call failed with custom_llm_error).
+# ElevenLabs' `llm cascade timeout` is how long it waits for OUR endpoint before declaring the
+# LLM dead. It was FOUR SECONDS, and their field caps at 15 — we cannot buy our way out of it.
+#
+# Ace speaks a continuer only every OTHER 4s miss and at most three per turn, because an
+# uncapped filler drumbeat is the babble spiral Brady already hit. That cap was right for the
+# AUDIO and wrong for the CONNECTION: it left silent gaps of 8s, then 12s after the third
+# continuer, and every one of those gaps is longer than the timeout was.
+#
+# So the two concerns are separated. How often Ace TALKS is unchanged. How often the stream
+# PRODUCES BYTES is now every tick, so the longest silent gap is one 4s wait instead of 12s.
+_KEEPALIVE_WHY = "see above"
 
 
 def _resume_break(text: str, after_tool: bool) -> str:
@@ -2214,43 +2254,33 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                         elif pre in (3, 6):
                             piece = next(cont) + "… "
                         elif pre >= 9:
-                            yield ("data: " + json.dumps({
-                                "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-                                "created": created, "model": model,
-                                "choices": [{"index": 0, "delta": {"content": "Sorry — that took me a beat too long. Ask me again?"},
-                                             "finish_reason": None}],
-                            }) + "\n\n")
+                            yield _sse_chunk(
+                                created, model,
+                                "Sorry — that took me a beat too long. Ask me again?")
                             break
                         else:
-                            continue   # in-between ticks: wait silently, no chatter
-                        yield ("data: " + json.dumps({
-                            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-                            "created": created, "model": model,
-                            "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
-                        }) + "\n\n")
+                            # In-between ticks: Ace stays quiet, the STREAM does not.
+                            yield _sse_chunk(created, model, "")
+                            continue
+                        yield _sse_chunk(created, model, piece)
                         continue
                     misses += 1
-                    if misses > 8:
-                        # ~30s+ of unbroken silence = a tool has truly hung. Don't stream filler
-                        # forever (that keeps a dead call alive/billing); close out gracefully.
-                        yield ("data: " + json.dumps({
-                            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-                            "created": created, "model": model,
-                            "choices": [{"index": 0, "delta": {"content": "That one's hanging on me — try me again in a moment."},
-                                         "finish_reason": None}],
-                        }) + "\n\n")
+                    if misses > MAX_QUIET_MISSES:
+                        # A tool has truly hung. Don't hold the line open forever (that keeps a
+                        # dead call alive and billing); close out gracefully.
+                        yield _sse_chunk(created, model,
+                                         "That one's hanging on me — try me again in a moment.")
                         break
                     # Speak a continuer only every OTHER miss (≈8s apart) and at most 3 per
-                    # turn — a hung tool gets a few human beats, then quiet until the cap,
-                    # never a rotating chant that audibly wraps around.
+                    # turn — a hung tool gets a few human beats, then quiet, never a rotating
+                    # chant that audibly wraps around. Past the budget Ace says nothing, but the
+                    # stream still ticks: silence on the LINE is what trips the cascade timeout,
+                    # and silence from ACE is what Brady actually wanted.
                     if misses % 2 == 0 and conts_spoken < 3:
                         conts_spoken += 1
-                        yield ("data: " + json.dumps({
-                            "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
-                            "created": created, "model": model,
-                            "choices": [{"index": 0, "delta": {"content": next(cont) + "… "},
-                                         "finish_reason": None}],
-                        }) + "\n\n")
+                        yield _sse_chunk(created, model, next(cont) + "… ")
+                    else:
+                        yield _sse_chunk(created, model, "")
                     continue
                 started = True
                 misses = 0
