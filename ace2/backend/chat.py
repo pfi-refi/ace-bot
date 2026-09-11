@@ -679,12 +679,9 @@ async def _live_context() -> tuple:
     # becomes the first line of the fast half — still stated up front, just after the part
     # that doesn't change. (It was first because voice kept losing the date; it stays
     # prominent, and the voice path builds its own context and is untouched here.)
-    _chg = _changelog_block()
     slow = [
         _profile_block(),
-        *(["", "WHAT CHANGED IN YOU RECENTLY (newest first — this is what you can do NOW; if "
-           "Brady asks what's new or what you can do, answer from this, and never describe a "
-           "fix as still pending when it is listed here):", _chg] if _chg else []),
+        _upgrade_awareness(),
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
@@ -2754,11 +2751,11 @@ async def _refresh_recap() -> None:
 # context had no idea the records/actions model existed. Both were patched by hand, which
 # does not scale and silently rots the moment someone forgets.
 #
-# So the changelog SHIPS WITH THE CODE and he reads the top of it. It cannot drift from what
-# is deployed, because it is deployed. It rides in the SLOW half of the context — the cached
-# block — so it changes only when a deploy changes it, and costs effectively nothing per turn.
+# The changelog ships with the code. Release authors must keep it current; shipping a file
+# does not prove a connector works. Share this bounded block across voice and chat.
 _CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 _CHANGELOG_ENTRIES = 5
+_CHANGELOG_MAX_CHARS = 6000
 _changelog_cache = {"mtime": 0.0, "text": ""}
 
 
@@ -2773,12 +2770,32 @@ def _changelog_block() -> str:
         parts = [p.strip() for p in body.split("\n## ") if p.strip()]
         out = []
         for p in parts[:_CHANGELOG_ENTRIES]:
-            out.append("- " + " ".join(p.replace("\n", " ").split())[:400])
+            entry = "- " + " ".join(p.split())
+            # Keep whole entries: truncation could remove a limitation or approval rule.
+            if sum(len(x) + 1 for x in out) + len(entry) > _CHANGELOG_MAX_CHARS:
+                out.append("- Further release details omitted for size; do not infer their contents.")
+                break
+            out.append(entry)
         text = "\n".join(out)
         _changelog_cache.update(mtime=st.st_mtime, text=text)
         return text
     except Exception:
         return ""
+
+
+def _upgrade_awareness() -> str:
+    details = _changelog_block()
+    return (
+        "YOUR SHIPPED UPGRADES AND LIMITS:\n"
+        "These notes describe this running code, not proof that every connection works. "
+        "Use them to explain what changed and suggest relevant abilities naturally; do not "
+        "recite them on every greeting. Available tools and actual provider results control "
+        "what you can do now. Distinguish shipped, connection-dependent, and planned/deferred "
+        "abilities. Old memories of a pending upgrade do not override these release notes. "
+        "Never claim an action succeeded from a release note, or claim consciousness, "
+        "self-modification, or deployment authority.\n" +
+        (details or "Release notes unavailable. Do not invent recent upgrades; describe only available tools.")
+    )
 
 
 def _recap_block() -> str:
@@ -2843,6 +2860,7 @@ async def _fast_context() -> str:
         f"always know, it is stated right here and refreshed every turn.",
         "",
         _profile_block(),
+        _upgrade_awareness(),
         "",
         "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
@@ -2885,8 +2903,8 @@ async def _fast_context() -> str:
         "Slides deck, or making a shareable link — call build_on_screen with the full instruction, "
         "then tell him in one short sentence to watch his screen; NEVER say you can't do it. "
         "Sending and deleting are "
-        "GATED: the tool will come back asking for confirmation — say in one short sentence exactly "
-        "what you're about to do, wait for his yes, then call it again with confirmed true. "
+        "GATED: follow the tool's actual approval instructions. When it requires More → Review, "
+        "direct Brady there; spoken yes alone is not authorization to execute the proposal. "
         "Keep spoken replies short and natural — a sentence or two, no lists or markdown. When "
         "it's just conversation — Brady, or a friend he puts on the mic — BE good company: warm, "
         "a little personality, react to what they actually said, carry the thread, and toss back "

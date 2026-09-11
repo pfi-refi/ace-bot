@@ -44,3 +44,8 @@ After approval: deploy candidate, check health version v2.0.1-review-candidate; 
 Rollback to the verified prior deployment if smoke checks fail. Keep ace_review records for recovery. Returning to the baseline also restores the old approval and static-source defects, so rollback requires awareness of those unresolved risks.
 
 The local bridge worker is a separate install with its own file backup and CLI authentication verification. Do not simply re-enable it after login while assuming server claims recover correctly.
+
+
+## Upgrade-awareness check for every release
+
+Update `ace2/CHANGELOG.md` when user-facing behavior changes. Keep newest entries first, concise, and include limitations and verification boundaries. The most recent five complete entries must fit within6000 characters; do not put planned work among shipped abilities. Both voice and typed context must receive the shared upgrade block. Run `tests/test_upgrade_awareness.py` through unittest discovery before release. Notes do not prove credentials or provider health.
