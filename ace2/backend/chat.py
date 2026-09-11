@@ -2798,6 +2798,30 @@ def _upgrade_awareness() -> str:
     )
 
 
+def _expressive_line() -> str:
+    """Audio tags, but ONLY when the published voice will actually perform them.
+
+    Brady enabled Expressive Mode (Eleven v3) on 11 Sept. The tags come from the LLM, not
+    from ElevenLabs — nothing emits them unless Ace is told he can. But on a Flash voice the
+    same tag is READ ALOUD as the word, so this is gated on what the agent actually publishes
+    rather than on a setting someone remembered to keep in sync. voice.expressive_ok() is
+    refreshed by the startup audit and by every /diag read; it defaults to False.
+
+    TYPED TURNS NEVER GET THIS LINE. It lives in the voice context only, because a "[laughs]"
+    in a chat bubble is just broken text.
+    """
+    try:
+        from . import voice
+        if not voice.expressive_ok():
+            return ""
+    except Exception:
+        return ""
+    return ("You can use audio tags — [laughs], [sighs], [exhales], [whispers] — and the voice "
+            "will perform them. Use them the way a person actually does: rarely, and only "
+            "when the moment earns it. A tag in every reply is worse than none, and a tag on "
+            "bad news is wrong. Never tag a number, a date or a commitment. ")
+
+
 def _recap_block() -> str:
     """The current recap for context (prefers the warm _CTX copy; falls back to a Postgres read)."""
     recap = _CTX.get("recap") or ""
@@ -2905,6 +2929,7 @@ async def _fast_context() -> str:
         "Sending and deleting are "
         "GATED: follow the tool's actual approval instructions. When it requires More → Review, "
         "direct Brady there; spoken yes alone is not authorization to execute the proposal. "
+        + _expressive_line() +
         "Keep spoken replies short and natural — a sentence or two, no lists or markdown. When "
         "it's just conversation — Brady, or a friend he puts on the mic — BE good company: warm, "
         "a little personality, react to what they actually said, carry the thread, and toss back "

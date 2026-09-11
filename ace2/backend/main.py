@@ -286,8 +286,16 @@ def _resume_break(text: str, after_tool: bool, tail: str = "") -> str:
     return text
 
 
+# An audio tag is a DIRECTION, not something Ace said. ElevenLabs resends the whole
+# transcript each turn, so leaving them in is how "[laughs]" becomes a verbal tic — the same
+# mimicry loop the filler scrubbing above exists to stop. Lowercase single words only, so a
+# bracketed proper noun in his actual speech survives.
+_AUDIO_TAG = re.compile(r"\[[a-z][a-z ]{0,18}\]\s*")
+
+
 def _strip_voice_noise(text: str) -> str:
-    t = _NOISE_CONT.sub("", text)
+    t = _AUDIO_TAG.sub("", text)
+    t = _NOISE_CONT.sub("", t)
     t = _NOISE_LEAD.sub("", t)
     for line in _NOISE_LINES:
         t = t.replace(line, "")

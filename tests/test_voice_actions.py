@@ -2381,3 +2381,69 @@ class CalendarRescheduleTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(out.state, ops.UNKNOWN)
         self.assertNotEqual(out.state, ops.COMPLETED)
+
+
+# ── EXPRESSIVE AUDIO TAGS (2026-09-11, Brady enabled Expressive Mode) ──────────
+class ExpressiveTagTests(unittest.TestCase):
+    """Tags come from the LLM, not from ElevenLabs — Ace emits none unless told he can. But
+    on a Flash voice the same tag is READ ALOUD as the word, so it is gated on what the agent
+    actually publishes rather than on a setting someone has to remember to keep in sync."""
+
+    def setUp(self):
+        from ace2.backend import voice
+        self._prev = dict(voice._EXPRESSIVE)
+
+    def tearDown(self):
+        from ace2.backend import voice
+        voice._EXPRESSIVE.update(self._prev)
+
+    def _model(self, name):
+        from ace2.backend import voice
+        voice._EXPRESSIVE.update(ok=("v3" in name.lower()), model=name)
+
+    def test_silent_on_a_flash_voice(self):
+        """The failure this guards: "[laughs]" spoken as the word "laughs"."""
+        from ace2.backend.chat import _expressive_line
+        self._model("eleven_flash_v2_5")
+        self.assertEqual(_expressive_line(), "")
+
+    def test_offered_on_a_v3_voice(self):
+        from ace2.backend.chat import _expressive_line
+        self._model("eleven_v3_conversational")
+        line = _expressive_line()
+        self.assertIn("[laughs]", line)
+        self.assertIn("rarely", line)
+
+    def test_it_defaults_to_off(self):
+        """An unread or failed audit must not turn tags on."""
+        from ace2.backend import voice
+        from ace2.backend.chat import _expressive_line
+        voice._EXPRESSIVE.update(ok=False, model="")
+        self.assertEqual(_expressive_line(), "")
+
+    def test_the_line_never_reaches_a_typed_turn(self):
+        """A tag in a chat bubble is just broken text, so it lives in the voice context only.
+
+        Reads each function's OWN source via inspect rather than slicing the module between
+        names — that trick has now produced two tests in this project that passed while the
+        code was wrong."""
+        import inspect
+        from ace2.backend import chat
+        self.assertIn("_expressive_line()", inspect.getsource(chat._fast_context))
+        self.assertNotIn("_expressive_line()", inspect.getsource(chat._live_context))
+
+    def test_a_tag_is_scrubbed_before_it_round_trips(self):
+        """ElevenLabs resends the whole transcript, so a tag left in becomes a verbal tic —
+        the same mimicry loop the filler scrubbing exists to stop."""
+        from ace2.backend.main import _strip_voice_noise
+        self.assertEqual(_strip_voice_noise("[laughs] Booked it for Tuesday."),
+                         "Booked it for Tuesday.")
+        self.assertEqual(_strip_voice_noise("Right. [sighs] That one's stuck."),
+                         "Right. That one's stuck.")
+
+    def test_scrubbing_does_not_eat_his_actual_words(self):
+        from ace2.backend.main import _strip_voice_noise
+        for kept in ("The [Groundworks] job is on.",
+                     "Line item [3] on the invoice.",
+                     "He said [and I quote] no."):
+            self.assertEqual(_strip_voice_noise(kept), kept)

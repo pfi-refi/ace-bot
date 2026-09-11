@@ -130,6 +130,16 @@ async def convai_signed_url():
         return None, str(e)
 
 
+# Cached from the last successful audit (startup, and any /diag read). Defaults to OFF:
+# a wrong "yes" makes Ace say the word "laughs" out loud, a wrong "no" only costs expression.
+_EXPRESSIVE = {"ok": False, "model": ""}
+
+
+def expressive_ok() -> bool:
+    """True when the published voice model performs tags rather than reading them."""
+    return bool(_EXPRESSIVE["ok"])
+
+
 async def convai_agent_audit() -> dict:
     """Fetch the live agent config and boil it down to what we tune: which voice is
     actually published, the turn/timeout settings (incl. soft timeout), and which tools
@@ -165,9 +175,18 @@ async def convai_agent_audit() -> dict:
             r"|\b(?:January|February|March|April|May|June|July|August|September|October|"
             r"November|December)\s+\d{1,2}\b",
             (ptext + " " + first_msg))
+        # WHICH TTS MODEL IS PUBLISHED, so Ace can tell whether an expressive tag will be
+        # PERFORMED or READ ALOUD (2026-09-11). "[laughs]" on a Flash voice is spoken as the
+        # literal words, which is worse than not using tags at all — so this is the switch,
+        # read from the agent rather than guessed or configured twice.
+        _tts = conv.get("tts") or {}
+        _model = str(_tts.get("model_id") or _tts.get("model") or "")
+        _EXPRESSIVE.update(ok=("v3" in _model.lower()), model=_model)
         return {
             "ok": True,
-            "voice_id": (conv.get("tts") or {}).get("voice_id"),
+            "tts_model": _model,
+            "expressive": _EXPRESSIVE["ok"],
+            "voice_id": _tts.get("voice_id"),
             "turn": conv.get("turn") or {},          # turn_timeout / soft timeout live here
             "tool_names": [t.get("name") for t in tools if isinstance(t, dict)],
             "built_in_tools": list((prompt.get("built_in_tools") or {}).keys())
