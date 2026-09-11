@@ -3330,14 +3330,102 @@ def interrupted_note(ops_list: list) -> str:
 # This is a bounded guard for explicit action requests, not semantic proof for arbitrary
 # language. We deliberately buffer these turns before speech: retracting a false "done"
 # after ElevenLabs has spoken it is too late. Normal discussion keeps token streaming.
+#
+# THE VERB IS NOT THE REQUEST (2026-09-11, from a live call). The first version matched these
+# verbs ANYWHERE in the sentence, so Brady saying "I will not be reaching out to Armando, I've
+# made my choice to go with Chris… after his BUILD for the Nigel" was treated as an instruction
+# to go do something. He got a receipt dump instead of an answer.
+#
+# What separates an instruction from a mention is not the word, it is who is being asked. So
+# the verb now has to sit somewhere an instruction sits: at the start of a clause (an
+# imperative — "add that to Wednesday"), or behind a marker that hands it to Ace ("can you
+# add", "please add", "go ahead and add", "I need you to add"). A verb whose subject is Brady
+# or a third party ("I will build", "his build", "Chris created") is conversation.
+_ACTION_VERB = re.compile(
+    r"\b(?:send|delete|remove|reschedule|move|cancel|schedule|book|create|add|update|"
+    r"save|record|capture|mark|complete|close|reopen|change|put|set|file|remember|"
+    r"log|lock|start|build|make|take)\b")
+
+# The left context that makes the NEXT verb an instruction. Anchored at the end, so it is
+# judged against what immediately precedes the verb, never the whole sentence.
+# CONNECTORS ARE NOT INSTRUCTIONS. "and", "then", "now", "also" were in this set first and
+# they were the main source of false guards: "...tomorrow and make sure", "I could probably go
+# out and start", "now, when I first start" are all Brady narrating, not asking. They cost
+# nothing to drop, because a real instruction carries an imperative or a "you" form SOMEWHERE
+# in the sentence and one match is enough to guard the whole turn.
+_INSTRUCTION_LEAD = re.compile(
+    r"(?:"
+    r"^\W*"                                              # utterance-initial imperative
+    r"|[.!?;:]\s*(?:please\s+|then\s+|also\s+)?"         # a new sentence starting with one
+    r"|\b(?:please|kindly)\s+"
+    r"|\b(?:can|could|would|will|do)\s+you\s+(?:please\s+|also\s+|just\s+)*"
+    r"|\byou\s+(?:can|could|should|need\s+to|have\s+to)\s+(?:please\s+|also\s+|just\s+)*"
+    # "what I want you to do IS TAKE the schedule … and put it on my calendar" — a real
+    # instruction that produced real calendar events. The verb can sit a few words after
+    # "you to", so allow a short window rather than requiring adjacency.
+    r"|\b(?:need|want|would\s+like|'d\s+like)\s+you\s+to\s+(?:\w+\s+){0,3}"
+    r"|\bgo\s+ahead\s+and\s+"
+    r"|\blet'?s\s+"
+    r"|\bhow\s+about\s+(?:you\s+)?"
+    r")\s*$", re.IGNORECASE)
+
+_BARE_AFFIRMATIVE = re.compile(
+    r"(?:yes|yep|yeah|ok|okay|sure|approved|go ahead|do it|do that)"
+    r"(?:[, ]+(?:please|and do (?:it|that)|do (?:it|that)))?[.! ]*")
+
+
 def action_request(text: str) -> bool:
-    text = (text or "").strip().lower()
-    return bool(re.search(
-        r"\b(send|delete|remove|reschedule|move|cancel|schedule|book|create|add|update|"
-        r"save|record|capture|mark|complete|close|reopen|change|put|set|file|remember|"
-        r"log|lock|start|build|make|take .* down)\b", text)
-        or re.fullmatch(r"(?:yes|yep|yeah|ok|okay|sure|approved|go ahead|do it|do that)"
-                        r"(?:[, ]+(?:please|and do (?:it|that)|do (?:it|that)))?[.! ]*", text))
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+    # "yes" / "go ahead" on its own is an approval of something already proposed.
+    if _BARE_AFFIRMATIVE.fullmatch(low):
+        return True
+    for m in _ACTION_VERB.finditer(low):
+        if _INSTRUCTION_LEAD.search(low[:m.start()]):
+            return True
+    return False
+
+
+# Refusal text is a mixed bag. Some of it is written FOR THE MODEL — "USE start_task INSTEAD",
+# "NOT AVAILABLE — mcp_create_doc is deliberately not enabled" — and reading that to Brady is
+# gibberish at best. But plenty of it is written for a person: "Could not update item: no open
+# item matches 'Armando'" is exactly the answer he needs.
+#
+# Dropping ALL of it (2026-09-11) is why "Why couldn't you update it?" had no answer available
+# anywhere in the system. So the model-directed parts are stripped and the human part is kept.
+_MODEL_DIRECTED = re.compile(
+    r"\b(?:use\s+\w+\s+instead|not\s+available|call\s+it\s+again|"
+    r"do\s+not\s+tell\s+him|tell\s+him\s+to)\b", re.I)
+_TOOL_TOKEN = re.compile(r"\b(?:mcp_[a-z0-9_]+|[a-z]+_[a-z_]{3,})\b")
+
+
+def user_safe_reason(text: str, limit: int = 180) -> str:
+    """The part of a refusal Brady can actually use, or "" if none of it is for him."""
+    t = (text or "").strip().lstrip("⚠️◆✅⚠ ").strip()
+    if not t:
+        return ""
+    kept = []
+    for sentence in re.split(r"(?<=[.!?])\s+", t):
+        if not sentence.strip():
+            continue
+        if _MODEL_DIRECTED.search(sentence) or _TOOL_TOKEN.search(sentence):
+            continue
+        kept.append(sentence.strip())
+    out = " ".join(kept).strip()
+    return (out[:limit].rstrip() + "…") if len(out) > limit else out
+
+
+def guarded_reply(turn_text: str, operations: list) -> str:
+    """Ace's answer with unproven success claims suppressed, then the receipt beneath it.
+
+    A RECEIPT IS AN ADDITION, NOT A REPLACEMENT. This was `receipt or cleaned_text`, so any
+    turn that touched a tool lost Ace's whole answer and Brady got only the receipt block.
+    Module level, not inline in stream_turn, so the test runs this exact function.
+    """
+    spoken = unsupported_action_reply(turn_text or "").strip()
+    receipt = action_receipt_reply(operations or [])
+    return "\n\n".join(x for x in (spoken, receipt) if x)
 
 
 def action_receipt_reply(operations: list) -> str:
@@ -3356,8 +3444,13 @@ def action_receipt_reply(operations: list) -> str:
         if state not in labels:
             continue
         name = tools.TOOL_LABELS.get(operation.get("tool"), "Requested action").capitalize()
-        # Refusals contain instructions addressed to the model, not user-facing evidence.
-        detail = str(operation.get("text") or "").strip() if state == OP_DONE else ""
+        # A completed op's text IS the receipt. For anything else the prose is NOT evidence
+        # and must never be echoed — it can be model-written, which is the whole reason this
+        # layer exists. A failure instead carries an explicit `reason`, set only where the
+        # text is known to be the TOOL's own output (see stream_turn, where the adapter
+        # result lands) and already passed through user_safe_reason there.
+        detail = (str(operation.get("text") or "").strip() if state == OP_DONE
+                  else str(operation.get("reason") or "").strip())
         lines.append(f"{labels[state]} — {detail or name}.")
     if lines:
         lines.append("These results cover only the actions listed here.")
@@ -3560,10 +3653,21 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             if turn_text:
                 if guard_actions:
                     # Do not speak any model preamble before the tool has even run.
-                    # At the final answer, receipts replace model-written action claims.
                     if final.stop_reason not in ("tool_use", "pause_turn"):
-                        guarded = (action_receipt_reply(turn_ops)
-                                   or unsupported_action_reply("".join(turn_text)))
+                        # A RECEIPT IS AN ADDITION, NOT A REPLACEMENT (2026-09-11).
+                        # This used to be `receipt or cleaned_text`, so whenever ANY tool ran
+                        # Ace's entire answer was thrown away and Brady got only the receipt
+                        # block. He told Ace he was dropping Armando for Chris and the whole
+                        # reply came back as "Failed or refused… These results cover only the
+                        # actions listed here." — then asked "Why couldn't you update it?"
+                        # and got nothing, because the conversation had been deleted.
+                        #
+                        # The guard's job is to stop Ace CLAIMING work he did not do, and
+                        # unsupported_action_reply already does exactly that: it returns the
+                        # text unchanged unless it asserts a success, and swaps it for a
+                        # warning when it does. So suppress the claim, keep the conversation,
+                        # and append the receipt underneath it.
+                        guarded = guarded_reply("".join(turn_text), turn_ops)
                         full_reply.append(guarded)
                         await emit("delta", {"text": guarded})
                 else:
@@ -3846,6 +3950,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 _entry["text"] = result
                 _entry["state"] = classify_result(block.name, result, _is_read,
                                                   outcome=_outcome.get("state", ""))
+                # `result` here is the TOOL's return value, not model prose — the one place a
+                # refusal reason can be trusted. Sanitised now so the receipt layer never has
+                # to decide whether a string is safe. "Why couldn't you update it?" is
+                # answerable because of this line.
+                if _entry["state"] not in (OP_DONE, OP_READ, OP_UI):
+                    _entry["reason"] = user_safe_reason(result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

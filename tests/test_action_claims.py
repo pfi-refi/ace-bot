@@ -106,4 +106,94 @@ class Claims(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('Confirmed result', result)
         self.assertEqual('', chat.action_receipt_reply([{'state': chat.OP_READ, 'text': 'Found calendar events'}]))
 
+class ActionGuardScope(unittest.TestCase):
+    """THE VERB IS NOT THE REQUEST (2026-09-11, from a live call).
+
+    Brady said "I will not be reaching out to Armando, I've made my choice to go with Chris…
+    after his BUILD for the Nigel I will be doing Chris part time" and the word "build" put
+    the turn into action-guard mode. His whole reply came back as a receipt dump, and his
+    follow-up "Why couldn't you update it?" got nothing.
+
+    Measured against 120 real messages from his own history: the old matcher guarded 48 of
+    them (40%), this one guards 5 (4%), and all five are genuine instructions."""
+
+    def test_the_sentence_that_broke_it(self):
+        self.assertFalse(chat.action_request(
+            "I will not be reaching out to Armando I've made my choice to go with Chris "
+            "after the groundwork's section of everything and getting that going and then "
+            "after his build for the Nigel I will be doing Chris part time"))
+
+    def test_brady_narrating_his_own_day_is_not_an_instruction(self):
+        for said in ("I made another $51 today",
+                     "I could probably go out and start making some DoorDash money",
+                     "we're gonna lock everything in tomorrow",
+                     "he is on board with everything",
+                     "Armando is my upline and was my mentor at GFI",
+                     "budget review will be tomorrow after we pay a few bills"):
+            self.assertFalse(chat.action_request(said), said)
+
+    def test_real_instructions_still_guard(self):
+        for asked in ("send that email to Rebecca",
+                      "add Ken to Wednesday at 10",
+                      "please put the pour on Monday",
+                      "can you delete the gym block",
+                      "go ahead and send it",
+                      "I need you to make me a document",
+                      # the verb sits three words after "you to" — this one produced real
+                      # calendar events and MUST be guarded
+                      "what I want you to do is take that schedule and put it on my calendar"):
+            self.assertTrue(chat.action_request(asked), asked)
+
+    def test_a_bare_yes_is_still_an_approval(self):
+        for said in ("yes", "yep", "go ahead", "ok", "do it", "sure"):
+            self.assertTrue(chat.action_request(said), said)
+
+
+class GuardedReplyKeepsTheConversation(unittest.TestCase):
+    def test_the_receipt_is_appended_not_substituted(self):
+        """`receipt or text` is what deleted Brady's answer."""
+        out = chat.guarded_reply(
+            "Got it — Armando is off the list, Chris is the play.",
+            [{"tool": "update_item", "state": chat.OP_FAILED,
+              "reason": "Could not update item: no open item matches 'Armando'"}])
+        self.assertIn("Armando is off the list", out)          # his answer survived
+        self.assertIn("Failed or refused", out)                # and the truth came with it
+        self.assertIn("no open item matches", out)             # and it says WHY
+
+    def test_a_false_success_claim_is_still_suppressed(self):
+        out = chat.guarded_reply("I've updated the board for you.",
+                                 [{"tool": "update_item", "state": chat.OP_FAILED}])
+        self.assertNotIn("I've updated the board", out)
+        self.assertIn("verified action result", out)
+
+    def test_plain_conversation_with_no_operations_is_untouched(self):
+        said = "That maps — Josh first, then Armando if you change your mind."
+        self.assertEqual(chat.guarded_reply(said, []), said)
+
+
+class FailureReasons(unittest.TestCase):
+    def test_a_human_reason_survives(self):
+        self.assertEqual(
+            chat.user_safe_reason("⚠️ Could not update item: no open item matches 'Armando'"),
+            "Could not update item: no open item matches 'Armando'")
+
+    def test_model_directed_refusals_are_stripped(self):
+        self.assertEqual(chat.user_safe_reason(
+            "USE start_task INSTEAD. mcp_create_spreadsheet creates something "
+            "without checking it."), "")
+
+    def test_operation_prose_is_never_echoed_for_a_pending_state(self):
+        """Codex's invariant, kept: only an explicit `reason` may surface."""
+        for state in (chat.OP_QUEUED, chat.OP_REVIEW, chat.OP_UNKNOWN, chat.OP_FAILED):
+            out = chat.action_receipt_reply(
+                [{"state": state, "tool": "create_folder", "text": "Misleading finished prose"}])
+            self.assertNotIn("Misleading", out)
+
+    def test_but_an_explicit_reason_does_surface(self):
+        out = chat.action_receipt_reply(
+            [{"state": chat.OP_FAILED, "tool": "update_item",
+              "reason": "Could not update item: no open item matches 'Armando'"}])
+        self.assertIn("no open item matches", out)
+
+
 if __name__ == '__main__': unittest.main()
