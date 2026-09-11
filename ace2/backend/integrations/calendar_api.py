@@ -145,9 +145,9 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
                 ).execute()
                 for event in result.get("items", []):
                     event_id = event.get("id", "")
-                    if event_id in seen_ids:
+                    if (cal_id, event_id) in seen_ids:
                         continue
-                    seen_ids.add(event_id)
+                    seen_ids.add((cal_id, event_id))
                     summary = event.get("summary", "No title")
                     if _event_dropped(summary):
                         continue   # BPM / interview / training block — filtered from his view
@@ -166,6 +166,11 @@ def get_events_structured(days: int = 7, back_days: int = 0) -> list:
                         all_day = True
                     is_primary = cal_id in _PRIMARY_CAL_IDS
                     events.append({
+                        "event_id": event_id,
+                        "calendar_id": cal_id,
+                        "recurring_event_id": event.get("recurringEventId", ""),
+                        "original_start": event.get("originalStartTime", {}),
+                        "end": event.get("end", {}),
                         "start": start_dt_str,
                         "iso": dt.isoformat(),
                         "date": dt.strftime("%Y-%m-%d"),
@@ -210,9 +215,9 @@ def get_calendar_range(start_offset_days: int = 0, num_days: int = 7) -> str:
                 ).execute()
                 for ev in res.get("items", []):
                     eid = ev.get("id", "")
-                    if eid in seen:
+                    if (cal["id"], eid) in seen:
                         continue
-                    seen.add(eid)
+                    seen.add((cal["id"], eid))
                     if _event_dropped(ev.get("summary", "")):
                         continue   # BPM / interview / training block
                     start = ev.get("start", {})
@@ -225,7 +230,10 @@ def get_calendar_range(start_offset_days: int = 0, num_days: int = 7) -> str:
                     else:
                         dt = EASTERN.localize(datetime.strptime(s, "%Y-%m-%d"))
                         tstr = "All day"
-                    events.append((dt, tstr, ev.get("summary", "No title")))
+                    identity = f"calendar_id={cal['id']}; event_id={eid}"
+                    if ev.get("recurringEventId"):
+                        identity += f"; recurring_event_id={ev['recurringEventId']}; original_start={ev.get('originalStartTime', {})}"
+                    events.append((dt, tstr, ev.get("summary", "No title"), identity))
             except Exception as e:
                 logger.warning("range cal '%s': %s", cal.get("summary"), e)
         span = f"{win_start.strftime('%b %-d')} – {win_end.strftime('%b %-d, %Y')}"
@@ -233,12 +241,12 @@ def get_calendar_range(start_offset_days: int = 0, num_days: int = 7) -> str:
             return f"No events on the calendar for {span}."
         events.sort(key=lambda x: x[0])
         lines, cur = [f"📅 {span}:"], None
-        for dt, tstr, title in events:
+        for dt, tstr, title, identity in events:
             dstr = dt.strftime("%A, %B %-d")
             if dstr != cur:
                 lines.append(f"\n{dstr}:")
                 cur = dstr
-            lines.append(f"  {tstr} — {title}")
+            lines.append(f"  {tstr} — {title} [{identity}]")
         return "\n".join(lines)
     except Exception as e:
         logger.error("get_calendar_range error: %s", e)
@@ -270,9 +278,9 @@ def get_calendar_events(days_ahead: int = 1) -> str:
                 ).execute()
                 for event in events_result.get("items", []):
                     event_id = event.get("id", "")
-                    if event_id in seen_ids:
+                    if (cal_id, event_id) in seen_ids:
                         continue
-                    seen_ids.add(event_id)
+                    seen_ids.add((cal_id, event_id))
                     summary = event.get("summary", "No title")
                     start = event.get("start", {})
                     start_dt_str = start.get("dateTime", start.get("date", ""))
@@ -350,9 +358,9 @@ def get_tomorrow_events() -> str:
                 ).execute()
                 for event in events_result.get("items", []):
                     event_id = event.get("id", "")
-                    if event_id in seen_ids:
+                    if (cal_id, event_id) in seen_ids:
                         continue
-                    seen_ids.add(event_id)
+                    seen_ids.add((cal_id, event_id))
                     summary = event.get("summary", "No title")
                     start_info = event.get("start", {})
                     start_dt_str = start_info.get("dateTime", start_info.get("date", ""))
@@ -704,3 +712,77 @@ def delete_calendar_event(title: str, date_str: str, calendar_id: str = PFI_CALE
     except Exception as e:
         logger.error("Calendar delete error: %s", e)
         return False, str(e)
+
+
+def reschedule_calendar_event(calendar_id: str, event_id: str,
+                              start_datetime: str, end_datetime: str,
+                              expected_weekday: str = "") -> tuple:
+    """Move one existing timed, non-invitation event, retaining its provider identity.
+
+    Only the existing business write calendar is supported. Shared calendars and series
+    edits need a separate reviewed implementation. Never infer an id from a title and
+    never convert an all-day event or a recurring master to a timed single event.
+    Returns (success, message, adapter_state). After dispatch any uncertain result is
+    UNKNOWN, including a lost response; it must not trigger delete/create or blind retry.
+    """
+    dispatched = False
+    try:
+        if not calendar_id or calendar_id != PFI_CALENDAR_ID or not event_id:
+            return False, "Nothing changed: specify an event id on the business calendar; other calendars are not enabled for rescheduling.", ADAPTER_NEEDS_REVIEW
+        # Require an explicit offset: guessing a timezone can silently move an appointment.
+        import re
+        def parse(value):
+            if not isinstance(value, str) or not re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value):
+                raise ValueError("Use a full ISO date/time with UTC offset for start and end")
+            result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if result.utcoffset() is None:
+                raise ValueError("A UTC offset is required")
+            return result
+        start, end = parse(start_datetime), parse(end_datetime)
+        if expected_weekday:
+            weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+            expected = str(expected_weekday).strip().lower()
+            if expected not in weekdays or start.astimezone(EASTERN).weekday() != weekdays.index(expected):
+                raise ValueError("The requested weekday does not match the start date in Eastern time; clarify before changing anything")
+        if end <= start:
+            raise ValueError("End must be after start")
+        service = build("calendar", "v3", credentials=get_google_creds())
+        events = service.events()
+        current = events.get(calendarId=calendar_id, eventId=event_id).execute()
+        if current.get("id") != event_id or current.get("status") == "cancelled":
+            return False, "Nothing changed: the requested active event could not be confirmed.", ADAPTER_NEEDS_REVIEW
+        if (current.get("attendees") or current.get("attendeesOmitted")
+                or current.get("organizer", {}).get("self") is not True
+                or current.get("recurrence")
+                or current.get("eventType", "default") != "default"
+                or not current.get("start", {}).get("dateTime")
+                or not current.get("end", {}).get("dateTime")):
+            return False, "Nothing changed: invitations, recurring series, all-day events, and events not organized by this account need manual review. A specific ordinary recurring occurrence is supported.", ADAPTER_NEEDS_REVIEW
+        if not current.get("etag"):
+            return False, "Nothing changed: Google did not supply an event revision for a safe update.", ADAPTER_NEEDS_REVIEW
+        body = {"start": {"dateTime": start.isoformat()},
+                "end": {"dateTime": end.isoformat()}}
+        for field in ("start", "end"):
+            if current[field].get("timeZone"):
+                body[field]["timeZone"] = current[field]["timeZone"]
+        if any(_norm_stamp(current.get(field)) != _norm_stamp(body[field]) for field in body):
+            request = events.patch(calendarId=calendar_id, eventId=event_id,
+                                   body=body, sendUpdates="none")
+            request.headers["If-Match"] = current["etag"]
+            dispatched = True
+            request.execute()
+        # An unchanged request also needs this read: do not infer success from input.
+        actual = events.get(calendarId=calendar_id, eventId=event_id).execute()
+        verified = (actual.get("id") == event_id
+                    and actual.get("status") != "cancelled"
+                    and actual.get("recurringEventId") == current.get("recurringEventId")
+                    and actual.get("originalStartTime") == current.get("originalStartTime")
+                    and all(_norm_stamp(actual.get(f)) == _norm_stamp(body[f]) for f in body))
+        if not verified:
+            return False, "UNVERIFIED: calendar read-back did not match the requested event and times. Inspect the event before trying again.", ADAPTER_UNKNOWN
+        return True, event_id, ADAPTER_COMPLETED
+    except Exception as exc:
+        if dispatched:
+            return False, "UNVERIFIED: the update was dispatched but its final outcome could not be confirmed. Inspect the existing event before retrying.", ADAPTER_UNKNOWN
+        return False, f"Nothing changed: rescheduling could not start ({exc}).", ADAPTER_FAILED_BEFORE_DISPATCH

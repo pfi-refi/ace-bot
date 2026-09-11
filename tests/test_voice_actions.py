@@ -2339,35 +2339,24 @@ class CalendarRescheduleTests(unittest.TestCase):
     again for the 16th. Neither event exists; verified independently against Google, which
     holds only two Ken events, both in August.
 
-    Root cause: THERE IS NO MOVE TOOL. Ace has create_calendar_event and
-    delete_calendar_event and nothing else, so "adjust it" had no implementation. The
-    outcome machinery cannot catch this — it verifies what a tool RETURNED, and no tool
-    was called at all."""
+    Historical root cause: no move tool existed. The verified exact-ID reschedule
+    path now provides the missing operation; action claims still need separate receipt
+    enforcement when the model calls no tool at all."""
 
-    def test_ace_has_no_way_to_move_an_event(self):
-        """The premise. If a reschedule tool is ever added, this test should fail and the
-        descriptions below should be rewritten rather than the test deleted."""
-        from ace2.backend import tools
-        names = {t["name"] for t in tools.TOOLS}
-        self.assertIn("create_calendar_event", names)
-        self.assertIn("delete_calendar_event", names)
-        for absent in ("move_calendar_event", "update_calendar_event",
-                       "reschedule_calendar_event", "edit_calendar_event"):
-            self.assertNotIn(absent, names)
+    def test_exact_identity_reschedule_is_available(self):
+        from ace2.backend import tools, ops
+        tool = next(t for t in tools.TOOLS if t["name"] == "reschedule_calendar_event")
+        self.assertEqual(set(tool["input_schema"]["required"]),
+                         {"calendar_id", "event_id", "start_datetime", "end_datetime"})
+        self.assertIn(tool["name"], ops.JOURNALLED)
+        self.assertIn(tool["name"], ops.REQUIRE_JOURNAL)
 
-    def test_the_create_tool_states_the_limit(self):
+    def test_create_and_delete_direct_moves_to_verified_tool(self):
         from ace2.backend import tools
-        d = next(t for t in tools.TOOLS if t["name"] == "create_calendar_event")["description"]
-        low = d.lower()
-        self.assertIn("no way to move", low)
-        self.assertIn("never say an event was moved", low)
-
-    def test_the_delete_tool_says_it_is_half_a_reschedule(self):
-        from ace2.backend import tools
-        d = next(t for t in tools.TOOLS if t["name"] == "delete_calendar_event")["description"]
-        low = d.lower()
-        self.assertIn("reschedule", low)
-        self.assertIn("approval", low)
+        for name in ("create_calendar_event", "delete_calendar_event"):
+            d = next(t for t in tools.TOOLS if t["name"] == name)["description"]
+            self.assertIn("reschedule_calendar_event", d)
+            self.assertNotIn("no edit tool exists", d)
 
     def test_deleting_still_requires_approval(self):
         """A reschedule must not become a way around the delete gate."""

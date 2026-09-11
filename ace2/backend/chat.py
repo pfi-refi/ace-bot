@@ -3309,6 +3309,63 @@ def interrupted_note(ops_list: list) -> str:
     return "\n".join(lines)
 
 
+# This is a bounded guard for explicit action requests, not semantic proof for arbitrary
+# language. We deliberately buffer these turns before speech: retracting a false "done"
+# after ElevenLabs has spoken it is too late. Normal discussion keeps token streaming.
+def action_request(text: str) -> bool:
+    text = (text or "").strip().lower()
+    return bool(re.search(
+        r"\b(send|delete|remove|reschedule|move|cancel|schedule|book|create|add|update|"
+        r"save|record|capture|mark|complete|close|reopen|change|put|set|file|remember|"
+        r"log|lock|start|build|make|take .* down)\b", text)
+        or re.fullmatch(r"(?:yes|yep|yeah|ok|okay|sure|approved|go ahead|do it|do that)"
+                        r"(?:[, ]+(?:please|and do (?:it|that)|do (?:it|that)))?[.! ]*", text))
+
+
+def action_receipt_reply(operations: list) -> str:
+    """Render ONLY recorded operation states; queued/read results never prove mutation.
+
+    The record's own verifier/classifier is the trust boundary. This layer prevents the
+    conversational model from expanding one receipt into claims about additional work.
+    """
+    lines = []
+    labels = {OP_DONE: "Confirmed result", OP_QUEUED: "Started; not confirmed finished",
+              OP_REVIEW: "Waiting for your approval; not done",
+              OP_UNKNOWN: "Outcome unconfirmed; check before retrying",
+              OP_FAILED: "Failed or refused; no successful action confirmed"}
+    for operation in operations:
+        state = operation.get("state")
+        if state not in labels:
+            continue
+        name = tools.TOOL_LABELS.get(operation.get("tool"), "Requested action").capitalize()
+        # Refusals contain instructions addressed to the model, not user-facing evidence.
+        detail = str(operation.get("text") or "").strip() if state == OP_DONE else ""
+        lines.append(f"{labels[state]} — {detail or name}.")
+    if lines:
+        lines.append("These results cover only the actions listed here.")
+    return "\n".join(lines)
+
+
+def unsupported_action_reply(text: str) -> str:
+    # Target affirmative self-success or direct result assertions, not every mention
+    # of a past-tense verb. "I cannot move it" / "once created" / "you updated it"
+    # must remain useful conversation. This is bounded syntax, not semantic proof.
+    verbs = (r"sent|deleted|removed|moved|rescheduled|scheduled|booked|created|added|"
+             r"updated|saved|recorded|captured|marked|completed|closed|reopened|changed|"
+             r"filed|logged|remembered|started|built|done|taken care of|locked in")
+    affirmative = (
+        rf"\b(?:I|we)(?:['’]ve| have| had)?\s+(?:(?:just|already|successfully)\s+)*(?:{verbs})\b",
+        rf"(?:^|[.!?]\s+)(?:done|all set|taken care of|locked in)\b",
+        rf"\b(?:it|that|everything|the (?:event|appointment|task|file|email|document)|"
+        rf"your (?:event|appointment|task|file|email|document))\s+"
+        rf"(?:is|was|has been|['’]s)\s+(?:(?:now|successfully)\s+)*(?:{verbs}|all set)\b",
+    )
+    if any(re.search(pattern, text, re.I) for pattern in affirmative):
+        return ("I don't have a verified action result for that request. "
+                "Please check the actual record before treating it as complete.")
+    return text
+
+
 async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
@@ -3368,6 +3425,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         logger.warning("planning notebook unavailable: %s", type(e).__name__)
 
     full_reply = []
+    guard_actions = action_request(user_text)
     confirmations = []
     turn_ops = []          # structured per-tool outcomes, for an honest interrupted record
     handed_off = False   # a build_on_screen handoff already fired this turn — don't double-fire
@@ -3457,7 +3515,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 async for event in stream:
                     if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
                         turn_text.append(event.delta.text)
-                        await emit("delta", {"text": event.delta.text})
+                        if not guard_actions:
+                            await emit("delta", {"text": event.delta.text})
                 final = await stream.get_final_message()
 
             # COST INSTRUMENTATION (Phase 6, 2026-09-06). Nothing measured the cache before
@@ -3481,7 +3540,16 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 pass
 
             if turn_text:
-                full_reply.append("".join(turn_text))
+                if guard_actions:
+                    # Do not speak any model preamble before the tool has even run.
+                    # At the final answer, receipts replace model-written action claims.
+                    if final.stop_reason not in ("tool_use", "pause_turn"):
+                        guarded = (action_receipt_reply(turn_ops)
+                                   or unsupported_action_reply("".join(turn_text)))
+                        full_reply.append(guarded)
+                        await emit("delta", {"text": guarded})
+                else:
+                    full_reply.append("".join(turn_text))
 
             # Web-search receipts: the API already executed these server-side — nothing to
             # run, but Brady should SEE that Ace looked something up (and what he searched).
@@ -3773,6 +3841,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         else:
             logger.warning("hit MAX_TOOL_ITERS for: %s", user_text[:80])
 
+        if guard_actions and not full_reply and turn_ops:
+            # Tool-loop exhaustion and a passthrough ending can bypass a final model reply.
+            receipt_reply = action_receipt_reply(turn_ops)
+            if receipt_reply:
+                full_reply.append(receipt_reply)
+                await emit("delta", {"text": receipt_reply})
         reply = "".join(full_reply).strip()
         if not reply and not passthrough_called:
             # An empty completion makes ElevenLabs treat the turn as an LLM failure and
@@ -3806,7 +3880,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     except asyncio.CancelledError:
         partial = "".join(full_reply)
         tail = "".join(turn_text) if "turn_text" in locals() else ""
-        if tail and not partial.endswith(tail):
+        if tail and not guard_actions and not partial.endswith(tail):
             partial += tail
         if partial:
             try:

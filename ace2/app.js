@@ -638,10 +638,10 @@
   function connectWS() {
     var ws; try { ws = new WebSocket(wsURL()); } catch (e) { setLink(false); scheduleReconnect(); return; }
     state.ws = ws;
-    ws.onopen = function () { state.wsReady = true; state.reconnectDelay = 1000; setLink(true); syncTaskCards(); };
-    ws.onclose = function (ev) { state.wsReady = false; setLink(false); if (ev && ev.code === 4401) { state.busy = false; toLogin(); return; } settleTurn(); scheduleReconnect(); };
+    ws.onopen = function () { if (state.ws !== ws) return; state.wsReady = true; state.reconnectDelay = 1000; setLink(true); syncTaskCards(); };
+    ws.onclose = function (ev) { if (state.ws !== ws) return; state.wsReady = false; setLink(false); if (ev && ev.code === 4401) { state.busy = false; toLogin(); return; } settleTurn(); scheduleReconnect(); };
     ws.onerror = function () { setLink(false); };
-    ws.onmessage = function (ev) { try { handleWSEvent(JSON.parse(ev.data)); } catch (e) {} };
+    ws.onmessage = function (ev) { if (state.ws !== ws) return; try { handleWSEvent(JSON.parse(ev.data)); } catch (e) {} };
   }
   function scheduleReconnect() { setTimeout(connectWS, state.reconnectDelay); state.reconnectDelay = Math.min(15000, state.reconnectDelay * 1.7); }
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { syncTaskCards(); if (!state.wsReady) { state.reconnectDelay = 1000; connectWS(); } } });
@@ -830,9 +830,14 @@
 
   var streamMsg = null, activeTool = null;
   function handleWSEvent(msg) {
+    // Tagged replies belong to exactly one request. Stage broadcasts have no request id
+    // and may render cards, but cannot settle or extend the active typed request.
+    if (msg.request_id && msg.request_id !== activeRequest) return;
+    var turnEvent = ['start', 'delta', 'final', 'error', 'done'].indexOf(msg.type) >= 0;
+    if (activeRequest && turnEvent && msg.request_id !== activeRequest) return;
     // Proof of life. A turn streaming deltas or running tools is working, however long it
     // takes; only one that says nothing at all for BUSY_QUIET_MS is treated as dead.
-    if (state.busy) armBusyWatch();
+    if (state.busy && (!activeRequest || msg.request_id === activeRequest)) armBusyWatch();
     switch (msg.type) {
       case 'start': removeTyping(); setOrbState('speaking'); streamMsg = beginAceStream(); break;
       case 'delta': if (!streamMsg) streamMsg = beginAceStream(); appendToStream(streamMsg, msg.text); break;
@@ -898,6 +903,7 @@
      A turn still runs alone — overlapping them is what the busy flag is FOR — but what he
      said is now held and sent when the turn settles, and he can see it waiting. */
   var pendingSays = [], PENDING_MAX = 4;
+  var activeRequest = null, requestSerial = 0;
 
   // The status sits in a REAL NODE, not a CSS ::after. A label that exists only as
   // `content:` is unreadable to a screen reader, unselectable, and invisible to anything that
@@ -959,7 +965,9 @@
     }, BUSY_QUIET_MS);
   }
 
-  function settleTurn() {
+  function settleTurn(requestId) {
+    if (requestId && requestId !== activeRequest) return;
+    activeRequest = null;
     state.busy = false;
     if (busyWatch) { clearTimeout(busyWatch); busyWatch = null; }
     // ORDER MATTERS. Draining first means a held sentence starts its turn before the mic is
@@ -975,17 +983,19 @@
     text = (text || $('chat-input').value).trim();
     if (!text) return;
     if (state.busy) { queueSay(text); $('chat-input').value = ''; return; }
+    var requestId = Date.now().toString(36) + '-' + (++requestSerial);
+    activeRequest = requestId;
     state.busy = true; $('chat-input').value = '';
     $('chat-input').style.height = 'auto';   // collapse the grown textarea back to one line
     if (!alreadyShown) addUserMessage(text);
     showTyping(); setOrbState('listening'); armBusyWatch();
-    if (state.wsReady && state.ws) { state.ws.send(JSON.stringify({ message: text })); }
+    if (state.wsReady && state.ws) { state.ws.send(JSON.stringify({ message: text, request_id: requestId })); }
     else {
-      fetch(API + '/chat', { method: 'POST', headers: headers(), body: JSON.stringify({ message: text }) })
-        .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
-        .then(function (d) { removeTyping(); if (d.reply) { setOrbState('speaking'); addAceMessage(d.reply); speak(d.reply); }
-          (d.confirmations || []).forEach(renderConfirm); settleTurn(); })
-        .catch(function () { removeTyping(); addAceMessage('⚠️ Link failed. Reconnecting…'); settleTurn(); });
+      fetch(API + '/chat', { method: 'POST', headers: headers(), body: JSON.stringify({ message: text, request_id: requestId }) })
+        .then(function (r) { if (activeRequest !== requestId) return null; if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
+        .then(function (d) { if (activeRequest !== requestId) return; removeTyping(); if (d.reply) { setOrbState('speaking'); addAceMessage(d.reply); speak(d.reply); }
+          (d.confirmations || []).forEach(renderConfirm); settleTurn(requestId); })
+        .catch(function () { if (activeRequest !== requestId) return; removeTyping(); addAceMessage('⚠️ Link failed. Reconnecting…'); settleTurn(requestId); });
     }
   }
 

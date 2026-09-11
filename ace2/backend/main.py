@@ -1571,6 +1571,7 @@ async def bootstrap(days: int = 7):
 
 # ── Chat: streaming WebSocket + HTTP fallback ───────────────────────────────────
 class ChatReq(BaseModel):
+    request_id: str = ""
     message: str = ""
 
 
@@ -1585,8 +1586,10 @@ async def ws_chat(websocket: WebSocket):
     await websocket.accept()
     _stage_clients.add(websocket)   # register for voice-turn stage events (cards)
 
+    request_id = ""
+
     async def emit(event_type, payload):
-        await websocket.send_json({"type": event_type, **payload})
+        await websocket.send_json({"type": event_type, **payload, "request_id": request_id})
 
     # Heartbeat: during long turns (tools + thinking) the socket can sit silent for
     # 30-60s+ and the edge proxy drops it as idle — Brady sees it as "he timed out."
@@ -1609,6 +1612,7 @@ async def ws_chat(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
+            request_id = str(data.get("request_id") or "")[:128]
             text = (data.get("message") or "").strip()
             if not text:
                 await emit("error", {"text": "Empty message"})
@@ -1659,7 +1663,7 @@ async def chat_http(req: ChatReq):
             reply.append(payload.get("text", ""))
 
     await chat.stream_turn((req.message or "").strip(), emit)
-    return {"reply": "".join(reply), "confirmations": confirmations}
+    return {"reply": "".join(reply), "confirmations": confirmations, "request_id": req.request_id}
 
 
 # ── Voice: TTS proxy (ACE voice, key server-side) ───────────────────────────────

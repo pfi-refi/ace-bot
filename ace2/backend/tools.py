@@ -29,6 +29,7 @@ from . import brain, daybank, memory_db
 from . import ops
 from .integrations.calendar_api import (
     create_calendar_event,
+    reschedule_calendar_event,
     delete_calendar_event,
     get_calendar_range,
 )
@@ -58,12 +59,8 @@ TOOLS = [
             "Create a NEW event on Brady's Google Calendar. Use when Brady asks to "
             "schedule, book, add, or block time for something. Execute immediately — "
             "do not ask for confirmation unless the date/time is genuinely ambiguous. "
-            "THERE IS NO WAY TO MOVE, EDIT OR RESCHEDULE AN EXISTING EVENT. This tool and "
-            "delete_calendar_event are the only calendar writes that exist. If Brady asks "
-            "to move, adjust, push or change an event, say plainly that you cannot edit "
-            "one, and offer to delete it and create a replacement — deleting needs his "
-            "approval, so it is not automatic. NEVER say an event was moved, adjusted or "
-            "updated: nothing you can call does that, so the claim is always false."
+            "For moving an existing event use reschedule_calendar_event with its exact "
+            "calendar and event ids from get_calendar_range. Never delete/create a replacement."
         ),
         "input_schema": {
             "type": "object",
@@ -83,14 +80,33 @@ TOOLS = [
         },
     },
     {
+        "name": "reschedule_calendar_event",
+        "description": (
+            "Move ONE existing timed event on the business calendar using exact calendar_id "
+            "and event_id from get_calendar_range. Call only when Brady explicitly requests "
+            "a move and gives an unambiguous new time. Both times require ISO UTC offsets. "
+            "When Brady names a weekday pass expected_weekday verbatim as the full weekday "
+            "name; it must match the Eastern start date. A date alone cannot verify his intent. "
+            "This patches and reads back the SAME event, never delete/create. Attendee "
+            "invitations, shared/personal calendars, all-day events and entire recurring "
+            "series are not supported; a single recurring occurrence is supported. "
+            "Report moved only when the result is verified completed; otherwise report "
+            "the limitation or uncertain result, never silently create a replacement."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {key: {"type": "string"} for key in
+                           ("calendar_id", "event_id", "start_datetime", "end_datetime", "expected_weekday")},
+            "required": ["calendar_id", "event_id", "start_datetime", "end_datetime"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "delete_calendar_event",
         "description": (
             "Delete or cancel an event from Brady's Google Calendar. Use when Brady asks "
             "to cancel, remove, or delete a meeting. Deletes calendar events only. "
-            "Also the first half of a reschedule, since no edit tool exists: delete, then "
-            "create_calendar_event at the new time. Deleting requires Brady's approval, so "
-            "a reschedule is never finished in one step — do not report it as done until "
-            "the replacement has actually been created."
+            "For rescheduling use reschedule_calendar_event; never delete an event just to move it."
         ),
         "input_schema": {
             "type": "object",
@@ -719,6 +735,7 @@ WEB_SEARCH = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5
 TOOL_LABELS = {
     "web_search": "SEARCHING THE WEB",
     "create_calendar_event": "CREATING EVENT",
+    "reschedule_calendar_event": "MOVING EVENT",
     "delete_calendar_event": "REMOVING EVENT",
     "get_calendar_range": "READING CALENDAR",
     "add_task": "ADDING TASK",
@@ -806,6 +823,17 @@ def _do_create_calendar_event(title, start_datetime, end_datetime="", descriptio
         logger.error("create_calendar_event: %s", e)
         # This path is reached only before the adapter returned, i.e. argument parsing.
         return ops.Outcome(ops.FAILED_BEFORE_DISPATCH, f"⚠️ Calendar create failed: {e}")
+
+
+def _do_reschedule_calendar_event(calendar_id, event_id, start_datetime, end_datetime, expected_weekday="", **_):
+    ok, info, state = reschedule_calendar_event(calendar_id, event_id, start_datetime, end_datetime, expected_weekday)
+    if ok:
+        return ops.Outcome(ops.COMPLETED,
+                           f"Calendar move verified: {start_datetime} to {end_datetime}.", record_id=event_id,
+                           detail={"calendar_id": calendar_id, "event_id": event_id,
+                                   "start": start_datetime, "end": end_datetime,
+                                   "verified": True})
+    return ops.Outcome(state, str(info))
 
 
 def _do_delete_calendar_event(event_title, event_date, **_):
@@ -1084,6 +1112,7 @@ def _do_get_calendar_range(start_offset_days=0, num_days=7, **_):
 
 _DISPATCH = {
     "create_calendar_event": _do_create_calendar_event,
+    "reschedule_calendar_event": _do_reschedule_calendar_event,
     "delete_calendar_event": _do_delete_calendar_event,
     "get_calendar_range": _do_get_calendar_range,
     "add_task": _do_add_task,

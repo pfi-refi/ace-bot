@@ -47,7 +47,7 @@ STALE_SEC = int(os.environ.get("ACE2_OP_STALE", "120"))
 # Writes that execute inline. Outward/destructive tools are NOT here: they go through
 # review_store, which is already durable and single-use.
 JOURNALLED = frozenset({
-    "create_calendar_event", "add_task", "complete_task",
+    "create_calendar_event", "reschedule_calendar_event", "add_task", "complete_task",
     "capture_item", "update_item", "save_memory", "update_profile", "draft_email",
 })
 
@@ -56,7 +56,7 @@ JOURNALLED = frozenset({
 # have committed before the response was lost), and the journal is MANDATORY — without it
 # we cannot tell a redelivery from a new request, and the failure mode is a silent double
 # booking. Local writes are excluded so a Postgres outage still falls back to Drive.
-EXTERNAL = frozenset({"create_calendar_event", "add_task", "complete_task", "draft_email"})
+EXTERNAL = frozenset({"create_calendar_event", "reschedule_calendar_event", "add_task", "complete_task", "draft_email"})
 # Brief delivery joins this set (2026-09-08, Codex rev2). A check-then-act read of the
 # day marker is not atomic: two overlapping completions during a journal outage both read
 # "not delivered" and both push. Requiring the journal means an outage DEFERS delivery
