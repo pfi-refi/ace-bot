@@ -55,9 +55,15 @@ TOOLS = [
     {
         "name": "create_calendar_event",
         "description": (
-            "Create a new event on Brady's Google Calendar. Use when Brady asks to "
+            "Create a NEW event on Brady's Google Calendar. Use when Brady asks to "
             "schedule, book, add, or block time for something. Execute immediately — "
-            "do not ask for confirmation unless the date/time is genuinely ambiguous."
+            "do not ask for confirmation unless the date/time is genuinely ambiguous. "
+            "THERE IS NO WAY TO MOVE, EDIT OR RESCHEDULE AN EXISTING EVENT. This tool and "
+            "delete_calendar_event are the only calendar writes that exist. If Brady asks "
+            "to move, adjust, push or change an event, say plainly that you cannot edit "
+            "one, and offer to delete it and create a replacement — deleting needs his "
+            "approval, so it is not automatic. NEVER say an event was moved, adjusted or "
+            "updated: nothing you can call does that, so the claim is always false."
         ),
         "input_schema": {
             "type": "object",
@@ -80,7 +86,11 @@ TOOLS = [
         "name": "delete_calendar_event",
         "description": (
             "Delete or cancel an event from Brady's Google Calendar. Use when Brady asks "
-            "to cancel, remove, or delete a meeting. Deletes calendar events only."
+            "to cancel, remove, or delete a meeting. Deletes calendar events only. "
+            "Also the first half of a reschedule, since no edit tool exists: delete, then "
+            "create_calendar_event at the new time. Deleting requires Brady's approval, so "
+            "a reschedule is never finished in one step — do not report it as done until "
+            "the replacement has actually been created."
         ),
         "input_schema": {
             "type": "object",

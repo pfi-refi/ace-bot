@@ -2331,3 +2331,64 @@ class DateLadderTests(unittest.TestCase):
         from ace2.backend import chat
         src = inspect.getsource(chat)
         self.assertIn("date_ladder(now),", src)
+
+
+# ── CALENDAR CAPABILITY HONESTY (2026-09-11, from Brady's empty calendar) ──────
+class CalendarRescheduleTests(unittest.TestCase):
+    """Ace said "Done — Ken's follow-up moved to Wednesday, September 18th", then said it
+    again for the 16th. Neither event exists; verified independently against Google, which
+    holds only two Ken events, both in August.
+
+    Root cause: THERE IS NO MOVE TOOL. Ace has create_calendar_event and
+    delete_calendar_event and nothing else, so "adjust it" had no implementation. The
+    outcome machinery cannot catch this — it verifies what a tool RETURNED, and no tool
+    was called at all."""
+
+    def test_ace_has_no_way_to_move_an_event(self):
+        """The premise. If a reschedule tool is ever added, this test should fail and the
+        descriptions below should be rewritten rather than the test deleted."""
+        from ace2.backend import tools
+        names = {t["name"] for t in tools.TOOLS}
+        self.assertIn("create_calendar_event", names)
+        self.assertIn("delete_calendar_event", names)
+        for absent in ("move_calendar_event", "update_calendar_event",
+                       "reschedule_calendar_event", "edit_calendar_event"):
+            self.assertNotIn(absent, names)
+
+    def test_the_create_tool_states_the_limit(self):
+        from ace2.backend import tools
+        d = next(t for t in tools.TOOLS if t["name"] == "create_calendar_event")["description"]
+        low = d.lower()
+        self.assertIn("no way to move", low)
+        self.assertIn("never say an event was moved", low)
+
+    def test_the_delete_tool_says_it_is_half_a_reschedule(self):
+        from ace2.backend import tools
+        d = next(t for t in tools.TOOLS if t["name"] == "delete_calendar_event")["description"]
+        low = d.lower()
+        self.assertIn("reschedule", low)
+        self.assertIn("approval", low)
+
+    def test_deleting_still_requires_approval(self):
+        """A reschedule must not become a way around the delete gate."""
+        from ace2.backend import tools
+        self.assertIn("delete_calendar_event", tools.NATIVE_MUTATIONS)
+        self.assertNotIn("delete_calendar_event", tools.NATIVE_READS)
+
+    def test_creating_reports_a_real_outcome(self):
+        """The half that DID work keeps working: a create returns a journal state, not prose."""
+        from ace2.backend import ops, tools
+        import ace2.backend.tools as t
+        calls = []
+        orig = t.create_calendar_event
+        try:
+            t.create_calendar_event = lambda **kw: (calls.append(kw) or
+                                                    (False, "adapter said no", "unknown"))
+            out = t._do_create_calendar_event(
+                title="Ken callback", start_datetime="2026-09-16T10:00:00",
+                end_datetime="2026-09-16T11:00:00")
+        finally:
+            t.create_calendar_event = orig
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out.state, ops.UNKNOWN)
+        self.assertNotEqual(out.state, ops.COMPLETED)
