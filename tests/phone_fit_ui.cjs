@@ -33,8 +33,11 @@ const PAD = 12;   // #app padding on narrow screens
     await p.evaluate(() => localStorage.setItem('ace2_token', 'dev'));
     await p.reload({ waitUntil: 'networkidle' });
 
-    // Every dashboard card Brady can summon, normal and wide.
-    for (const panel of ['daybank', 'timeline', 'inbox']) {
+    // Every dashboard card Brady can summon, normal and wide. 'daybank' is NOT one any more
+    // (2026-09-11): Due today opens the Command board, and the board's own phone fit is
+    // covered by release_one_ui.cjs. Left in this loop it opened a full-screen view that
+    // blocked the next two clicks, so no card was ever created and the wait timed out.
+    for (const panel of ['timeline', 'inbox']) {
       await p.click(`.qa[data-panel="${panel}"]`).catch(() => {});
       await p.waitForTimeout(500);
     }
@@ -87,7 +90,9 @@ const PAD = 12;   // #app padding on narrow screens
   await d.goto(URL, { waitUntil: 'domcontentloaded' });
   await d.evaluate(() => localStorage.setItem('ace2_token', 'dev'));
   await d.reload({ waitUntil: 'networkidle' });
-  await d.click('.qa[data-panel="daybank"]');
+  // 'timeline' rather than 'daybank' — Due today is no longer a card (2026-09-11). This
+  // check is about the desktop card SLOT, so any card proves it.
+  await d.click('.qa[data-panel="timeline"]');
   await d.waitForSelector('.card', { timeout: 8000 });
   await d.waitForTimeout(500);
   const desk = await d.evaluate(() => {

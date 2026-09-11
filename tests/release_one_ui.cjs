@@ -16,15 +16,24 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
 
   const api = (path) => p.evaluate(u => fetch(u, {
     headers: { Authorization: 'Bearer dev' } }).then(r => r.json()), URL.replace(/\/$/, '') + path);
-  const openCmd = async () => { await p.click('#command-btn'); await p.waitForSelector('.cmd-areas'); };
+  const openCmd = async () => { await p.click('#command-btn'); await p.waitForSelector('.cmd-lens'); };
   const lens = async (l) => { await p.click(`.cmd-lens button[data-lens="${l}"]`); await p.waitForTimeout(250); };
+  // ONE ROW NOW (2026-09-11): areas, categories and the records/completed toggles live in
+  // the filter sheet. Open it before reaching for any of them.
+  const openFilter = async () => {
+    if (!(await p.locator('.cmd-sheet').count())) { await p.click('#cmd-filter'); await p.waitForSelector('.cmd-sheet'); }
+  };
+  const area = async (a) => { await openFilter(); await p.click(`.cmd-area[data-area="${a}"]`); await p.waitForTimeout(300); };
+  const showRecords = async () => { await openFilter(); await p.click('#cmd-recs'); await p.waitForTimeout(300); };
+  const showDoneRows = async () => { await openFilter(); await p.click('#cmd-showdone'); await p.waitForTimeout(300); };
   const rowFor = (t) => p.locator('.cmd-row', { hasText: t }).first();
 
   await openCmd();
   await p.screenshot({ path: `${OUT}/01-desktop-today.png` });
 
   // ── 1. Areas are the navigation, and Inbox is permanently visible but not the default
-  const areas = await p.locator('.cmd-areas .cmd-area[data-area]').allInnerTexts();
+  await openFilter();
+  const areas = await p.locator('.cmd-sheet .cmd-area[data-area]').allInnerTexts();
   ok('Inbox is permanently visible', areas.some(a => /INBOX/i.test(a)), areas.join(' | '));
   ok('Inbox is not the default view',
      (await p.locator('.cmd-area.on').innerText()).trim().toUpperCase() === 'ALL');
@@ -33,7 +42,24 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   const cmdToday = await p.evaluate(() =>
     [...document.querySelectorAll('#command-view .cmd-row')].map(r => r.getAttribute('data-id')));
   await p.click('#command-view .cmd-hd #cmd-x');
+  // ONE TODAY SURFACE (2026-09-11). The dock button used to open a separate card; it now
+  // opens the board at Today, because the two were rendering the SAME server grouping and
+  // the card was the one Brady found showing nine rows he could not tick.
   await p.click('.qa[data-panel="daybank"]');
+  await p.waitForSelector('#command-view .cmd-lens');
+  ok('Due today opens the board, not a second surface',
+     await p.locator('.cmd-lens button[data-lens="today"].on').count() === 1);
+  ok('...and no separate Due Today card is created',
+     await p.locator('.card[data-panel="DUE TODAY"]').count() === 0);
+  await p.click('#command-view .cmd-hd #cmd-x');
+  // The card renderer is still reachable — Ace can push one — so its grouping is still
+  // covered, just driven directly instead of through the retired button.
+  await p.evaluate(async () => {
+    const r = await fetch('/daybank?suggest=3', { headers: { Authorization: 'Bearer dev' } });
+    const d = await r.json();
+    window.aceDebug.card('daybank', { items: d.items, summary: d.summary || null,
+                                      due_today: d.due_today, today: d.today });
+  });
   await p.waitForSelector('.db-item');
   const cardToday = await p.evaluate(() =>
     [...document.querySelectorAll('.db-item')].length);
@@ -66,7 +92,7 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   await p.screenshot({ path: `${OUT}/02-due-today-card.png` });
 
   // ── 3. Handling a follow-up leaves the task open
-  await openCmd(); await lens('due');
+  await openCmd(); await lens('all');
   const fupRow = rowFor('Chase Rebecca');
   await fupRow.scrollIntoViewIfNeeded();
   ok('a follow-up occurrence offers its own controls',
@@ -81,8 +107,10 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   ok('...and clears only the follow-up', !after.followup);
 
   // pushing a week moves only the follow-up
+  // 'Permit sign-off' is a WAITING RECORD. Everything hides records by default now, and
+  // Waiting deliberately does not — that is where a parked row belongs.
   const pr = rowFor('Permit sign-off');
-  await lens('due'); await pr.scrollIntoViewIfNeeded();
+  await lens('waiting'); await pr.scrollIntoViewIfNeeded();
   const pBefore = (await api('/daybank?all=true')).items.find(i => /Permit sign-off/.test(i.text));
   await pr.locator('.cmd-fup[data-fup="push"]').click();
   await p.waitForTimeout(900);
@@ -93,17 +121,21 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
      `${pBefore.followup} → ${pAfter.followup}`);
 
   // ── 4. Needs a decision is explicit, and carried-over rows say so
-  await lens('decide');
+  await lens('today');
   const decideTxt = await p.locator('#command-view .cmd-list').innerText();
-  ok('marked decisions are listed as his open questions', /YOUR OPEN QUESTIONS/.test(decideTxt));
+  // The Decide lens is retired: the server's own Today grouping was already carrying both
+  // of these, which is why the button was a second route to a list already on screen.
+  ok('marked decisions are listed on Today', /DECISIONS TO MAKE/.test(decideTxt));
   ok('carried-over rows are separated and labelled',
-     /CARRIED OVER/.test(decideTxt) && /not yet reviewed/i.test(decideTxt));
-  ok('carried-over rows do not claim to be Ready',
-     /none of them is set to Ready/i.test(decideTxt));
+     /WORTH A LOOK/.test(decideTxt) && /not yet reviewed/i.test(decideTxt));
+  // Same guarantee, the Today group's own words: the retired lens said "none of them is set
+  // to Ready", this one says "not suggested work". Both mean it is not offered as ready work.
+  ok('carried-over rows are not offered as ready work',
+     /not suggested work/i.test(decideTxt));
   await p.screenshot({ path: `${OUT}/03-decide.png` });
 
   // ── 4b. Reviewing a carried-over row takes one tap and invents nothing
-  await lens('decide');
+  await lens('today');
   const carried = p.locator('.cmd-row', { hasText: 'Book the dentist' }).first();
   await carried.scrollIntoViewIfNeeded();
   ok('a carried-over row offers a review control',
@@ -166,7 +198,7 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   ok('a dated decision keeps its deadline lane', saved.lane === 'upcoming', saved.lane);
   ok('...and still reads as a decision on the row',
      /needs a decision/i.test(await rowFor('Book the dentist').innerText()));
-  await lens('decide');
+  await lens('today');
   ok('...and still appears under Decide',
      (await p.locator('#command-view .cmd-list').innerText()).indexOf(saved.text) >= 0);
   await lens('all');
@@ -190,12 +222,15 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
 
   // ── 7. Lists: add, then rename, and every link survives
   const linked = (await api('/daybank?all=true')).items;
-  p.on('dialog', async d => {
+  // Scoped, and removed at the end of this section. Left registered it dismissed EVERY later
+  // dialog before the test that wanted one could see it.
+  const listPrompts = async d => {
     const m = d.message();
     if (/Add a list/.test(m)) return d.accept('Greenhouse');
     if (/Rename/.test(m)) return d.accept('Greenhouse build');
     return d.dismiss();
-  });
+  };
+  p.on('dialog', listPrompts);
   await p.click('#cmd-lists'); await p.waitForTimeout(1000);
   let lists = await api('/board/lists');
   ok('a new list persists', lists.areas.includes('Greenhouse'), lists.areas.join(' | '));
@@ -208,28 +243,76 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
      linked.every(o => { const n = nowRows.find(x => x.id === o.id);
        return n && n.parent_id === o.parent_id && n.due === o.due && n.ts === o.ts; }));
 
+  p.off('dialog', listPrompts);
+
   // ── 8. Capture lands in the area he is looking at
-  await p.click('.cmd-area[data-area="Side Work"]'); await p.waitForTimeout(300);
+  await area('Side Work');
   await p.fill('#cmd-input', 'Release one: price the new mixer');
   await p.press('#cmd-input', 'Enter'); await p.waitForTimeout(1200);
   const added = (await api('/daybank?all=true')).items.find(i => /price the new mixer/.test(i.text));
   ok('capture files into the area on screen', added && added.bucket === 'Side Work',
      added ? added.bucket : 'not added');
 
-  // ── 9. A waiting row still cannot be completed by a tick
-  await p.click('.cmd-area[data-area="All"]'); await p.waitForTimeout(300);
+  // ── 9. A waiting row asks before it closes, and an accidental tap still cannot close it
+  // (2026-09-11, Brady: "am I not able to mark those off?"). His Due Today was nine parked
+  // rows and not one of them was tickable. Something can finish without the other person
+  // ever coming back — but on 5 Sept four records vanished to one stray tap, so it asks.
+  await area('All');
   await lens('waiting');
   const wr = p.locator('.cmd-row', { hasText: 'Permit sign-off' }).first();
   await wr.scrollIntoViewIfNeeded();
   const before9 = (await api('/daybank?all=true')).items.find(i => /Permit sign-off/.test(i.text));
+
+  let asked = '';
+  // once(), not on(): a lingering listener double-handles the next dialog and Playwright
+  // throws "Cannot dismiss dialog which is already handled".
+  p.once('dialog', d => { asked = d.message(); d.dismiss(); });
   await wr.locator('.cmd-box').click(); await p.waitForTimeout(1100);
   const after9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
-  ok('a waiting record still refuses a checkbox completion', after9.status === 'open', after9.status);
+  ok('closing a parked row asks first', /close it anyway/i.test(asked), asked.replace(/\n+/g, ' '));
+  ok('...and names what it is parked on', /waiting on the county/i.test(asked));
+  ok('a stray tap still cannot close a waiting record', after9.status === 'open', after9.status);
+
+  p.once('dialog', d => d.accept());
+  await wr.locator('.cmd-box').click(); await p.waitForTimeout(1100);
+  const forced9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
+  ok('...but confirming does close it', forced9.status === 'done', forced9.status);
+  // Put it back through the UI — reopening is not a close, so it asks nothing.
+  await showDoneRows();
+  await p.locator('.cmd-row', { hasText: 'Permit sign-off' }).first().locator('.cmd-box').click();
+  await p.waitForTimeout(1100);
+  const restored9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
+  ok('...and reopening it needs no confirmation', restored9.status === 'open', restored9.status);
+  await showDoneRows();
+
+  // ── 9b. One filter row, and records are out of the way by default
+  await lens('all');
+  ok('the header is one row, not three',
+     await p.locator('#command-view .cmd-lens').count() === 1
+     && await p.locator('#command-view > .cmd-areas').count() === 0
+     && await p.locator('#command-view > .cmd-chips').count() === 0);
+  ok('...offering exactly Today, Waiting and Everything',
+     (await p.locator('.cmd-lens button[data-lens]').allInnerTexts())
+       .map(t => t.trim().split(' ')[0].toUpperCase()).join('|') === 'TODAY|WAITING|EVERYTHING');
+  // A genuine entry='record' from the fixture. ('Unfiled thought from the truck' is an
+  // ACTION — it reads like a note, which is exactly why the entry field exists.)
+  const recordText = 'The Marlow deal';
+  ok('records are hidden by default',
+     await p.locator('.cmd-row', { hasText: recordText }).count() === 0);
+  await showRecords();
+  ok('...and the toggle brings them back',
+     await p.locator('.cmd-row', { hasText: recordText }).count() === 1);
+  await showRecords();
+  ok('areas and categories still work, from inside the sheet',
+     await p.locator('.cmd-sheet .cmd-area[data-area]').count() > 0
+     && await p.locator('.cmd-sheet .cmd-chip').count() > 0);
+  await openFilter();
+  await p.screenshot({ path: `${OUT}/09-one-row.png` });
 
   // ── 10. Phone: readable controls, no sideways page scroll
   await p.setViewportSize({ width: 390, height: 844 });
   await p.waitForTimeout(400); await lens('all');
-  await p.click('.cmd-area[data-area="All"]'); await p.waitForTimeout(300); await lens('all');
+  await area('All'); await lens('all');
   const ph = rowFor('Order concrete');
   await ph.scrollIntoViewIfNeeded(); await ph.locator('.cmd-pencil').click();
   await p.waitForSelector('.cmd-editing'); await p.waitForTimeout(300);

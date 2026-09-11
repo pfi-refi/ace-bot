@@ -2021,8 +2021,20 @@
     var h = 0; for (var i=0;i<(name||'').length;i++) h = (h*31 + name.charCodeAt(i)) & 0xffff;
     return LANE_FALLBACK[h % LANE_FALLBACK.length];
   }
+  // ONE ROW, NOT THREE (2026-09-11, Brady: "it's still way too complicated to sift through").
+  // The header carried 27 controls across three rows — 7 lenses, 8 areas, 12 categories —
+  // above a list of 63 rows of which only 23 were things to DO. Measured on his live board:
+  // 40 of 63 were records, and 34 had no area at all, so the area row was sorting by a field
+  // most rows did not answer.
+  //
+  // Now: three lenses he named (Today · Waiting · Everything) and one Filter. Areas and
+  // categories still exist and still work — they live in the filter sheet instead of costing
+  // two permanent rows. Records default to hidden because they are the bulk of the noise;
+  // that is ONE flag, deliberately, because Brady has not decided yet whether they belong on
+  // their own surface, and a second view would prejudge it.
   var cmd = { open:false, min:false, lens:'today', cat:'All', items:[], editing:null, today:'',
-              areas:CMD_LANES.slice(), custom:[], dueToday:null, area:'All', suggest:3 };
+              areas:CMD_LANES.slice(), custom:[], dueToday:null, area:'All', suggest:3,
+              showRecords:false, showDone:false, filterOpen:false };
   function cmdEsc(s){ return (s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function cmdCatOf(it){ var t=it.tags||[]; for (var i=0;i<t.length;i++){ if (CMD_CATS[t[i]]) return t[i]; } return 'Admin'; }
   function cmdFetch(){
@@ -2246,16 +2258,28 @@
     // TODAY IS THE SAME TODAY (2026-09-09, Brady). The Command Center and the Due Today card
     // must show the same work; this lens renders the server's `due_today` grouping directly
     // rather than filtering the list again with its own idea of what counts.
-    var LN={today:'Today',due:'Scheduled',waiting:'Waiting',decide:'Decide',
-            areas:'Areas',all:'All',done:'Done'};
-    var LENS_ORDER=['today','due','waiting','decide','areas','all','done'];
-    if (LENS_ORDER.indexOf(cmd.lens)<0) cmd.lens='today';   // migrate 'pipeline'/'lanes'
+    var LN={today:'Today',waiting:'Waiting',all:'Everything'};
+    var LENS_ORDER=['today','waiting','all'];
+    // Retired lenses map onto what replaced them rather than silently resetting to Today:
+    // Scheduled and Areas are Everything, Decide is pinned to the top of Today, Done is a
+    // filter toggle.
+    var LENS_MIGRATE={due:'all',areas:'all',decide:'today',done:'all',pipeline:'all',lanes:'all'};
+    if (LENS_ORDER.indexOf(cmd.lens)<0) {
+      if (cmd.lens==='done') cmd.showDone=true;
+      cmd.lens = LENS_MIGRATE[cmd.lens] || 'today';
+    }
     var nWait=cmd.items.filter(function(x){return x.lane==='waiting';}).length;
     var nDec=cmd.items.filter(function(x){return x.needs_decision;}).length;
     var LC={waiting:nWait,decide:nDec};
     var lenses=LENS_ORDER.map(function(l){
       var n=LC[l]; return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'
         +LN[l]+(n?' <b>'+n+'</b>':'')+'</button>'; }).join('');
+    // How many filters are doing something right now, so a narrowed board never looks empty
+    // for no visible reason.
+    var nFilters=(cmd.area!=='All'?1:0)+(cmd.cat!=='All'?1:0)
+                +(cmd.showRecords?1:0)+(cmd.showDone?1:0);
+    var filterBtn='<button class="cmd-filt'+(cmd.filterOpen?' on':'')+'" id="cmd-filter">'
+      +'Filter'+(nFilters?' <b>'+nFilters+'</b>':'')+'</button>';
     // AREAS ARE THE PRIMARY NAVIGATION (brief, 2026-09-09), with the categories demoted to
     // secondary filters inside one. Inbox is permanently visible but is never the default.
     var areaList = ['All'].concat(cmd.areas || CMD_LANES);
@@ -2269,9 +2293,25 @@
       return '<button class="cmd-area'+(a===cmd.area?' on':'')+'" data-area="'+cmdEsc(a)+'">'
            + dot + cmdEsc(a) + (n!=null?' <b>'+n+'</b>':'') + '</button>';
     }).join('') + '<button class="cmd-area cmd-arealist" id="cmd-lists" title="Add or rename a list">⋯</button>';
+    var sheet = !cmd.filterOpen ? '' :
+      '<div class="cmd-sheet">'
+      + '<div class="cmd-sh-h">AREA</div><div class="cmd-areas">'+areaTabs+'</div>'
+      + '<div class="cmd-sh-h">CATEGORY</div><div class="cmd-chips">'+chips+'</div>'
+      + '<div class="cmd-sh-h">SHOW</div><div class="cmd-toggles">'
+      + '<button class="cmd-tog'+(cmd.showRecords?' on':'')+'" id="cmd-recs">'
+      + 'Records &amp; reference</button>'
+      + '<button class="cmd-tog'+(cmd.showDone?' on':'')+'" id="cmd-showdone">Completed</button>'
+      + '</div></div>';
+    // RECORDS STAY IN WAITING. 40 of 63 rows are records and hiding them is most of the
+    // relief — but 8 of Brady's 9 waiting rows ARE records ("Josh — reached out, waiting to
+    // hear back"), and a Waiting list with one item in it would be a lie about his week.
+    // Waiting is a question about STATE, so entry type is not what filters it.
+    function recordOk(x){ return cmd.showRecords || cmd.lens==='waiting' || x.entry!=='record'; }
+    function doneOk(x){ return cmd.showDone || x.status!=='done'; }
     var items=cmd.items.filter(function(x){
       return (cmd.cat==='All'||cmdCatOf(x)===cmd.cat)
-          && (cmd.area==='All'||(x.bucket||'Inbox')===cmd.area); });
+          && (cmd.area==='All'||(x.bucket||'Inbox')===cmd.area)
+          && recordOk(x) && doneOk(x); });
     // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
     // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
     // captures stop shoving to the top like a pile.
@@ -2289,16 +2329,21 @@
                + (note?'<div class="cmd-note">'+note+'</div>':'')
                + rows.map(cmdRow).join('');
         }
-        grp('DEADLINES', dt.deadlines);
-        grp('DOING TODAY', dt.chosen);
-        if (dt.suggested && dt.suggested.length) {
-          grp('ACE SUGGESTS' + (dt.suggested_total > dt.suggested.length
-                ? ' · ' + dt.suggested.length + ' of ' + dt.suggested_total + ' open' : ''),
-              dt.suggested,
+        // THE DECIDE LENS WAS ALREADY REDUNDANT. The server's own Today grouping carries a
+        // DECISIONS TO MAKE group (below), so the button was a second route to a list that
+        // was on this screen the whole time. Dropping it loses nothing — and adding a
+        // hand-rolled decisions group here, as I first did, only rendered them twice.
+        grp('DEADLINES', (dt.deadlines||[]).filter(recordOk));
+        grp('DOING TODAY', (dt.chosen||[]).filter(recordOk));
+        var suggested = (dt.suggested || []).filter(recordOk);
+        if (suggested.length) {
+          grp('ACE SUGGESTS' + (dt.suggested_total > suggested.length
+                ? ' · ' + suggested.length + ' of ' + dt.suggested_total + ' open' : ''),
+              suggested,
               'Optional. Not scheduled and not due — choosing one sets the day, never a deadline.');
-          if (dt.suggested_total > dt.suggested.length)
+          if (dt.suggested_total > suggested.length)
             body += '<button class="cmd-more" id="cmd-more">Show more · '
-                  + (dt.suggested_total - dt.suggested.length) + ' more</button>';
+                  + (dt.suggested_total - suggested.length) + ' more</button>';
         }
         if (dt.decisions && dt.decisions.length)
           grp('DECISIONS TO MAKE' + (dt.decisions_total > dt.decisions.length
@@ -2315,77 +2360,66 @@
         if(!body) body='<div class="cmd-empty">Nothing due and nothing waiting on you. Clear.</div>';
       }
     }
-    else if(cmd.lens==='due'){
-      // DUE lens (2026-08-13): what's due, no sifting. Open items with a computed due date,
-      // grouped Overdue / Today / Tomorrow / This week (next 7d). due_days comes from the server.
-      var due=items.filter(function(x){ return x.status==='open' && x.due_days!=null && x.due_days<=7; })
-                   .sort(function(a,b){ return a.due_days-b.due_days; });
-      var buckets=[['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]];
-      buckets.forEach(function(bk){ var g=due.filter(function(x){return bk[1](x.due_days);}); if(g.length){ body+='<div class="cmd-grp">'+bk[0]+' · '+g.length+' — deadlines</div>'+g.map(cmdRow).join(''); } });
-      // FOLLOW-UPS ARE DATED WORK TOO, and they were missing from this lens entirely — the
-      // day Brady meant to chase something never appeared anywhere he looks for dates. They
-      // are listed separately and labelled, because a day he chose to call someone is not a
-      // deadline anyone gave him.
-      var fups = items.filter(function(x){ return x.status==='open' && x.followup; })
-                      .sort(function(a,b){ return (a.followup||'')<(b.followup||'')?-1:1; });
-      if (fups.length) body += '<div class="cmd-grp">FOLLOW-UPS · '+fups.length+' — when you chase them</div>'
-                             + '<div class="cmd-note">Your own reminder to check in. Handling one leaves the task open.</div>'
-                             + fups.map(cmdRow).join('');
-      if(!body) body='<div class="cmd-empty">nothing due in the next 7 days ✓</div>';
-    }
-    else if(cmd.lens==='done'){ body=items.filter(function(x){return x.status!=='open';}).map(cmdRow).join(''); }
-    else if(cmd.lens==='all'){ body=items.slice().sort(byAge).filter(function(x){return x.status!=='dropped';}).map(cmdRow).join(''); }
     else if(cmd.lens==='waiting'){
-      // Parked on someone else. Visible, never completable — the same rule the API enforces.
+      // Parked on someone else. A question about STATE, so records belong here too — 8 of
+      // Brady's 9 waiting rows are records, and hiding them would misreport his week.
       var w=items.filter(function(x){ return x.lane==='waiting'; }).sort(byAge);
       body = w.length ? w.map(cmdRow).join('')
                       : '<div class="cmd-empty">Nothing parked on anyone else.</div>';
     }
-    else if(cmd.lens==='decide'){
-      // Rows Brady MARKED as open questions, plus — listed separately and never mixed in —
-      // the ones the old derived rule had been calling decisions for him.
-      var u=items.filter(function(x){ return x.needs_decision; }).sort(byAge);
-      var carried=items.filter(function(x){ return x.carried_over
-                                                 && !x.needs_decision; }).sort(byAge);
-      body = u.length ? '<div class="cmd-grp">YOUR OPEN QUESTIONS · '+u.length+'</div>'+u.map(cmdRow).join('')
-                      : '<div class="cmd-empty">Nothing marked as needing a decision.</div>';
-      if (carried.length) body += '<div class="cmd-grp">CARRIED OVER · '+carried.length+'</div>'
-        + '<div class="cmd-note">The old board called these decisions because they had no date '
-        + 'and no next step. Nothing was changed, none of them is set to Ready, and none is '
-        + 'offered as suggested work anywhere until you have looked at it.</div>'
-        + carried.map(cmdRow).join('');
-    }
-    else if(cmd.lens==='areas'){
-      // ACTIONS only: a lane answers "whose time does this take", and a record has no ending
-      // to spend time on. Records stay visible under the pipeline lens.
-      var acts=items.filter(function(x){ return x.status==='open' && x.entry!=='record'; });
-      (cmd.areas || CMD_LANES).forEach(function(L){
-        var g=acts.filter(function(x){ return (x.bucket||'Inbox')===L; }).sort(byAge);
-        // Inbox stays visible even at zero: it is where capture lands, and an area that
-        // disappears when empty is one Brady cannot trust to be checked.
-        if(!g.length && L!=='Inbox') return;
-        body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'
-          +laneColor(L)+'"></span>'+cmdEsc(L)+' · '+g.length+'</div>'
-          +(g.length?g.map(cmdRow).join('')
-                    :'<div class="cmd-note">Nothing unfiled. New captures land here.</div>');
+    else {
+      // EVERYTHING. This absorbed the retired Scheduled lens rather than replacing it with a
+      // flat dump: the dated grouping and the follow-ups list lived ONLY there, and 20 of
+      // Brady's 63 rows are upcoming, so deleting it would have hidden most of his week.
+      var open=items.filter(function(x){ return x.status==='open'; });
+      var dated=open.filter(function(x){ return x.due_days!=null && x.due_days<=7; })
+                    .sort(function(a,b){ return a.due_days-b.due_days; });
+      [['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],
+       ['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]
+      ].forEach(function(bk){
+        var g=dated.filter(function(x){ return bk[1](x.due_days); });
+        if(g.length) body+='<div class="cmd-grp">'+bk[0]+' · '+g.length+' — deadlines</div>'
+                          +g.map(cmdRow).join('');
       });
-      if(!body) body='<div class="cmd-empty">No open actions.</div>';
+      // A day Brady chose to chase something is not a deadline anyone gave him, so these are
+      // listed separately and labelled. Handling one leaves the task open.
+      var fups=open.filter(function(x){ return x.followup; })
+                   .sort(function(a,b){ return (a.followup||'')<(b.followup||'')?-1:1; });
+      if(fups.length) body+='<div class="cmd-grp">FOLLOW-UPS · '+fups.length+' — when you chase them</div>'
+                           +'<div class="cmd-note">Your own reminder to check in. Handling one leaves the task open.</div>'
+                           +fups.map(cmdRow).join('');
+      var shown={};
+      dated.concat(fups).forEach(function(x){ shown[x.id]=1; });
+      var rest=open.filter(function(x){ return !shown[x.id]; }).sort(byAge);
+      if(rest.length) body+='<div class="cmd-grp">EVERYTHING ELSE · '+rest.length+'</div>'
+                           +rest.map(cmdRow).join('');
+      if(cmd.showDone){
+        var fin=items.filter(function(x){ return x.status==='done'; }).sort(byAge);
+        if(fin.length) body+='<div class="cmd-grp">COMPLETED · '+fin.length+'</div>'
+                            +fin.map(cmdRow).join('');
+      }
+      if(!body) body='<div class="cmd-empty">Nothing open.</div>';
     }
-    else { CMD_ORDER.forEach(function(c){ var g=items.filter(function(x){return cmdCatOf(x)===c && x.status==='open';}).sort(byAge); if(g.length){ body+='<div class="cmd-grp"><span class="cmd-sq" style="background:'+CMD_CATS[c]+'"></span>'+c+' · '+g.length+'</div>'+g.map(cmdRow).join(''); } }); }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
     var addCat=cmd.cat==='All'?'Money':cmd.cat;
     var addArea=cmd.area==='All'?'':cmd.area;   // '' lets the server file it (Inbox if unsure)
     v.innerHTML='<div class="cmd-hd"><div class="cmd-orb"></div><div class="cmd-ttl">COMMAND</div>'
       +'<div class="cmd-n" style="margin-left:8px;font-size:11px;letter-spacing:.08em;opacity:.65">'+nOpen+' open · '+nDone+' done</div>'
       +'<button class="cmd-ic" id="cmd-min" title="Clean view">⌄</button><button class="cmd-ic" id="cmd-x" title="Close">✕</button></div>'
-      +'<div class="cmd-lens">'+lenses+'</div>'
-      +'<div class="cmd-areas">'+areaTabs+'</div><div class="cmd-chips">'+chips+'</div>'
+      +'<div class="cmd-lens">'+lenses+filterBtn+'</div>'
+      +sheet
       +'<div class="cmd-list">'+body+'</div>'
       +'<form class="cmd-add" id="cmd-add"><span class="cmd-plus">+</span><input id="cmd-input" placeholder="Add to '+(addArea||'Inbox')+'…" autocomplete="off"></form>';
     var _nl=v.querySelector('.cmd-list'); if(_nl&&_keep) _nl.scrollTop=_keep;
     v.querySelector('#cmd-x').onclick=cmdClose;
     v.querySelector('#cmd-min').onclick=function(){ cmd.min=true; cmdRender(); };
-    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(true); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button[data-lens]'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(true); }; });
+    var fb=v.querySelector('#cmd-filter');
+    if(fb) fb.onclick=function(){ cmd.filterOpen=!cmd.filterOpen; cmdRender(); };
+    var rb=v.querySelector('#cmd-recs');
+    if(rb) rb.onclick=function(){ cmd.showRecords=!cmd.showRecords; cmdRender(true); };
+    var db=v.querySelector('#cmd-showdone');
+    if(db) db.onclick=function(){ cmd.showDone=!cmd.showDone; cmdRender(true); };
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-chip'), function(b){ b.onclick=function(){ cmd.cat=b.getAttribute('data-cat'); cmdRender(true); }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-area[data-area]'), function(b){
       b.onclick=function(){ cmd.area=b.getAttribute('data-area'); cmdRender(true); }; });
@@ -2455,8 +2489,25 @@
       // VERIFIED tick (2026-07-31): optimistic flip, but if the server doesn't confirm, the
       // row reverts — a completion can no longer be silently lost to a 401/network blip.
       var prev=it.status, prevTs=it.done_ts;
-      var ns=it.status==='done'?'open':'done'; it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
-      fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:ns})})
+      var ns=it.status==='done'?'open':'done';
+      // CLOSING A PARKED ROW IS ALLOWED, BUT IT HAS TO BE MEANT (2026-09-11, Brady: "am I
+      // not about to mark those off?"). His Due Today was nine rows, every one waiting and
+      // none of them tickable, so the one surface named for action had nothing to act on.
+      // Something can finish without the other person ever coming back, and he had no way
+      // to say so. force_close already exists end to end — only the UI never sent it.
+      //
+      // It asks first, deliberately: on 5 Sept four records vanished to one stray tap, which
+      // is why the plain checkbox refuses these in the first place.
+      var forced=false;
+      if(ns==='done' && it.completable===false){
+        var why = it.waiting_on ? ('This is waiting on ' + it.waiting_on + '.')
+                                : 'This is a record, not a task.';
+        if(!window.confirm(why + '\n\nClose it anyway?')) return;
+        forced=true;
+      }
+      it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
+      fetch(API+'/daybank/update',{method:'POST',headers:headers(),
+            body:JSON.stringify(forced?{id:id,status:ns,force_close:true}:{id:id,status:ns})})
         .then(function(r){ if(r.status===401){ toLogin(); throw 0; } return r.json(); })
         .then(function(d){
           // A REFUSAL IS NOT A NETWORK BLIP. The revert was already correct, but silent —
@@ -3241,6 +3292,10 @@
   Array.prototype.forEach.call(document.querySelectorAll('.qa[data-panel]'), function (btn) {
     btn.addEventListener('click', function () {
       var p = btn.getAttribute('data-panel'), cfg = DOCK[p]; if (!cfg) return;
+      // DUE TODAY IS THE BOARD'S TODAY (2026-09-11). These were two surfaces answering one
+      // question from the SAME server grouping, and the card was the one Brady opened to
+      // find nine rows he could not tick and nothing else. One destination now.
+      if (p === 'daybank') { cmd.lens = 'today'; cmdOpen(); return; }
       var open = document.querySelector('.card[data-panel="' + cfg.title + '"]');
       if (open) { open.remove(); return; }   // toggle off → back to the clean stage
       fetch(API + cfg.url, { headers: headers() })
