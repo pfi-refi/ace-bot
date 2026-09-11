@@ -255,20 +255,33 @@ def _sse_chunk(created: int, model: str, content: str) -> str:
 _KEEPALIVE_WHY = "see above"
 
 
-def _resume_break(text: str, after_tool: bool) -> str:
-    """Separate a text block that resumes AFTER a tool call from the one before it.
+def _resume_break(text: str, after_tool: bool, tail: str = "") -> str:
+    """Separate a new spoken fragment from whatever was streamed immediately before it.
 
     A TOOL CALL IS A SENTENCE BREAK (2026-09-10, heard on a real call). The model streams
     text, calls a tool, then streams more text, and the deltas reached ElevenLabs glued:
-    "…for you on screen right now.Building that now — you'll see it pop up". One missing
-    space, but it is the seam between two separate thoughts and it gets read as one breath.
+    "…for you on screen right now.Building that now". One missing space, but it is the seam
+    between two separate thoughts and it gets read as one breath.
 
-    Only this boundary gets a separator. Mid-sentence tokens stream with no space between
-    them on purpose, so a blanket rule would insert spaces inside words.
+    THE FIRST VERSION OF THIS FIXED THE WRONG SIDE (2026-09-11, heard on the next call):
+    "Let me lock all of tomorrow's blocks onto your calendar right now.Putting it on your
+    calendar… Done." `after_tool` only guarded the MODEL's resumed text. The adapter's own
+    spoken status word is pushed into the queue directly by the tool branch, so it glued
+    itself onto the sentence before it and no amount of after_tool checking could see that.
 
-    Module level, not a closure, so the test executes this exact function.
+    So the rule is now about the SEAM, not about who is speaking: `tail` is the last
+    character already streamed, and a capital letter landing straight after terminal
+    punctuation gets a space.
+
+    Requiring an UPPERCASE letter is what keeps this safe for token streaming. Mid-sentence
+    tokens ("Build" + "ing") do not follow terminal punctuation, and a split number
+    ("3." + "7") is not a letter — so neither gets a space it should not have.
     """
-    if after_tool and text[:1] not in ("", " ", "\n", "\t"):
+    if not text or text[0] in (" ", "\n", "\t"):
+        return text
+    if after_tool:
+        return " " + text
+    if tail[-1:] in (".", "!", "?", "…") and text[0].isalpha() and text[0].isupper():
         return " " + text
     return text
 
@@ -2136,14 +2149,22 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # first-token deadline fed exactly when it's actually at risk (silent tool phase).
         spoke = {"any": False}
         status_said = set()   # tool names whose status word already played this turn
-        resumed = {"after_tool": False}   # see _resume_break
+        # `tail` is the last character handed to ElevenLabs, from ANY source — the model, a
+        # status word, a continuer. The seam is a property of the stream, not of the speaker.
+        resumed = {"after_tool": False, "tail": ""}   # see _resume_break
+
+        async def say(text: str):
+            """Every spoken fragment goes out through here, so nothing can glue again."""
+            text = _resume_break(text, resumed["after_tool"], resumed["tail"])
+            resumed["after_tool"] = False
+            if text:
+                resumed["tail"] = text[-1]
+            await queue.put(("delta", text))
 
         async def emit(event_type, payload):
             if event_type == "delta":
                 spoke["any"] = True
-                text = _resume_break(payload.get("text", ""), resumed["after_tool"])
-                resumed["after_tool"] = False
-                await queue.put(("delta", text))
+                await say(payload.get("text", ""))
             elif event_type in ("final", "done"):
                 await queue.put(("done", None))
             elif event_type == "error":
@@ -2152,7 +2173,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # transcript for the rest of the call. Log the real error; say one fixed
                 # human line (which the prior-scrubber also removes from history).
                 logger.warning("voice turn error (spoken as snag line): %s", payload.get("text", ""))
-                await queue.put(("delta", "Hit a snag on my end — give me a second and ask me again."))
+                await say("Hit a snag on my end — give me a second and ask me again.")
                 await queue.put(("done", None))
             elif event_type == "hold":
                 # A gated action was blocked pending Brady's yes — nothing to say yet; the
@@ -2176,7 +2197,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 label = (payload.get("label") or "working on it").lower()
                 spoken = _SPOKEN_STATUS.get(name, label)
                 spoke["any"] = True
-                await queue.put(("delta", f"{spoken.capitalize()}… "))
+                await say(f"{spoken.capitalize()}… ")
             elif event_type == "tool" and payload.get("status") == "done":
                 # Flip the HUD pill to done (non-ui only; ui tools have no pill).
                 if not payload.get("ui"):

@@ -2107,7 +2107,8 @@ class VoiceSeamTests(unittest.TestCase):
         import inspect
         from ace2.backend import main as m
         src = inspect.getsource(m)
-        self.assertIn("_resume_break(payload.get(\"text\", \"\"), resumed[\"after_tool\"])", src)
+        self.assertIn('_resume_break(text, resumed["after_tool"], resumed["tail"])', src)
+        self.assertIn("await say(payload.get(\"text\", \"\"))", src)
 
     def test_a_separator_is_not_doubled(self):
         """A resumed block that already starts with whitespace is left alone."""
@@ -2116,6 +2117,38 @@ class VoiceSeamTests(unittest.TestCase):
         self.assertEqual(_resume_break("\nBuilding", True), "\nBuilding")
         self.assertEqual(_resume_break("", True), "")
         self.assertEqual(_resume_break("Building", False), "Building")
+
+    def test_the_adapters_own_status_word_cannot_glue(self):
+        """THE BUG THE FIRST FIX MISSED, verbatim from the 10 Sept 10:36pm call:
+        'onto your calendar right now.Putting it on your calendar… Done.'
+        The status word is pushed by the tool branch, so after_tool never guarded it."""
+        from ace2.backend.main import _resume_break
+        got = _resume_break("Putting it on your calendar… ", False, tail=".")
+        self.assertEqual(got, " Putting it on your calendar… ")
+
+    def test_the_seam_rule_is_safe_for_token_streaming(self):
+        """It must not fire inside a word or inside a number."""
+        from ace2.backend.main import _resume_break
+        self.assertEqual(_resume_break("ing", False, tail="d"), "ing")      # Build|ing
+        self.assertEqual(_resume_break("7", False, tail="."), "7")          # 3.|7
+        self.assertEqual(_resume_break("m", False, tail="."), "m")          # 8 a.|m
+        self.assertEqual(_resume_break("Done.", False, tail="…"), " Done.")
+
+    def test_every_spoken_fragment_goes_through_one_door(self):
+        """Guard: a direct queue.put of a delta bypasses the seam, which is how the status
+        word glued in the first place."""
+        import inspect
+        from ace2.backend import main as m
+        src = inspect.getsource(m)
+        # The property, stated directly: exactly ONE place puts a spoken delta on the queue,
+        # and it is inside say(). Slicing the source by function name is fragile; counting is
+        # not, and the count is what actually matters.
+        self.assertEqual(src.count('queue.put(("delta"'), 1,
+                         "more than one place emits a spoken delta — one of them skips the seam")
+        door = src[src.index("async def say(text: str):"):]
+        door = door[:door.index("async def emit(")]
+        self.assertIn('queue.put(("delta"', door, "the single delta emission is not inside say()")
+        self.assertIn("await say(", src)
 
     def test_continuers_do_not_always_open_the_same_way(self):
         """The cycler used to start at index 0 every turn, so the first filler Brady ever
@@ -2211,3 +2244,90 @@ class VoiceKeepAliveTests(unittest.TestCase):
         src = inspect.getsource(m)
         self.assertIn('yield _sse_chunk(created, model, "")', src)
         self.assertIn("if misses > MAX_QUIET_MISSES:", src)
+
+
+# ── DATE LADDER (2026-09-11, from the 10:36pm call) ────────────────────────────
+class DateLadderTests(unittest.TestCase):
+    """Ace had 'Thursday, September 10, 2026' in front of him and answered 'next Wednesday is
+    September 18th'. The 18th is a Friday. He wrote Ken's callback to the calendar on the
+    wrong day, was corrected, wrote it again on a second wrong day, and was corrected again."""
+
+    def _at(self, y, m, d, hh=22, mm=36):
+        import datetime, pytz
+        # .localize(), NEVER tzinfo= — pytz gives LMT (−04:56) with the constructor form.
+        return pytz.timezone("America/New_York").localize(datetime.datetime(y, m, d, hh, mm))
+
+    def test_the_two_dates_he_actually_got_wrong(self):
+        from ace2.backend.chat import date_ladder
+        rungs = date_ladder(self._at(2026, 9, 10))          # a Thursday
+        self.assertIn("next Wednesday 2026-09-16", rungs)   # he said the 18th
+        self.assertIn("next Friday    2026-09-18", rungs)
+        self.assertNotIn("next Wednesday 2026-09-18", rungs)
+
+    def test_this_and_next_are_different_days(self):
+        """The ambiguity underneath the error: on a Thursday, 'next Friday' is six days out,
+        not one. Counting forward from today cannot tell those apart."""
+        from ace2.backend.chat import date_ladder
+        rungs = date_ladder(self._at(2026, 9, 10))
+        self.assertIn("this Friday    2026-09-11", rungs)
+        self.assertIn("next Friday    2026-09-18", rungs)
+
+    def test_today_and_tomorrow_are_named(self):
+        from ace2.backend.chat import date_ladder
+        rungs = date_ladder(self._at(2026, 9, 10))
+        self.assertIn("today          Thu 2026-09-10", rungs)
+        self.assertIn("tomorrow       Fri 2026-09-11", rungs)
+
+    def test_on_a_sunday_there_is_no_this_week_left(self):
+        """Weeks run Monday to Sunday, so a Sunday has no remaining 'this' days."""
+        from ace2.backend.chat import date_ladder
+        rungs = date_ladder(self._at(2026, 9, 13))          # a Sunday
+        self.assertNotIn("  this ", rungs)
+        self.assertIn("next Monday    2026-09-14", rungs)
+        self.assertIn("next Sunday    2026-09-20", rungs)
+
+    def test_on_a_monday_the_rest_of_the_week_is_this(self):
+        from ace2.backend.chat import date_ladder
+        rungs = date_ladder(self._at(2026, 9, 14))          # a Monday
+        self.assertIn("this Tuesday   2026-09-15", rungs)
+        self.assertIn("this Sunday    2026-09-20", rungs)
+        self.assertIn("next Monday    2026-09-21", rungs)
+
+    def test_a_weekday_is_never_listed_twice_the_same_way(self):
+        """A name may appear once as 'this' and once as 'next' — that is the whole point, and
+        those two must be seven days apart. What must never happen is the SAME phrasing
+        resolving to two dates, because that puts the guess back."""
+        import datetime
+        from ace2.backend.chat import date_ladder
+        for day in range(10, 21):
+            rungs = date_ladder(self._at(2026, 9, day)).splitlines()
+            for name in ("Monday", "Tuesday", "Wednesday", "Thursday",
+                         "Friday", "Saturday", "Sunday"):
+                seen = {}
+                for which in ("this", "next"):
+                    hits = [l for l in rungs if l.startswith(f"  {which} {name}")]
+                    self.assertLessEqual(len(hits), 1,
+                                         f"'{which} {name}' listed twice on 2026-09-{day:02d}")
+                    if hits:
+                        seen[which] = datetime.date.fromisoformat(hits[0].split()[-1])
+                if len(seen) == 2:
+                    self.assertEqual((seen["next"] - seen["this"]).days, 7,
+                                     f"this/next {name} are not a week apart on 09-{day:02d}")
+
+    def test_every_upcoming_date_is_reachable_by_some_name(self):
+        """Fourteen days out, no gaps — otherwise Ace is back to counting for the missing one."""
+        import datetime
+        from ace2.backend.chat import date_ladder
+        start = datetime.date(2026, 9, 10)
+        rungs = date_ladder(self._at(2026, 9, 10))
+        listed = {datetime.date.fromisoformat(l.split()[-1])
+                  for l in rungs.splitlines() if l.startswith(("  this ", "  next "))}
+        for i in range(1, 11):
+            self.assertIn(start + datetime.timedelta(days=i), listed)
+
+    def test_the_ladder_reaches_the_model(self):
+        """A table nothing sends is not a fix."""
+        import inspect
+        from ace2.backend import chat
+        src = inspect.getsource(chat)
+        self.assertIn("date_ladder(now),", src)

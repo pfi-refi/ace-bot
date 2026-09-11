@@ -695,6 +695,8 @@ async def _live_context() -> tuple:
     parts = [
         f"CURRENT TIME (Eastern): {now.strftime('%A, %B %d, %Y — %-I:%M %p')}",
         "",
+        date_ladder(now),
+        "",
         "TODAY'S SCHEDULE (relative to the current time above):",
         today_sched,
         "",
@@ -1069,6 +1071,41 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
         await emit("open", {"url": url, "label": label})
         return f"Opened on screen: {label}"
     return f"⚠️ Unknown UI tool: {name}"
+
+
+def date_ladder(now) -> str:
+    """Every named day for the next two weeks, resolved to a real date.
+
+    WHY THIS EXISTS (2026-09-11, from a live call). Ace had "Thursday, September 10, 2026" in
+    front of him and still answered "next Wednesday is September 18th" — the 18th is a FRIDAY.
+    He then wrote Ken's callback to the calendar on the wrong day, was corrected, wrote it
+    again on a second wrong day, and was corrected again. Three writes, two of them wrong.
+
+    Weekday arithmetic is the thing a language model is worst at and a lookup table is best
+    at, so this replaces the arithmetic. It also fixes the ambiguity underneath it: Brady uses
+    "this Friday" for the one in the current week and "next Friday" for the one in the week
+    after, and those are different days. Counting forward from today cannot tell them apart —
+    on a Thursday, "next Friday" is six days out, not one.
+
+    Weeks run Monday to Sunday, which is the boundary "next week" means in ordinary speech.
+    """
+    from datetime import timedelta
+    today = now.date()
+    # Sunday that ends the current week (Mon=0 … Sun=6).
+    end_of_week = today + timedelta(days=6 - today.weekday())
+    lines = ["DATE LADDER — resolve any named day from THIS TABLE. Never count weekdays "
+             "yourself; if a day is not listed, say so rather than calculating it.",
+             f"  today          {today:%a %Y-%m-%d}",
+             f"  tomorrow       {today + timedelta(days=1):%a %Y-%m-%d}"]
+    rest, nxt = [], []
+    for i in range(1, 15):
+        d = today + timedelta(days=i)
+        (rest if d <= end_of_week else nxt).append(d)
+    for d in rest:
+        lines.append(f"  this {d:%A}".ljust(17) + f"{d:%Y-%m-%d}")
+    for d in nxt[:7]:
+        lines.append(f"  next {d:%A}".ljust(17) + f"{d:%Y-%m-%d}")
+    return "\n".join(lines)
 
 
 def _format_calendar_window(events: list, now) -> str:
