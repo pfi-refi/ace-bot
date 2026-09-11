@@ -20,6 +20,7 @@ few ms, far below Drive's. Every op is best-effort and never raises into a turn.
 
 import logging
 import os
+import threading
 import uuid
 from contextlib import contextmanager
 import re as _re
@@ -47,18 +48,58 @@ def enabled() -> bool:
     return bool(os.environ.get("DATABASE_URL", "").strip())
 
 
+# ONE HANDSHAKE, NOT ONE PER CALL (2026-09-11, ultra review finding 10).
+#
+# This opened a brand-new psycopg2 connection — full TCP, TLS and auth to Railway Postgres —
+# on EVERY call, and there are ~31 call sites across this module. Opening Brady's board cost
+# 19–26 seconds because `derive_bucket` → `area_name` → `area_renames` lands on this path once
+# per row: roughly a thousand handshakes to render 515 rows.
+#
+# I first fixed that by caching the two settings reads. The review took that apart correctly:
+# a cache bought speed for two specific callers and paid for it with a staleness window, an
+# invalidation ordering problem, a check-then-use race across `asyncio.to_thread` workers, and
+# a read-modify-write in `rename_area` that could silently drop a custom list. None of that is
+# worth having. A pool makes every caller cheap, present and future, and needs no TTL, no
+# invalidation and no staleness at all — so the cache is gone and this is what replaced it.
+_POOL = {"p": None}
+_POOL_LOCK = threading.Lock()
+
+
+def _pool():
+    if _POOL["p"] is None:
+        with _POOL_LOCK:
+            if _POOL["p"] is None:
+                import psycopg2.pool  # lazy, so the app boots before the dep lands
+                _POOL["p"] = psycopg2.pool.ThreadedConnectionPool(
+                    1, 10, os.environ["DATABASE_URL"], connect_timeout=10)
+    return _POOL["p"]
+
+
 @contextmanager
 def _conn():
-    import psycopg2  # imported lazily so the app boots even before the dep lands
-    conn = psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=10)
+    pool = _pool()
+    conn = pool.getconn()
+    # A pooled connection can be dead on arrival — Railway restarts, idle timeouts, a network
+    # blip. Returning it to the pool and asking for another is cheaper than failing a request,
+    # and closed connections are discarded rather than recycled.
+    if conn.closed:
+        pool.putconn(conn, close=True)
+        conn = pool.getconn()
+    bad = False
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        bad = True
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        # A connection that raised may be in an unusable transaction state; drop it rather
+        # than hand the next caller a poisoned one.
+        pool.putconn(conn, close=bad or conn.closed)
 
 
 def _init_schema():
@@ -647,39 +688,12 @@ BUCKETS = (INBOX, "GFI/PFI", "Groundworks", "Side Work", "Personal", "Ace")
 # Custom lists Brady adds himself. Stored, not hardcoded, so a list survives a restart and
 # renaming it keeps every item — the rows reference the area by NAME, so a rename is a
 # single update and no row moves.
-# THE BOARD WAS OPENING A DATABASE CONNECTION PER ROW (2026-09-11, Brady: "the command
-# center takes a long time to load"). Measured: /daybank took 19–26 SECONDS against a 0.3s
-# /health, and the cause was not the 515-row query — it was `derive_bucket` → `area_name` →
-# `area_renames`, which does a fresh psycopg2 connect for EVERY item, twice over the payload.
-# 515 rows became ~1,000 round trips to Railway Postgres.
-#
-# These two reads are settings, not data: a rename map and a list of custom areas. They
-# change only when Brady renames or adds a list, and both of those paths invalidate this
-# explicitly. The short TTL is a backstop for a change made by another process.
-_AREA_CACHE = {"renames": None, "lists": None, "at": 0.0}
-_AREA_TTL = 30.0
-
-
-def _areas_invalidate():
-    _AREA_CACHE.update(renames=None, lists=None, at=0.0)
-
-
-def _areas_fresh() -> bool:
-    import time
-    return (time.time() - _AREA_CACHE["at"]) < _AREA_TTL
-
-
 def custom_lists() -> list:
     """Extra areas Brady created. [] when the store is unavailable."""
-    if _AREA_CACHE["lists"] is not None and _areas_fresh():
-        return list(_AREA_CACHE["lists"])
     try:
         row = latest_summary("board_lists")
         import json as _json
-        got = [x for x in _json.loads(row.get("text") or "[]") if isinstance(x, str)]
-        import time
-        _AREA_CACHE.update(lists=got, at=time.time())
-        return list(got)
+        return [x for x in _json.loads(row.get("text") or "[]") if isinstance(x, str)]
     except Exception:
         return []
 
@@ -714,16 +728,11 @@ def area_renames() -> dict:
     Groundworks to "Concrete" would keep filing new concrete work into a "Groundworks" that no
     longer appears anywhere — the item would vanish from the board without being deleted.
     """
-    if _AREA_CACHE["renames"] is not None and _areas_fresh():
-        return dict(_AREA_CACHE["renames"])
     try:
         row = latest_summary("board_list_renames")
         import json as _json
         got = _json.loads(row.get("text") or "{}")
-        out = {k: v for k, v in got.items() if k in BUCKETS and isinstance(v, str) and v}
-        import time
-        _AREA_CACHE.update(renames=out, at=time.time())
-        return dict(out)
+        return {k: v for k, v in got.items() if k in BUCKETS and isinstance(v, str) and v}
     except Exception:
         return {}
 
@@ -752,11 +761,7 @@ def _clean_list_names(names: list) -> list:
 
 def set_custom_lists(names: list) -> bool:
     import json as _json
-    ok = add_summary(_json.dumps(_clean_list_names(names)), "board_lists")
-    # AFTER the write, never before. Clearing first leaves a window where any read — and
-    # rename_area does several — re-caches the OLD value and the change never shows.
-    _areas_invalidate()
-    return ok
+    return add_summary(_json.dumps(_clean_list_names(names)), "board_lists")
 
 
 def rename_area(old_name: str, new_name: str) -> tuple:
@@ -799,17 +804,12 @@ def rename_area(old_name: str, new_name: str) -> tuple:
     except Exception as e:
         logger.error("rename_area rolled back: %s", e)
         return False, f"rename failed, nothing was changed: {e}"
-    # AFTER the transaction commits. Invalidating earlier leaves a window where the reads
-    # above (all_areas, area_renames, custom_lists) put the OLD value straight back.
-    _areas_invalidate()
     return True, f"renamed; {moved} item(s) stayed with it"
 
 
 def _set_area_renames(mapping: dict) -> bool:
     import json as _json
-    ok = bool(add_summary(_json.dumps(mapping), "board_list_renames"))
-    _areas_invalidate()
-    return ok
+    return bool(add_summary(_json.dumps(mapping), "board_list_renames"))
 # Personal time wins first: an errand is his own hours whoever the occasion belongs to.
 # "birthday" was here and cost the Morgan row: "sitting on it until his birthday, Oct 21" is a
 # DATE, not an errand. Only unambiguous errand nouns survive.

@@ -286,53 +286,57 @@ class TwoSurfacesOneRecord(unittest.TestCase):
 
 
 class BoardLoadSpeed(unittest.TestCase):
-    """THE COMMAND CENTER TOOK 19–26 SECONDS TO OPEN (2026-09-11, Brady: "the command center
-    takes a long time to load as well is that an issue?"). It was, and it was not the query.
+    """THE COMMAND CENTER TOOK 19-26 SECONDS TO OPEN (2026-09-11, Brady: "the command center
+    takes a long time to load as well is that an issue?"). It was, and it was not the query —
+    `_conn()` opened a fresh psycopg2 connection on EVERY call, and `classify.decorate` lands
+    on that path once per row via derive_bucket -> area_name -> area_renames. 515 rows became
+    ~1,000 handshakes to Railway Postgres.
 
-    `derive_bucket` → `area_name` → `area_renames` opened a FRESH psycopg2 connection for
-    every row, twice over the payload, so 515 rows became roughly a thousand round trips to
-    Railway Postgres. /health answered in 0.3s the whole time."""
+    My first fix cached the two settings reads. The ultra review took it apart: a cache bought
+    speed for two callers and paid with a staleness window, an invalidation ordering bug, a
+    check-then-use race across asyncio.to_thread workers, and a read-modify-write in
+    rename_area that could silently drop a custom list. The pool removes the cause instead, so
+    these tests now pin the CONNECTION count, which is the thing that actually went wrong."""
 
     def setUp(self):
         from backend import db
-        self._orig = db.latest_summary
-        self.calls = []
-        db.latest_summary = lambda *a, **k: (self.calls.append(a[0] if a else ''), {})[1]
-        db._areas_invalidate()
+        self._orig = db._conn
+        self.opened = []
 
     def tearDown(self):
         from backend import db
-        db.latest_summary = self._orig
-        db._areas_invalidate()
+        db._conn = self._orig
 
-    def test_decorating_a_full_board_hits_the_database_once(self):
-        from backend import classify
-        row = {"id": "x", "text": "concrete pour", "status": "open", "entry": "action",
-               "ts": "2026-09-01T00:00:00", "tags": ["Deals"]}
-        [classify.decorate(dict(row, id=str(i))) for i in range(515)]
-        self.assertLessEqual(len(self.calls), 2,
-                             f"{len(self.calls)} settings reads for one board render")
-
-    def test_a_rename_is_visible_immediately(self):
-        """The cache must never be the reason a renamed list keeps its old name."""
-        from backend import db
-        db.area_renames()
-        before = len(self.calls)
-        db.area_renames()
-        self.assertEqual(len(self.calls), before, "cached read still hit the database")
-        db._areas_invalidate()
-        db.area_renames()
-        self.assertEqual(len(self.calls), before + 1, "invalidation did not refetch")
-
-    def test_both_mutating_paths_invalidate(self):
+    def test_the_pool_is_what_serves_a_connection(self):
+        """Not a fresh psycopg2.connect per call — that is the 1,000-handshake bug."""
         import inspect
         from backend import db
-        for fn in (db.set_custom_lists, db.rename_area, db._set_area_renames):
-            src = inspect.getsource(fn)
-            self.assertIn("_areas_invalidate()", src, fn.__name__)
-            # AFTER the write, not before — clearing first leaves a window where a read
-            # re-caches the old value and the rename silently does not show.
-            self.assertLess(src.index("add_summary") if "add_summary" in src
-                            else src.index("INSERT INTO summaries"),
-                            src.index("_areas_invalidate()"),
-                            f"{fn.__name__} invalidates before it writes")
+        src = inspect.getsource(db._conn)
+        self.assertIn("getconn", src)
+        self.assertIn("putconn", src)
+        self.assertNotIn("psycopg2.connect", src)
+
+    def test_a_dead_connection_is_discarded_not_recycled(self):
+        """Railway restarts and idle timeouts hand back closed connections."""
+        import inspect
+        from backend import db
+        src = inspect.getsource(db._conn)
+        self.assertIn("conn.closed", src)
+        self.assertIn("close=", src)
+
+    def test_a_failed_transaction_does_not_poison_the_next_caller(self):
+        import inspect
+        from backend import db
+        src = inspect.getsource(db._conn)
+        self.assertIn("rollback", src)
+        self.assertIn("close=bad", src)
+
+    def test_no_settings_cache_remains(self):
+        """The cache is gone on purpose. If one is reintroduced, it needs its own timestamp
+        per slot, a generation counter around the store, and it must not sit in front of
+        all_areas(), which is used as a write-validation allowlist."""
+        import inspect
+        from backend import db
+        src = inspect.getsource(db)
+        self.assertNotIn("_AREA_CACHE", src)
+        self.assertNotIn("_areas_invalidate", src)
