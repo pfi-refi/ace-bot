@@ -647,12 +647,39 @@ BUCKETS = (INBOX, "GFI/PFI", "Groundworks", "Side Work", "Personal", "Ace")
 # Custom lists Brady adds himself. Stored, not hardcoded, so a list survives a restart and
 # renaming it keeps every item — the rows reference the area by NAME, so a rename is a
 # single update and no row moves.
+# THE BOARD WAS OPENING A DATABASE CONNECTION PER ROW (2026-09-11, Brady: "the command
+# center takes a long time to load"). Measured: /daybank took 19–26 SECONDS against a 0.3s
+# /health, and the cause was not the 515-row query — it was `derive_bucket` → `area_name` →
+# `area_renames`, which does a fresh psycopg2 connect for EVERY item, twice over the payload.
+# 515 rows became ~1,000 round trips to Railway Postgres.
+#
+# These two reads are settings, not data: a rename map and a list of custom areas. They
+# change only when Brady renames or adds a list, and both of those paths invalidate this
+# explicitly. The short TTL is a backstop for a change made by another process.
+_AREA_CACHE = {"renames": None, "lists": None, "at": 0.0}
+_AREA_TTL = 30.0
+
+
+def _areas_invalidate():
+    _AREA_CACHE.update(renames=None, lists=None, at=0.0)
+
+
+def _areas_fresh() -> bool:
+    import time
+    return (time.time() - _AREA_CACHE["at"]) < _AREA_TTL
+
+
 def custom_lists() -> list:
     """Extra areas Brady created. [] when the store is unavailable."""
+    if _AREA_CACHE["lists"] is not None and _areas_fresh():
+        return list(_AREA_CACHE["lists"])
     try:
         row = latest_summary("board_lists")
         import json as _json
-        return [x for x in _json.loads(row.get("text") or "[]") if isinstance(x, str)]
+        got = [x for x in _json.loads(row.get("text") or "[]") if isinstance(x, str)]
+        import time
+        _AREA_CACHE.update(lists=got, at=time.time())
+        return list(got)
     except Exception:
         return []
 
@@ -687,11 +714,16 @@ def area_renames() -> dict:
     Groundworks to "Concrete" would keep filing new concrete work into a "Groundworks" that no
     longer appears anywhere — the item would vanish from the board without being deleted.
     """
+    if _AREA_CACHE["renames"] is not None and _areas_fresh():
+        return dict(_AREA_CACHE["renames"])
     try:
         row = latest_summary("board_list_renames")
         import json as _json
         got = _json.loads(row.get("text") or "{}")
-        return {k: v for k, v in got.items() if k in BUCKETS and isinstance(v, str) and v}
+        out = {k: v for k, v in got.items() if k in BUCKETS and isinstance(v, str) and v}
+        import time
+        _AREA_CACHE.update(renames=out, at=time.time())
+        return dict(out)
     except Exception:
         return {}
 
@@ -720,7 +752,11 @@ def _clean_list_names(names: list) -> list:
 
 def set_custom_lists(names: list) -> bool:
     import json as _json
-    return add_summary(_json.dumps(_clean_list_names(names)), "board_lists")
+    ok = add_summary(_json.dumps(_clean_list_names(names)), "board_lists")
+    # AFTER the write, never before. Clearing first leaves a window where any read — and
+    # rename_area does several — re-caches the OLD value and the change never shows.
+    _areas_invalidate()
+    return ok
 
 
 def rename_area(old_name: str, new_name: str) -> tuple:
@@ -763,12 +799,17 @@ def rename_area(old_name: str, new_name: str) -> tuple:
     except Exception as e:
         logger.error("rename_area rolled back: %s", e)
         return False, f"rename failed, nothing was changed: {e}"
+    # AFTER the transaction commits. Invalidating earlier leaves a window where the reads
+    # above (all_areas, area_renames, custom_lists) put the OLD value straight back.
+    _areas_invalidate()
     return True, f"renamed; {moved} item(s) stayed with it"
 
 
 def _set_area_renames(mapping: dict) -> bool:
     import json as _json
-    return bool(add_summary(_json.dumps(mapping), "board_list_renames"))
+    ok = bool(add_summary(_json.dumps(mapping), "board_list_renames"))
+    _areas_invalidate()
+    return ok
 # Personal time wins first: an errand is his own hours whoever the occasion belongs to.
 # "birthday" was here and cost the Morgan row: "sitting on it until his birthday, Oct 21" is a
 # DATE, not an errand. Only unambiguous errand nouns survive.

@@ -283,3 +283,56 @@ class TwoSurfacesOneRecord(unittest.TestCase):
             for r in s[group]:
                 self.assertEqual(r['lane'], classify.lane_of(r),
                                  'a card group must not relabel the row it came from')
+
+
+class BoardLoadSpeed(unittest.TestCase):
+    """THE COMMAND CENTER TOOK 19–26 SECONDS TO OPEN (2026-09-11, Brady: "the command center
+    takes a long time to load as well is that an issue?"). It was, and it was not the query.
+
+    `derive_bucket` → `area_name` → `area_renames` opened a FRESH psycopg2 connection for
+    every row, twice over the payload, so 515 rows became roughly a thousand round trips to
+    Railway Postgres. /health answered in 0.3s the whole time."""
+
+    def setUp(self):
+        from backend import db
+        self._orig = db.latest_summary
+        self.calls = []
+        db.latest_summary = lambda *a, **k: (self.calls.append(a[0] if a else ''), {})[1]
+        db._areas_invalidate()
+
+    def tearDown(self):
+        from backend import db
+        db.latest_summary = self._orig
+        db._areas_invalidate()
+
+    def test_decorating_a_full_board_hits_the_database_once(self):
+        from backend import classify
+        row = {"id": "x", "text": "concrete pour", "status": "open", "entry": "action",
+               "ts": "2026-09-01T00:00:00", "tags": ["Deals"]}
+        [classify.decorate(dict(row, id=str(i))) for i in range(515)]
+        self.assertLessEqual(len(self.calls), 2,
+                             f"{len(self.calls)} settings reads for one board render")
+
+    def test_a_rename_is_visible_immediately(self):
+        """The cache must never be the reason a renamed list keeps its old name."""
+        from backend import db
+        db.area_renames()
+        before = len(self.calls)
+        db.area_renames()
+        self.assertEqual(len(self.calls), before, "cached read still hit the database")
+        db._areas_invalidate()
+        db.area_renames()
+        self.assertEqual(len(self.calls), before + 1, "invalidation did not refetch")
+
+    def test_both_mutating_paths_invalidate(self):
+        import inspect
+        from backend import db
+        for fn in (db.set_custom_lists, db.rename_area, db._set_area_renames):
+            src = inspect.getsource(fn)
+            self.assertIn("_areas_invalidate()", src, fn.__name__)
+            # AFTER the write, not before — clearing first leaves a window where a read
+            # re-caches the old value and the rename silently does not show.
+            self.assertLess(src.index("add_summary") if "add_summary" in src
+                            else src.index("INSERT INTO summaries"),
+                            src.index("_areas_invalidate()"),
+                            f"{fn.__name__} invalidates before it writes")
