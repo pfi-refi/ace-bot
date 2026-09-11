@@ -2306,12 +2306,20 @@
     // relief — but 8 of Brady's 9 waiting rows ARE records ("Josh — reached out, waiting to
     // hear back"), and a Waiting list with one item in it would be a lie about his week.
     // Waiting is a question about STATE, so entry type is not what filters it.
-    function recordOk(x){ return cmd.showRecords || cmd.lens==='waiting' || x.entry!=='record'; }
+    // A DATED RECORD IS AN OBLIGATION, NOT REFERENCE (Codex, 2026-09-11). classify gives a
+    // record with a due date lane='today'/'overdue' AND completable:true, and the server
+    // puts it in DEADLINES — so hiding records by entry type alone made a permit fee due
+    // today disappear from Today AND Everything at once. Undated reference stays hidden;
+    // anything with a real date does not.
+    function recordOk(x){ return cmd.showRecords || cmd.lens==='waiting'
+                              || x.entry!=='record' || x.due_days!=null; }
+    // The filter sheet narrows the WHOLE board, Today included — a Filter badge that says
+    // two while Today quietly ignores both of them is a lie about what is on screen.
+    function lensOk(x){ return (cmd.cat==='All'||cmdCatOf(x)===cmd.cat)
+                            && (cmd.area==='All'||(x.bucket||'Inbox')===cmd.area); }
+    function todayOk(x){ return recordOk(x) && lensOk(x); }
     function doneOk(x){ return cmd.showDone || x.status!=='done'; }
-    var items=cmd.items.filter(function(x){
-      return (cmd.cat==='All'||cmdCatOf(x)===cmd.cat)
-          && (cmd.area==='All'||(x.bucket||'Inbox')===cmd.area)
-          && recordOk(x) && doneOk(x); });
+    var items=cmd.items.filter(function(x){ return lensOk(x) && recordOk(x) && doneOk(x); });
     // COMPLETION TRUTH (2026-07-31): show the counts, show done struck-through in All, sort
     // groups oldest-first — so 'marked off' looks different from 'never existed', and fresh
     // captures stop shoving to the top like a pile.
@@ -2333,9 +2341,9 @@
         // DECISIONS TO MAKE group (below), so the button was a second route to a list that
         // was on this screen the whole time. Dropping it loses nothing — and adding a
         // hand-rolled decisions group here, as I first did, only rendered them twice.
-        grp('DEADLINES', (dt.deadlines||[]).filter(recordOk));
-        grp('DOING TODAY', (dt.chosen||[]).filter(recordOk));
-        var suggested = (dt.suggested || []).filter(recordOk);
+        grp('DEADLINES', (dt.deadlines||[]).filter(todayOk));
+        grp('DOING TODAY', (dt.chosen||[]).filter(todayOk));
+        var suggested = (dt.suggested || []).filter(todayOk);
         if (suggested.length) {
           grp('ACE SUGGESTS' + (dt.suggested_total > suggested.length
                 ? ' · ' + suggested.length + ' of ' + dt.suggested_total + ' open' : ''),
@@ -2345,6 +2353,10 @@
             body += '<button class="cmd-more" id="cmd-more">Show more · '
                   + (dt.suggested_total - suggested.length) + ' more</button>';
         }
+        dt = Object.assign({}, dt, {
+          decisions: (dt.decisions||[]).filter(todayOk),
+          review:    (dt.review||[]).filter(todayOk),
+          waiting:   (dt.waiting||[]).filter(todayOk) });
         if (dt.decisions && dt.decisions.length)
           grp('DECISIONS TO MAKE' + (dt.decisions_total > dt.decisions.length
                 ? ' · ' + dt.decisions.length + ' of ' + dt.decisions_total : ''),

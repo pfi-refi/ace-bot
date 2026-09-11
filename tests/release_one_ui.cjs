@@ -64,11 +64,19 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   const cardToday = await p.evaluate(() =>
     [...document.querySelectorAll('.db-item')].length);
   const dt = (await api('/daybank?suggest=3')).due_today;
-  const expected = dt.deadlines.length + dt.chosen.length + dt.suggested.length
-                 + (dt.decisions || []).length + (dt.review || []).length + dt.waiting.length;
+  // The board renders the server's grouping MINUS undated reference records, which are
+  // hidden by default (2026-09-11). A record with a due date is an obligation and stays —
+  // that is the whole point of the exemption, so the expectation states the same rule
+  // rather than being loosened to make the number fit.
+  const shown = rows => (rows || []).filter(r => r.entry !== 'record' || r.due_days != null);
+  const count = f => f(dt.deadlines).length + f(dt.chosen).length + f(dt.suggested).length
+                   + f(dt.decisions).length + f(dt.review).length + f(dt.waiting).length;
+  const expected = count(shown);                 // the board honours the records preference
+  const expectedCard = count(r => r || []);      // a pushed card shows the grouping as-is
   ok('Command Center Today shows exactly the server grouping', cmdToday.length === expected,
      `${cmdToday.length} vs ${expected}`);
-  ok('Due Today card shows the same rows', cardToday === expected, `${cardToday} vs ${expected}`);
+  ok('a pushed Due Today card still shows the whole grouping',
+     cardToday === expectedCard, `${cardToday} vs ${expectedCard}`);
   ok('suggestions are capped at three', dt.suggested.length === 3, String(dt.suggested.length));
   // UNREVIEWED WORK IS NOT A SUGGESTION (Codex, 2026-09-09): carried-over rows leave the
   // suggestion pool entirely and appear as their own group on BOTH surfaces.
@@ -308,6 +316,19 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
      && await p.locator('.cmd-sheet .cmd-chip').count() > 0);
   await openFilter();
   await p.screenshot({ path: `${OUT}/09-one-row.png` });
+
+  // ── 9c. Hiding records must never hide a DEADLINE (Codex, 2026-09-11)
+  // A record with a due date is lane='today' and completable — an obligation, not reference.
+  // Filtering Today and Everything by entry type alone made it disappear from both.
+  const dueRecord = 'County permit fee due';
+  await lens('today');
+  ok('a dated record still reaches Today with records hidden',
+     await p.locator('.cmd-row', { hasText: dueRecord }).count() === 1);
+  await lens('all');
+  ok('...and still reaches Everything',
+     await p.locator('.cmd-row', { hasText: dueRecord }).count() === 1);
+  ok('...while undated reference stays hidden',
+     await p.locator('.cmd-row', { hasText: 'The Marlow deal' }).count() === 0);
 
   // ── 10. Phone: readable controls, no sideways page scroll
   await p.setViewportSize({ width: 390, height: 844 });

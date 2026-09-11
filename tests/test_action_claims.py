@@ -196,4 +196,78 @@ class FailureReasons(unittest.TestCase):
         self.assertIn("no open item matches", out)
 
 
+class CodexFollowUp(unittest.TestCase):
+    """The three findings from CODEX-REVIEW-CLAUDE-AFTER-VOICE-2026-09-11, each reproduced
+    before it was fixed."""
+
+    def test_direct_address_is_an_instruction(self):
+        """"Ace, add Ken to Wednesday" is the most natural way to ask on a call, and it
+        sailed past an anchor that only accepted punctuation before the verb."""
+        for asked in ("Ace, add Ken to Wednesday at 10",
+                      "Hey Ace, send that email",
+                      "Ace delete the gym block",
+                      "ok Ace, put the pour on Monday",
+                      "Ace can you delete the gym block"):
+            self.assertTrue(chat.action_request(asked), asked)
+
+    def test_direct_address_did_not_re_open_the_verb_matcher(self):
+        for said in ("I will not be reaching out to Armando after his build for the Nigel",
+                     "Ace is doing great today",
+                     "I made another $51 today"):
+            self.assertFalse(chat.action_request(said), said)
+
+    def test_a_verified_write_draws_no_unverified_warning(self):
+        out = chat.guarded_reply(
+            "I updated the board. Chris is next.",
+            [{"state": chat.OP_DONE, "tool": "update_item", "text": "Updated record 123"}])
+        self.assertNotIn("don't have a verified action result", out)
+        self.assertIn("Chris is next", out)
+        self.assertIn("Confirmed result", out)
+
+    def test_a_verified_receipt_never_vouches_for_a_second_claim(self):
+        """Codex's test caught this in my first fix: ONE confirmed capture was passing
+        "and sent an email" through untouched — an action with no operation behind it. The
+        claim is always dropped; only the warning is conditional."""
+        out = chat.guarded_reply(
+            "I captured it and sent an email.",
+            [{"state": chat.OP_DONE, "tool": "capture", "text": "Captured test item, 123"}])
+        self.assertNotIn("sent an email", out)
+        self.assertIn("Captured test item, 123", out)
+
+    def test_but_one_success_never_vouches_for_a_second_action(self):
+        """A mix still suppresses — that hole is the reason this layer exists."""
+        out = chat.guarded_reply(
+            "I updated the board and sent Rebecca the packet. Chris is next.",
+            [{"state": chat.OP_DONE, "tool": "update_item", "text": "Updated record 123"},
+             {"state": chat.OP_FAILED, "tool": "send_email", "reason": "no recipient"}])
+        self.assertNotIn("sent Rebecca", out)
+        self.assertIn("verified action result", out)
+
+    def test_unrelated_sentences_survive_the_suppression(self):
+        """It replaced the WHOLE reply on any match, so "Chris is next." died with the claim."""
+        out = chat.guarded_reply(
+            "I sent it. Chris is next and Lincoln is at three.",
+            [{"state": chat.OP_UNKNOWN, "tool": "send_email"}])
+        self.assertIn("Chris is next", out)
+        self.assertIn("Lincoln is at three", out)
+        self.assertNotIn("I sent it", out)
+
+    def test_a_dated_record_is_an_obligation_not_reference(self):
+        """The board hid records by entry type, and classify gives a record with a due date
+        lane='today' AND completable — so a permit fee due today vanished from Today and
+        Everything at once. This asserts the server side of that; the browser suite covers
+        the filter."""
+        from backend import classify
+        import datetime
+        today = datetime.date.today().isoformat()
+        rows = [classify.decorate({"id": "r1", "text": "Permit fee due to the county",
+                                   "status": "open", "entry": "record", "due_days": 0,
+                                   "due": today, "tags": ["Bills"],
+                                   "ts": "2026-09-01T00:00:00"})]
+        self.assertEqual(rows[0]["lane"], "today")
+        self.assertTrue(rows[0]["completable"])
+        self.assertIn("Permit fee due to the county",
+                      [x["text"] for x in classify.due_today_sections(rows, today)["deadlines"]])
+
+
 if __name__ == '__main__': unittest.main()

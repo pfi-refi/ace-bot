@@ -11,6 +11,34 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-11 — A simpler board, honest failures, and a voice that can breathe
+
+**The board is one row now.** Today, Waiting and Everything, plus a Filter. Areas and
+categories moved inside that filter; they still work. Records and reference are hidden by
+default and a toggle brings them back — but anything with a real due date stays visible
+whether records are hidden or not, because a dated record is an obligation, not a note.
+"Due today" opens the board at Today instead of a separate card. A row parked on someone
+else can now be closed directly; it asks first and names who it is waiting on.
+
+**When something fails, say why.** A failed action reports the actual reason ("no open item
+matches Armando") rather than only that it failed. A verified result no longer draws an
+"unverified" warning. Unrelated sentences survive: if one claim in a reply cannot be backed
+by a receipt, only that claim is dropped, not the whole answer. A confirmed action still
+proves only itself — it never vouches for a second thing mentioned in the same breath.
+
+**Talking to Ace is not instructing him.** Saying "after his build for the Nigel" is
+conversation; "Ace, add Ken to Wednesday" is a request. He tells them apart now, so ordinary
+talk gets an ordinary answer instead of a receipt.
+
+**Voice.** He no longer runs sentences together around an action. Named days come from a
+lookup, not mental arithmetic, and "this Friday" and "next Friday" are different days. The
+line stays open while he works, so a long turn no longer drops the call. Where the voice
+supports it, he can use audio tags like a laugh or a sigh — sparingly, and never on a number,
+a date or a commitment.
+
+**Still true, and worth saying:** he cannot move or edit a calendar event in place. A
+reschedule is a delete plus a create, and the delete needs approval.
+
 ## 2026-09-11 — Shared upgrade awareness
 
 Voice and chat now receive the same recent release notes with their limitations intact. Explain relevant changes when asked; do not announce them every conversation. Shipped features still depend on available tools, permissions, and successful provider results. Messages/iCloud access and autonomous self-editing/deployment remain deferred, not installed abilities.

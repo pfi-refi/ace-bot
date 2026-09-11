@@ -3381,6 +3381,10 @@ _ACTION_VERB = re.compile(
 _INSTRUCTION_LEAD = re.compile(
     r"(?:"
     r"^\W*"                                              # utterance-initial imperative
+    # DIRECT ADDRESS (Codex, 2026-09-11): "Ace, add Ken to Wednesday" and "Hey Ace, send
+    # that email" are the most natural way to ask him for something on a call, and both
+    # sailed past an anchor that only accepted punctuation before the verb.
+    r"|^\W*(?:hey|hi|hello|yo|ok|okay|alright|so)?\s*ace\s*[,:]?\s+(?:please\s+|just\s+)?"
     r"|[.!?;:]\s*(?:please\s+|then\s+|also\s+)?"         # a new sentence starting with one
     r"|\b(?:please|kindly)\s+"
     r"|\b(?:can|could|would|will|do)\s+you\s+(?:please\s+|also\s+|just\s+)*"
@@ -3448,9 +3452,16 @@ def guarded_reply(turn_text: str, operations: list) -> str:
     turn that touched a tool lost Ace's whole answer and Brady got only the receipt block.
     Module level, not inline in stream_turn, so the test runs this exact function.
     """
-    spoken = unsupported_action_reply(turn_text or "").strip()
-    receipt = action_receipt_reply(operations or [])
-    return "\n\n".join(x for x in (spoken, receipt) if x)
+    ops = operations or []
+    # A MUTATION THE RECEIPT ALREADY CONFIRMS NEEDS NO WARNING. If every mutation this turn
+    # is OP_DONE, the receipt below is the evidence and his prose is describing it correctly.
+    # A MIX still suppresses: one verified write must never vouch for a second, unverified
+    # one, which is the hole that makes this layer worth having at all.
+    mutations = [o for o in ops if o.get("state") not in (OP_READ, OP_UI, None)]
+    all_verified = bool(mutations) and all(o.get("state") == OP_DONE for o in mutations)
+    spoken = unsupported_action_reply(turn_text or "", warn=not all_verified)
+    receipt = action_receipt_reply(ops)
+    return "\n\n".join(x for x in (spoken.strip(), receipt) if x)
 
 
 def action_receipt_reply(operations: list) -> str:
@@ -3482,7 +3493,7 @@ def action_receipt_reply(operations: list) -> str:
     return "\n".join(lines)
 
 
-def unsupported_action_reply(text: str) -> str:
+def unsupported_action_reply(text: str, warn: bool = True) -> str:
     # Target affirmative self-success or direct result assertions, not every mention
     # of a past-tense verb. "I cannot move it" / "once created" / "you updated it"
     # must remain useful conversation. This is bounded syntax, not semantic proof.
@@ -3496,10 +3507,32 @@ def unsupported_action_reply(text: str) -> str:
         rf"your (?:event|appointment|task|file|email|document))\s+"
         rf"(?:is|was|has been|['’]s)\s+(?:(?:now|successfully)\s+)*(?:{verbs}|all set)\b",
     )
-    if any(re.search(pattern, text, re.I) for pattern in affirmative):
-        return ("I don't have a verified action result for that request. "
-                "Please check the actual record before treating it as complete.")
-    return text
+    # SENTENCE BY SENTENCE, NOT ALL OR NOTHING (Codex, 2026-09-11). This used to replace the
+    # WHOLE reply the moment any success phrase matched, so "I updated the board. Chris is
+    # next." lost the Chris sentence too — and it ignored the operations entirely, so a
+    # genuinely VERIFIED write still drew "I don't have a verified action result".
+    #
+    # A claim is dropped, the rest of what he said is kept, and the warning is added once.
+    kept, dropped = [], False
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if not sentence.strip():
+            continue
+        if any(re.search(pattern, sentence, re.I) for pattern in affirmative):
+            dropped = True
+            continue
+        kept.append(sentence.strip())
+    if not dropped:
+        return text
+    # A CLAIM IS ALWAYS DROPPED; only the WARNING is conditional. Skipping the suppression
+    # when every operation is verified looked right and was not: Codex's own test caught one
+    # confirmed capture vouching for "and sent an email" — an action with no operation behind
+    # it at all. A verified receipt proves what IT did, never what else the sentence claimed.
+    # The receipt below is the authoritative account either way.
+    if not warn:
+        return " ".join(kept).strip()
+    warning = ("I don't have a verified action result for that request. "
+               "Please check the actual record before treating it as complete.")
+    return " ".join(kept + [warning]).strip()
 
 
 async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None):

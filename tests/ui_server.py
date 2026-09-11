@@ -33,6 +33,10 @@ try:
         ('Chase Rebecca for the signed packet', ['Deals'], soon, 'action', None, None, 'GFI/PFI', 'call her Tuesday', today, None),
         ('Send Thiami the wet-signature copy', ['Deals'], late, 'action', None, None, 'GFI/PFI', None, None, None),
         ('The Marlow deal', ['Deals'], None, 'record', None, None, 'GFI/PFI', None, None, None),
+        # A RECORD WITH A REAL DEADLINE (Codex, 2026-09-11). classify gives it lane='today'
+        # and completable:true, and the server files it under DEADLINES — so hiding records
+        # by entry type alone made an obligation like this vanish from Today AND Everything.
+        ('County permit fee due', ['Bills'], today, 'record', None, None, 'Groundworks', None, None, None),
         ('Permit sign-off', ['Admin'], None, 'record', 'waiting', 'the county', 'Groundworks', None, soon, None),
         ('Website copy for the new page', ['Business'], None, 'action', None, None, 'Side Work', None, None, today),
         ('Unfiled thought from the truck', ['Business'], None, 'action', None, None, '', None, None, None),
