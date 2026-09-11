@@ -807,9 +807,6 @@ def rename_area(old_name: str, new_name: str) -> tuple:
     return True, f"renamed; {moved} item(s) stayed with it"
 
 
-def _set_area_renames(mapping: dict) -> bool:
-    import json as _json
-    return bool(add_summary(_json.dumps(mapping), "board_list_renames"))
 # Personal time wins first: an errand is his own hours whoever the occasion belongs to.
 # "birthday" was here and cost the Morgan row: "sitting on it until his birthday, Oct 21" is a
 # DATE, not an errand. Only unambiguous errand nouns survive.
