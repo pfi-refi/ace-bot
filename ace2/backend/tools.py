@@ -423,7 +423,17 @@ TOOLS = [
                                     "'waiting on your OK'. Never use it for ordinary to-dos."),
                 },
                 "text": {"type": "string", "description": "The item, phrased tightly (~one line)"},
-                "due": {"type": "string", "description": "Optional due date/time in plain words (e.g. 'today 5pm', 'Fri')"},
+                # PUT THE DATE IN THE FIELD, NOT IN THE SENTENCE (2026-09-11). Rows were
+                # arriving with the day written into their text — "follow up Wednesday 9/11",
+                # "checked in 9/8" — and nothing can sort, group or remind on prose. The
+                # board's whole Week view is built from this field.
+                "due": {"type": "string", "description": (
+                    "The DEADLINE, in plain words ('today 5pm', 'Friday', '9/16'). Set this "
+                    "whenever Brady says WHEN something is due — never write the day into the "
+                    "text instead, because nothing can sort on a sentence. Resolve weekday "
+                    "names from the DATE LADDER in your context, never by counting. A deadline "
+                    "is a date someone else imposed; if it is a day HE picked to chase "
+                    "something, that is `followup`, not this.")},
                 "category": {
                     "type": "string",
                     "enum": ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
@@ -503,7 +513,12 @@ TOOLS = [
                     "enum": ["Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"],
                     "description": "Optional: move the item to this board column",
                 },
-                "due": {"type": "string", "description": "Optional new due in plain words ('' clears it)"},
+                "due": {"type": "string", "description": (
+                    "New DEADLINE in plain words ('' clears it). Set it when Brady names a day "
+                    "for an existing row — do not append the date to its text, which is how "
+                    "rows ended up saying 'follow up Wednesday 9/11' with no date the board "
+                    "could read. Resolve weekday names from the DATE LADDER, never by "
+                    "counting.")},
                 "entry": {
                     "type": "string", "enum": ["action", "record"],
                     "description": "What KIND of row: 'action' ends and leaves; 'record' has a state and persists",
@@ -524,7 +539,10 @@ TOOLS = [
                 "followup": {"type": "string", "description":
                     "YYYY-MM-DD when BRADY should chase this. Different from `due`, which is "
                     "the obligation's own deadline, and different from whatever the other "
-                    "party is waiting on. Empty string clears it."},
+                    "party is waiting on. Empty string clears it. USE IT — a waiting row with "
+                    "no follow-up date is one nothing will ever bring back to him. When he "
+                    "says he will check in on a day, that day goes here, not into the text. "
+                    "Resolve weekday names from the DATE LADDER, never by counting."},
             },
             "required": [],
         },

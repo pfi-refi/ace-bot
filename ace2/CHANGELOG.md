@@ -11,6 +11,20 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-11 (later) — A Week tab, and days that land in the date field
+
+**Week.** The board now has Today, Week, Waiting and Everything. Week is overdue plus the
+next seven days, with your follow-ups listed separately from real deadlines. That grouping
+already existed buried inside Everything; it has a name and a tab now.
+
+**A day you say out loud becomes a date.** When you name a day for something, Ace sets the
+row's deadline or follow-up field instead of writing the day into the sentence. Rows like
+"follow up Wednesday 9/11" could not be sorted, grouped or surfaced on the day — the new
+Week view is built entirely from those two fields, so this is what fills it.
+
+Both date pickers were already there, on the pencil: one for the deadline, one for the
+follow-up, each with a clear button. You can set or change either, and so can Ace.
+
 ## 2026-09-11 — A simpler board, honest failures, and a voice that can breathe
 
 **The board is one row now.** Today, Waiting and Everything, plus a Filter. Areas and

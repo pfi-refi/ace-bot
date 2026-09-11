@@ -299,9 +299,10 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
      await p.locator('#command-view .cmd-lens').count() === 1
      && await p.locator('#command-view > .cmd-areas').count() === 0
      && await p.locator('#command-view > .cmd-chips').count() === 0);
-  ok('...offering exactly Today, Waiting and Everything',
+  ok('...offering exactly Today, Week, Waiting and Everything',
      (await p.locator('.cmd-lens button[data-lens]').allInnerTexts())
-       .map(t => t.trim().split(' ')[0].toUpperCase()).join('|') === 'TODAY|WAITING|EVERYTHING');
+       .map(t => t.trim().split(' ')[0].toUpperCase()).join('|')
+       === 'TODAY|WEEK|WAITING|EVERYTHING');
   // A genuine entry='record' from the fixture. ('Unfiled thought from the truck' is an
   // ACTION — it reads like a note, which is exactly why the entry field exists.)
   const recordText = 'The Marlow deal';
@@ -316,6 +317,31 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
      && await p.locator('.cmd-sheet .cmd-chip').count() > 0);
   await openFilter();
   await p.screenshot({ path: `${OUT}/09-one-row.png` });
+
+  // ── 9d. The Week lens: the dated grouping, findable (2026-09-11, Brady asked for one)
+  await lens('week');
+  const weekTxt = await p.locator('#command-view .cmd-list').innerText();
+  ok('Week groups by date, not by age',
+     /TODAY|TOMORROW|THIS WEEK|OVERDUE/.test(weekTxt), weekTxt.slice(0, 70));
+  // Case-insensitive on purpose: .cmd-grp is text-transform: uppercase, so innerText comes
+  // back shouting and a case-sensitive match fails for a reason that has nothing to do with
+  // the code. That has bitten this project three times.
+  ok('...and lists follow-ups separately from deadlines',
+     !/FOLLOW-UPS/i.test(weekTxt) || /when you chase them/i.test(weekTxt));
+  ok('...and never shows the undated pile',
+     !/EVERYTHING ELSE/i.test(weekTxt));
+  // Week and Everything are built by ONE function, so a dated row cannot be in one only.
+  const weekIds = await p.evaluate(() =>
+    [...document.querySelectorAll('#command-view .cmd-row')].map(r => r.getAttribute('data-id')));
+  await lens('all');
+  const allIds = await p.evaluate(() =>
+    [...document.querySelectorAll('#command-view .cmd-row')].map(r => r.getAttribute('data-id')));
+  ok('every row in Week is also in Everything',
+     weekIds.every(id => allIds.includes(id)),
+     weekIds.filter(id => !allIds.includes(id)).join(','));
+  ok('...and Everything is the larger list', allIds.length >= weekIds.length,
+     `${allIds.length} vs ${weekIds.length}`);
+  await p.screenshot({ path: `${OUT}/09-week.png` });
 
   // ── 9c. Hiding records must never hide a DEADLINE (Codex, 2026-09-11)
   // A record with a due date is lane='today' and completable — an obligation, not reference.

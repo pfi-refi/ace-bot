@@ -2258,19 +2258,21 @@
     // TODAY IS THE SAME TODAY (2026-09-09, Brady). The Command Center and the Due Today card
     // must show the same work; this lens renders the server's `due_today` grouping directly
     // rather than filtering the list again with its own idea of what counts.
-    var LN={today:'Today',waiting:'Waiting',all:'Everything'};
-    var LENS_ORDER=['today','waiting','all'];
+    var LN={today:'Today',week:'Week',waiting:'Waiting',all:'Everything'};
+    var LENS_ORDER=['today','week','waiting','all'];
     // Retired lenses map onto what replaced them rather than silently resetting to Today:
     // Scheduled and Areas are Everything, Decide is pinned to the top of Today, Done is a
     // filter toggle.
-    var LENS_MIGRATE={due:'all',areas:'all',decide:'today',done:'all',pipeline:'all',lanes:'all'};
+    var LENS_MIGRATE={due:'week',areas:'all',decide:'today',done:'all',pipeline:'all',lanes:'all'};
     if (LENS_ORDER.indexOf(cmd.lens)<0) {
       if (cmd.lens==='done') cmd.showDone=true;
       cmd.lens = LENS_MIGRATE[cmd.lens] || 'today';
     }
     var nWait=cmd.items.filter(function(x){return x.lane==='waiting';}).length;
+    var nWeek=cmd.items.filter(function(x){
+      return x.status==='open' && ((x.due_days!=null && x.due_days<=7) || x.followup); }).length;
     var nDec=cmd.items.filter(function(x){return x.needs_decision;}).length;
-    var LC={waiting:nWait,decide:nDec};
+    var LC={waiting:nWait,decide:nDec,week:nWeek};
     var lenses=LENS_ORDER.map(function(l){
       var n=LC[l]; return '<button class="'+(l===cmd.lens?'on':'')+'" data-lens="'+l+'">'
         +LN[l]+(n?' <b>'+n+'</b>':'')+'</button>'; }).join('');
@@ -2380,37 +2382,50 @@
                       : '<div class="cmd-empty">Nothing parked on anyone else.</div>';
     }
     else {
-      // EVERYTHING. This absorbed the retired Scheduled lens rather than replacing it with a
-      // flat dump: the dated grouping and the follow-ups list lived ONLY there, and 20 of
-      // Brady's 63 rows are upcoming, so deleting it would have hidden most of his week.
+      // WEEK and EVERYTHING share one dated grouping (2026-09-11, Brady asked for a weekly
+      // board). The grouping already existed inside Everything — it was the retired Scheduled
+      // lens — but nobody could find it there. Week is that grouping ALONE: overdue, the next
+      // seven days, and the follow-ups. Everything is the same thing plus the undated rest.
+      //
+      // One function, so a row can never appear in one and not the other.
       var open=items.filter(function(x){ return x.status==='open'; });
       var dated=open.filter(function(x){ return x.due_days!=null && x.due_days<=7; })
                     .sort(function(a,b){ return a.due_days-b.due_days; });
-      [['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],
-       ['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]
-      ].forEach(function(bk){
-        var g=dated.filter(function(x){ return bk[1](x.due_days); });
-        if(g.length) body+='<div class="cmd-grp">'+bk[0]+' · '+g.length+' — deadlines</div>'
-                          +g.map(cmdRow).join('');
-      });
-      // A day Brady chose to chase something is not a deadline anyone gave him, so these are
-      // listed separately and labelled. Handling one leaves the task open.
       var fups=open.filter(function(x){ return x.followup; })
                    .sort(function(a,b){ return (a.followup||'')<(b.followup||'')?-1:1; });
-      if(fups.length) body+='<div class="cmd-grp">FOLLOW-UPS · '+fups.length+' — when you chase them</div>'
-                           +'<div class="cmd-note">Your own reminder to check in. Handling one leaves the task open.</div>'
-                           +fups.map(cmdRow).join('');
-      var shown={};
-      dated.concat(fups).forEach(function(x){ shown[x.id]=1; });
-      var rest=open.filter(function(x){ return !shown[x.id]; }).sort(byAge);
-      if(rest.length) body+='<div class="cmd-grp">EVERYTHING ELSE · '+rest.length+'</div>'
-                           +rest.map(cmdRow).join('');
-      if(cmd.showDone){
-        var fin=items.filter(function(x){ return x.status==='done'; }).sort(byAge);
-        if(fin.length) body+='<div class="cmd-grp">COMPLETED · '+fin.length+'</div>'
-                            +fin.map(cmdRow).join('');
+      function datedBody(){
+        var out='';
+        [['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],
+         ['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]
+        ].forEach(function(bk){
+          var g=dated.filter(function(x){ return bk[1](x.due_days); });
+          if(g.length) out+='<div class="cmd-grp">'+bk[0]+' · '+g.length+' — deadlines</div>'
+                           +g.map(cmdRow).join('');
+        });
+        // A day Brady chose to chase something is not a deadline anyone gave him, so these
+        // are listed separately and labelled. Handling one leaves the task open.
+        if(fups.length) out+='<div class="cmd-grp">FOLLOW-UPS · '+fups.length+' — when you chase them</div>'
+                            +'<div class="cmd-note">Your own reminder to check in. Handling one leaves the task open.</div>'
+                            +fups.map(cmdRow).join('');
+        return out;
       }
-      if(!body) body='<div class="cmd-empty">Nothing open.</div>';
+      body += datedBody();
+      if(cmd.lens==='week'){
+        if(!body) body='<div class="cmd-empty">Nothing dated in the next seven days. '
+                      +'Open a row and set a deadline or a follow-up to put it here.</div>';
+      } else {
+        var shown={};
+        dated.concat(fups).forEach(function(x){ shown[x.id]=1; });
+        var rest=open.filter(function(x){ return !shown[x.id]; }).sort(byAge);
+        if(rest.length) body+='<div class="cmd-grp">EVERYTHING ELSE · '+rest.length+'</div>'
+                             +rest.map(cmdRow).join('');
+        if(cmd.showDone){
+          var fin=items.filter(function(x){ return x.status==='done'; }).sort(byAge);
+          if(fin.length) body+='<div class="cmd-grp">COMPLETED · '+fin.length+'</div>'
+                              +fin.map(cmdRow).join('');
+        }
+        if(!body) body='<div class="cmd-empty">Nothing open.</div>';
+      }
     }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
     var addCat=cmd.cat==='All'?'Money':cmd.cat;

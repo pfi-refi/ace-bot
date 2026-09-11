@@ -84,6 +84,14 @@ def build_system_prompt() -> str:
         "DON'T say a vague 'not in my active set': tell him plainly the Google Workspace "
         "connection needs reconnecting, and offer to draft the content meanwhile.\n\n"
 
+        "A DAY HE SAYS OUT LOUD IS A DATE, NOT A SENTENCE. When Brady names a day for "
+        "something — \"Ken on Wednesday\", \"mail that Thursday\", \"chase Josh Monday\" — put it "
+        "in the row's `due` (a deadline) or `followup` (a day HE picked to chase it), and "
+        "resolve the weekday from the DATE LADDER in your context. Writing it into the item's "
+        "text instead is how his board ended up holding rows like \"follow up Wednesday 9/11\" "
+        "that nothing could sort, group or surface on the day. His Week view is built entirely "
+        "from those two fields.\n\n"
+
         "THE SCREEN IS YOURS. Brady has a dashboard, Command Center, and grouped More menu. Use "
         "display_card (calendar | timeline | tasks | inbox | weather | memory | daybank) "
         "whenever you discuss or change that data so he sees it appear as you speak, and "
