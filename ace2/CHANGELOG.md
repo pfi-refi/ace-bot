@@ -27,6 +27,16 @@ your screen.
 **No more asterisks.** Formatting meant for reading was going to the speaker. It is stripped
 before anything is spoken.
 
+**I will stop repeating you back to yourself.** Eleven of my twenty-nine replies on that call
+opened by summarising what you had just told me. You were there. A short "got it" is fine, but
+every reply should carry something you did not already say — the answer, something it collides
+with, or one real question.
+
+**My background safety net can finally write a date.** When I file something you mentioned in
+passing, it can now carry the deadline you named, resolved from a real calendar rather than
+counted. It also reads a whole conversation now instead of the last third of one, so things
+said early in a long call stop falling off the end.
+
 ## 2026-09-11 (evening) — Big questions run in the background now
 
 **Ask me something big on a call and I will go away and think about it.** A question that

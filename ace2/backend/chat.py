@@ -1258,6 +1258,12 @@ _learn_running = [False]
 _learn_state = {"last_hash": None}
 
 
+_SWEEP_TURNS = int(os.environ.get("ACE2_SWEEP_TURNS", "200"))
+_SWEEP_CHARS = int(os.environ.get("ACE2_SWEEP_CHARS", "60000"))
+# A day the sweep may write, and nothing looser — no prose, no weekday names.
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 async def compose_sweep(force: bool = False) -> dict:
     """Build one learning sweep's inputs + prompts WITHOUT spending a model call — the
     MAX BRIDGE (Brady's iMac running Claude Code on his Max plan, $0/token) pulls this,
@@ -1267,7 +1273,13 @@ async def compose_sweep(force: bool = False) -> dict:
         from . import db, daybank
         if not db.enabled():
             return {"skipped": "no db"}
-        turns = await asyncio.to_thread(db.recent_turns, 40)
+        # ONE CONVERSATION HAS TO FIT (2026-09-12). This read 40 turns. Brady's 12 Sept midday
+        # call alone produced 70 rows, so a sweep running when he hung up could not see the
+        # half where the money was discussed — it is the safety net for the things he says, and
+        # it was looking at the last third of them. Bounded by CHARACTERS as well as count, the
+        # same way the live thread is, so a run of brain-dump turns cannot blow the prompt up.
+        turns = await asyncio.to_thread(db.recent_turns, _SWEEP_TURNS)
+        turns = _budget_turns(turns, _SWEEP_CHARS)
         if not turns or len(turns) < 4:
             return {"skipped": "too few turns"}
         # Keep near-full turns: Brady's brain-dump turns run 1000-1600 chars and the old 400-char
@@ -1340,12 +1352,18 @@ async def compose_sweep(force: bool = False) -> dict:
                     "expanded, or with a different date — is NOT new. Skip it (or emit DONE if he "
                     "finished it). Never re-add a CLOSED item unless Brady explicitly reopened it. "
                     "New info about a tracked task is NOT a new task. For real new ones emit:\n"
-                    "ADD :: CATEGORY :: task title\n"
+                    "ADD :: CATEGORY :: task title :: DUE=YYYY-MM-DD\n"
+                    "The DUE field is OPTIONAL and goes LAST. Include it ONLY when Brady named a "
+                    "day or a deadline for that task out loud — 'by Monday', 'before the 18th', "
+                    "'next Friday'. Resolve the day from the DATE LADDER below; never count "
+                    "weekdays yourself and never invent a date he did not give. No date said, no "
+                    "DUE field — an invented deadline is worse than none.\n"
                     "(CATEGORY from — priority: Money, Bills, Opportunities, Goals, Personal; "
                     "back-burner: Deals, Agents, Admin, Networking, Business, Tech. A money/tax/"
                     "debt move → Money; a recurring bill → Bills; a job or contract-income lead → "
                     "Opportunities.) One per line, ONLY those two formats, no other text. If nothing, "
                     "reply NONE.\n\n"
+                    + date_ladder(datetime.now(EASTERN)) + "\n\n"
                     "OPEN ITEMS:\n" + (tracked or "(none)") + "\n\n"
                     "RECENTLY CLOSED (do not re-add):\n" + (tracked_closed or "(none)") + "\n\n"
                     f"CONVERSATION:\n{convo}")
@@ -1425,6 +1443,17 @@ async def apply_sweep(h: int, facts_text: str, triage_text: str, reflection_text
                             if ok2:
                                 closed += 1
                         continue
+                    # A DATE THE SWEEP CANNOT WRITE IS A DATE BRADY LOSES (2026-09-12). This
+                    # passed None for `due` unconditionally, so NOTHING the background sweep
+                    # filed could ever carry a deadline — most of why 64 open rows hold 26 due
+                    # dates and exactly ONE follow-up, and why the Week tab reads emptier than
+                    # his week is. An optional trailing DUE= field is lifted off here.
+                    due = None
+                    if parts and parts[-1].upper().startswith("DUE="):
+                        cand = parts[-1][4:].strip()
+                        if _ISO_DAY.fullmatch(cand):
+                            due = cand
+                        parts = parts[:-1]          # never let the field leak into the title
                     if verb == "ADD" and len(parts) >= 3:
                         cat, title = parts[1], "::".join(parts[2:]).strip()
                     elif verb not in ("DONE", "ADD") and len(parts) >= 2:
@@ -1434,7 +1463,7 @@ async def apply_sweep(h: int, facts_text: str, triage_text: str, reflection_text
                         continue
                     if len(title) > 4:
                         ok2, res2 = await asyncio.to_thread(
-                            daybank.add_item, "todo", title, None, [cat] if cat else None)
+                            daybank.add_item, "todo", title, due, [cat] if cat else None)
                         if ok2 and not (isinstance(res2, dict) and res2.get("dup")):
                             routed += 1
                 if routed or closed:
@@ -2971,6 +3000,13 @@ async def _fast_context() -> str:
         "asterisks, no bullets, no headings, no bold. If you catch yourself about to say "
         "'let me lay it all out' or 'here's what's live', stop: that is the sentence that "
         "turns into a two-minute monologue. "
+        "DO NOT REPLAY WHAT HE JUST SAID. He was there. Opening with 'Got it — so you are not "
+        "locking the sprint into today, you are sketching it out, then hitting it next week "
+        "once DoorDash is off' spends his time telling him his own sentence back. A short "
+        "'got it' is fine; the SUMMARY after it is the problem. Every reply must carry "
+        "something he did not already say: the answer, a consequence he has not spotted, the "
+        "thing it collides with, or one real question. If all you have is agreement, agree in "
+        "four words and stop. "
         "You are speaking out loud to Brady. Everything under LIVE CONTEXT above is "
         "live and in front of you — ANSWER FROM IT directly and confidently; never say you \"can't "
         "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
