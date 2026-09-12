@@ -13,66 +13,51 @@ he reads is the fix that holds.
 
 ## 2026-09-12 (later) — I check for what I did NOT write down
 
-**A new self-check: things you said out loud that nothing anywhere is holding.** Every check I
-run on myself asks whether what I wrote down is right. None of them could see the opposite
-problem — you say something on a call and it never becomes anything at all. This one reads
-your own words, and if nothing on the board, the calendar or in memory covers it, it says so.
+**A new self-check: things you said out loud that nothing is holding.** Every other check I run
+on myself asks whether what I wrote down is right. This one looks for the opposite — you say
+something on a call and it becomes nothing at all.
 
-**It reads all three, deliberately.** Durable context goes to memory and to-dos go to the
-board, on purpose, so a check that only reads the board would flag correctly-filed things as
-misses. That mistake was made while building this, six times over, which is why it reads
-everything.
+**It reads the board, the calendar and memory.** Durable context goes to memory and to-dos to
+the board on purpose, so a check reading only the board would flag correctly-filed things as
+misses.
 
-**It says nothing when it should.** It only picks up the way you actually phrase an
-obligation, it skips the conversational look-alikes like "I have to say", and it raises each
-thing once. Run against a whole day of real conversation it produced no false alarms. Costs
-nothing to run — no model call.
+**It stays quiet unless it is sure.** Only the way you actually phrase an obligation, never
+look-alikes like "I have to say", and each thing raised once. No model call, so it costs
+nothing.
+
 
 ## 2026-09-12 — Shorter answers, and I know what day Friday is
 
-**I was getting weekdays wrong on calls.** You told me Friday was the 18th and that I keep
-getting it wrong. You were right. I have had a table of the actual dates for named days since
-the 10th, and it was only ever wired into the typed side — the one that was not making the
-mistake. Voice has it now, so a day you say out loud gets looked up instead of counted.
+**I was getting weekdays wrong on calls.** You said Friday was the 18th and that I keep getting
+it wrong. I have had a table of real dates since the 10th and it was only wired into the typed
+side. Voice has it now, so a day you say out loud is looked up, not counted.
 
-**I was talking far too much.** On our call, seventeen of my twenty-nine replies ran past
-sixty words and the longest was a hundred and sixty-nine. That is over a minute of me talking
-without a break, which is most of why I seemed slow. Two or three sentences is the rule now,
-and I will not read a list out loud — you get the one thing that matters and the rest goes on
-your screen.
+**I was talking far too much.** Seventeen of my twenty-nine replies on that call ran past sixty
+words, the longest a hundred and sixty-nine — over a minute without a break. Two or three
+sentences now, and I will not read a list out loud: you get the one thing that matters and the
+rest goes on your screen.
 
-**No more asterisks.** Formatting meant for reading was going to the speaker. It is stripped
-before anything is spoken.
+**I will stop repeating you back to yourself.** Eleven of those replies opened by summarising
+what you had just said. Every reply should carry something you did not already say.
 
-**I will stop repeating you back to yourself.** Eleven of my twenty-nine replies on that call
-opened by summarising what you had just told me. You were there. A short "got it" is fine, but
-every reply should carry something you did not already say — the answer, something it collides
-with, or one real question.
+**No more asterisks**, and my background safety net can finally write a deadline you named
+instead of filing it undated.
 
-**My background safety net can finally write a date.** When I file something you mentioned in
-passing, it can now carry the deadline you named, resolved from a real calendar rather than
-counted. It also reads a whole conversation now instead of the last third of one, so things
-said early in a long call stop falling off the end.
 
 ## 2026-09-11 (evening) — Big questions run in the background now
 
-**Ask me something big on a call and I will go away and think about it.** A question that
-needs me to read eight or ten things and then work something out — a deep dive, everything on
-one deal, how the whole week lines up, what you have missed — used to run inside the call.
-You would hear me say "still on it" a couple of times and then nothing at all for the best
-part of a minute, and then the answer was thrown away. Now I start it in the background, tell
-you in one sentence that I am on it, and we keep talking.
+**Ask me something big on a call and I go away and think about it.** A question needing eight
+or ten lookups used to run inside the call: you would hear a couple of holding phrases, then
+nothing for the best part of a minute, and the answer was thrown away. Now I start it in the
+background, say so in one sentence, and we keep talking.
 
-**You get the answer in the same conversation.** When it lands I bring it up on my next turn,
-in my own words, and the full version stays on your screen until you dismiss it — it no
-longer disappears after nine seconds like a receipt does.
+**You get the answer in the same conversation**, on my next turn, and the full version stays on
+your screen until you dismiss it.
 
-**It can only read.** A deep dive looks at your board, calendar, memory, email and Drive. It
-cannot send, delete, schedule or change anything. If something needs doing it says so and
-leaves the decision to you.
+**It can only read** — board, calendar, memory, email and Drive. It cannot send, delete or
+schedule; if something needs doing it says so and leaves the call to you. Capped at twenty a
+day, because it costs real money.
 
-**It is capped.** Twenty a day, and each one has a hard limit on how much it reads, because
-this costs real money on the same key everything else uses.
 
 ## 2026-09-11 (later) — A Week tab, and days that land in the date field
 

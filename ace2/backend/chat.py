@@ -2783,7 +2783,15 @@ async def _refresh_recap() -> None:
 # The changelog ships with the code. Release authors must keep it current; shipping a file
 # does not prove a connector works. Share this bounded block across voice and chat.
 _CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
-_CHANGELOG_ENTRIES = 5
+# FOUR, not five: pinning the two standing limits costs about 900 characters of the same
+# budget, and at five the block sat 53 characters under the ceiling — one release from
+# silently dropping a note again.
+_CHANGELOG_ENTRIES = 4
+# Headings whose content is a standing limit rather than a release. Matched exactly.
+_CHANGELOG_PINNED = (
+    "2026-09-11 — Boundaries that still apply",
+    "2026-09-11 — Shared upgrade awareness",
+)
 _CHANGELOG_MAX_CHARS = 6000
 _changelog_cache = {"mtime": 0.0, "text": ""}
 
@@ -2797,8 +2805,16 @@ def _changelog_block() -> str:
         raw = _CHANGELOG.read_text(errors="replace")
         body = raw.split("---", 1)[1] if "---" in raw else raw
         parts = [p.strip() for p in body.split("\n## ") if p.strip()]
+        # STANDING LIMITS NEVER ROTATE OUT (2026-09-12). Two of these entries are not releases
+        # at all — they are invariants: personal Gmail is read-only, a draft is not sent work,
+        # iCloud and self-deployment are not abilities. Filed as dated entries, they aged out
+        # of the newest-five window the moment three real releases shipped in two days, and
+        # Ace silently stopped being told what he cannot do. They are pinned FIRST now, and
+        # the recency window fills what is left.
+        pinned = [p for p in parts if p.split("\n", 1)[0].strip() in _CHANGELOG_PINNED]
+        dated = [p for p in parts if p not in pinned][:_CHANGELOG_ENTRIES]
         out = []
-        for p in parts[:_CHANGELOG_ENTRIES]:
+        for p in pinned + dated:
             entry = "- " + " ".join(p.split())
             # Keep whole entries: truncation could remove a limitation or approval rule.
             if sum(len(x) + 1 for x in out) + len(entry) > _CHANGELOG_MAX_CHARS:

@@ -28,7 +28,7 @@ class UpgradeAwareness(unittest.TestCase):
             newest=[l for l in chat._CHANGELOG.read_text().splitlines() if l.startswith('## ')][0]
             self.assertIn(newest[3:].split('—')[0].strip(),block)
             self.assertLessEqual(len([l for l in block.splitlines() if l.startswith('- ')]),
-                                 chat._CHANGELOG_ENTRIES)
+                                 chat._CHANGELOG_ENTRIES + len(chat._CHANGELOG_PINNED))
             self.assertIn('spoken yes alone',voice)
             self.assertNotIn('confirmed true',voice)
 
@@ -53,6 +53,26 @@ class UpgradeAwareness(unittest.TestCase):
         self.assertNotIn('omitted for size',block)
         self.assertLess(len(block),chat._CHANGELOG_MAX_CHARS)
         self.assertIn('deferred',block)
+
+    def test_standing_limits_survive_any_number_of_releases(self):
+        """These are invariants filed as dated entries — what he cannot do, not what shipped.
+        Three releases in two days pushed them out of the recency window and Ace stopped being
+        told about them, which is how this pinning came to exist."""
+        block=chat._changelog_block()
+        for heading in chat._CHANGELOG_PINNED:
+            self.assertIn(heading, block, 'a standing limit rotated out of Ace\'s context')
+        for limit in ('deferred', 'read-only', 'not completed work'):
+            self.assertIn(limit, block)
+
+    def test_the_pinned_headings_actually_exist_in_the_file(self):
+        """A typo here fails silently: the entry simply is not pinned and nothing says so."""
+        raw = chat._CHANGELOG.read_text()
+        for heading in chat._CHANGELOG_PINNED:
+            self.assertIn('## ' + heading, raw)
+
+    def test_there_is_headroom_for_the_next_release(self):
+        """At five dated entries the block sat 53 characters under the ceiling."""
+        self.assertLess(len(chat._changelog_block()), chat._CHANGELOG_MAX_CHARS - 500)
         prompt=build_system_prompt()
         self.assertIn('read_attachment',prompt)
         self.assertNotIn('pull every number',prompt)
