@@ -555,7 +555,8 @@ try:
         async def _create(self, **kw):
             blocks = self.rounds.pop(0) if self.rounds else [
                 _types.SimpleNamespace(type="text", text="done")]
-            return _types.SimpleNamespace(content=blocks)
+            return _types.SimpleNamespace(content=blocks, stop_reason=(
+                "tool_use" if any(b.type == "tool_use" for b in blocks) else "end_turn"))
 
     _real_dive = _capmod.REGISTRY["deep_dive"]["handler"]
 

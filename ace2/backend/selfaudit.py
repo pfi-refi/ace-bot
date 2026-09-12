@@ -257,7 +257,7 @@ def _covered(fragment: str, text: str) -> float:
     return len(k & _stems(text)) / len(k)
 
 
-def _already_known(fragment: str, items: list, events: list, facts: list) -> bool:
+def _already_known(fragment: str, items: list, events: list, facts: list, said_at=None) -> bool:
     """True when the board, the calendar OR MEMORY already carries this.
 
     MEMORY IS NOT OPTIONAL HERE, and leaving it out is the exact mistake this detector exists
@@ -271,6 +271,12 @@ def _already_known(fragment: str, items: list, events: list, facts: list) -> boo
     something that nags.
     """
     for it in items or []:
+        if it.get("status") in ("done", "dropped", "closed", "completed"):
+            # A prior cycle's completion does not cover a newly stated obligation.
+            # Only a recorded closure after this statement can silence its candidate.
+            closed = _parse(it.get("done_ts"))
+            if not said_at or not closed or not closed.tzinfo or closed < said_at:
+                continue
         if _covered(fragment, it.get("text") or "") >= _SAID_MATCH:
             return True
     for e in events or []:
@@ -648,21 +654,26 @@ def audit(now: dict, prev: dict | None) -> list:
     # The only detector here that looks at what is NOT on the board. Reported ONCE per
     # fragment: an obligation Brady chose not to track must not become a daily nag, so the
     # snapshot carries what has already been raised.
-    seen = set((prev or {}).get("said_seen") or [])
+    # Versioned, dated keys: yesterday's reminder can be quiet without suppressing
+    # next month's obligation forever. Preserve insertion order for bounded eviction.
+    seen_order = [k for k in (prev or {}).get("said_seen") or []
+                  if isinstance(k, str) and k.startswith("v2:")]
+    seen = set(seen_order)
     fresh = []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_SAID_LOOKBACK_HOURS)
     for o in _obligations(now.get("turns") or []):
         at = _parse(o.get("at"))
-        if at and at < cutoff:
+        if not at or not at.tzinfo or at < cutoff:
             continue
-        key = " ".join(sorted(_keywords(o["said"])))
+        key = "v2:" + at.date().isoformat() + ":" + " ".join(sorted(_norm(o["said"])))
         if not key or key in seen:
             continue
         seen.add(key)
-        # EVERY row, not just the open ones: a dropped "Pay water bill — $50" means the
-        # obligation was seen and decided, which is not a capture failure.
+        seen_order.append(key)
+        # An existing row can cover the statement; historical closures cannot cover
+        # new obligations merely because the wording matches.
         if _already_known(o["said"], now.get("items") or [],
-                          now.get("events") or [], now.get("facts") or []):
+                          now.get("events") or [], now.get("facts") or [], said_at=at):
             continue
         fresh.append(o)
         if len(fresh) >= _SAID_MAX:
@@ -670,13 +681,13 @@ def audit(now: dict, prev: dict | None) -> list:
     for o in fresh:
         findings.append({
             "class": "SAIDNOTCAPTURED", "severity": "medium",
-            "detail": "Brady said this out loud and nothing on the board, the calendar or in "
-                      "memory covers it — it may simply not be worth tracking, but nothing "
-                      "caught it either way",
+            "detail": "Possibly untracked: I could not confidently match this statement to "
+                      "current board, calendar or memory records. It may already be covered "
+                      "in different wording, or may not be worth tracking; review before adding.",
             "text": o["said"],
         })
     # Bounded, newest last: the oldest keys fall off rather than growing without limit.
-    now["said_seen"] = list(seen)[-400:]
+    now["said_seen"] = seen_order[-400:]
 
     order = {"high": 0, "medium": 1, "low": 2}
     findings.sort(key=lambda f: order.get(f["severity"], 3))

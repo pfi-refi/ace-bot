@@ -405,6 +405,7 @@ async def _prime_voice_ctx():
     taskrunner.subscribe(_relay)
     try:
         await asyncio.to_thread(task_store.ready)
+        taskrunner.start_recovery()
     except Exception as e:
         logger.warning("task table not ready: %s", type(e).__name__)
 
@@ -710,11 +711,9 @@ async def board_lists_add(req: ListReq):
         ok, msg = await asyncio.to_thread(db.rename_area, name, req.rename_to)
         return {"ok": ok, "message": msg,
                 "areas": await asyncio.to_thread(db.all_areas), **(await board_payload())}
-    existing = await asyncio.to_thread(db.custom_lists)
-    if name in await asyncio.to_thread(db.all_areas):
-        return {"ok": False, "error": f"'{name}' already exists"}
-    ok = await asyncio.to_thread(db.set_custom_lists, existing + [name])
-    return {"ok": bool(ok), "areas": await asyncio.to_thread(db.all_areas)}
+    ok, msg = await asyncio.to_thread(db.add_custom_list, name)
+    return {"ok": bool(ok), "message": msg, **({"error": msg} if not ok else {}),
+            "areas": await asyncio.to_thread(db.all_areas)}
 
 
 class FollowupReq(BaseModel):
@@ -2277,19 +2276,29 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # status word, a continuer. The seam is a property of the stream, not of the speaker.
         resumed = {"after_tool": False, "tail": ""}   # see _resume_break
 
-        async def say(text: str):
+        async def say(text: str, ack=None):
             """Every spoken fragment goes out through here, so nothing can glue again —
             and nothing reaches the speaker still wearing its markdown."""
             text = _speakable(text)
             if not text:
+                if ack is not None and not ack.done():
+                    ack.set_result(False)
                 return          # the fragment was pure markup; there is nothing to say
             text = _resume_break(text, resumed["after_tool"], resumed["tail"])
             resumed["after_tool"] = False
             if text:
                 resumed["tail"] = text[-1]
-            await queue.put(("delta", text))
+            if ack is not None:
+                await queue.put(("task_notice", {"text": text, "ack": ack}))
+            else:
+                await queue.put(("delta", text))
 
         async def emit(event_type, payload):
+            if event_type == "task_notice":
+                ack = asyncio.get_running_loop().create_future()
+                spoke["any"] = True
+                await say(payload.get("text", ""), ack=ack)
+                return await ack
             if event_type == "delta":
                 spoke["any"] = True
                 await say(payload.get("text", ""))
@@ -2447,12 +2456,20 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                         "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": None}],
                     }) + "\n\n")
                     continue
+                notice_ack = None
+                if kind == "task_notice":
+                    notice_ack = text["ack"]
+                    text = text["text"]
                 chunk = {
                     "id": f"chatcmpl-{created}", "object": "chat.completion.chunk",
                     "created": created, "model": model,
                     "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
+                # Transport acknowledgment, not proof of playback: the SSE consumer must
+                # resume after receiving this exact notice before we consume its receipt.
+                if notice_ack is not None and not notice_ack.done():
+                    notice_ack.set_result(True)
             if not spoke["any"] and not sent_tool_call:
                 # Nothing ever streamed (a blank model turn) → an empty completion makes
                 # ElevenLabs treat the call as an LLM failure and cascade. Always say one line.

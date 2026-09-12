@@ -2145,7 +2145,7 @@ class VoiceSeamTests(unittest.TestCase):
         # not, and the count is what actually matters.
         self.assertEqual(src.count('queue.put(("delta"'), 1,
                          "more than one place emits a spoken delta — one of them skips the seam")
-        door = src[src.index("async def say(text: str):"):]
+        door = src[src.index("async def say(text: str,"):]
         door = door[:door.index("async def emit(")]
         self.assertIn('queue.put(("delta"', door, "the single delta emission is not inside say()")
         self.assertIn("await say(", src)

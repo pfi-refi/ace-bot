@@ -11,6 +11,17 @@ he reads is the fix that holds.
 
 ---
 
+
+## 2026-09-12 — Reliable background receipts and scheduled follow-ups
+
+Background results get an explicit notice; an unrelated reply cannot silently consume it.
+Failed or cut-short deep dives say so. Cancellation stops new work at the next boundary.
+After a server interruption, saved receipts remain available; started work is not replayed
+automatically. Week includes follow-up-only records. Bill amounts come from the sheet with
+exact cents and source rows; unclear amount cells are reported, never guessed. The capture
+check offers possible misses, not proof that it remembers everything.
+
+
 ## 2026-09-12 (evening) — I know what part of the day it is
 
 **No more "goodnight" at lunchtime.** I closed a midday call with "Goodnight, Brady" twice

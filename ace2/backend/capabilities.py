@@ -1486,57 +1486,75 @@ async def deep_dive(args: dict, call, progress=None, known=None,
         if progress:
             await progress(msg)
 
-    if should_stop and await should_stop():
-        raise Cancelled("Stopped before I read anything.", {})
+    reads_run = 0
+    used: dict = {}
+
+    def receipt():
+        return {"question": question, "reads_run": reads_run, "tools_used": dict(used)}
+
+    async def check_stop():
+        if should_stop and await should_stop():
+            raise Cancelled("Stopped partway. Nothing was changed — this only ever reads.",
+                            receipt())
+
+    def final_answer(resp):
+        # Tool preambles, truncated text and provider refusals are not completed analyses.
+        if getattr(resp, "stop_reason", None) != "end_turn":
+            raise Failed("The deep dive did not produce a complete final answer. "
+                         "Nothing was changed — this only reads.", receipt())
+        blocks = list(getattr(resp, "content", []) or [])
+        if any(getattr(b, "type", "") == "tool_use" for b in blocks):
+            raise Failed("The deep dive requested more work instead of a final answer.", receipt())
+        return "".join(getattr(b, "text", "") or "" for b in blocks
+                       if getattr(b, "type", "") == "text").strip()
+
+    await check_stop()
 
     from . import chat as _chat
     from . import tools as _tools
     await say("Reading your board, calendar and memory")
+    await check_stop()
     try:
         ctx_slow, ctx_fast = await _chat._live_context()
         context = (ctx_slow or "") + "\n" + (ctx_fast or "")
     except Exception as e:
+        await check_stop()
         # A deep dive without his data is just the model talking. Say so rather than produce
         # confident prose from nothing.
         raise Failed(f"I could not reach your data to build this ({type(e).__name__}), so I "
-                     f"have not written anything. Nothing was read.")
+                     f"have not written anything and cannot verify complete source coverage.", receipt())
 
     system = (_chat.build_system_prompt() + "\n\n---\n" + _DEEP_DIVE_RULES
               + "\n\n---\nLIVE CONTEXT\n" + context)
     messages = [{"role": "user", "content": question}]
     schemas = _deep_dive_schemas()
-    reads_run = 0
-    used: dict = {}
     answer = ""
     refused: list = []
     budget_hit = False
 
     for _round in range(max(1, DEEP_DIVE_MAX_ROUNDS)):
-        if should_stop and await should_stop():
-            raise Cancelled(
-                "Stopped partway. Nothing was changed — this only ever reads.",
-                {"question": question, "reads_run": reads_run})
+        await check_stop()
         try:
             resp = await client.messages.create(
                 model=_DEEP_DIVE_MODEL, max_tokens=2000, system=system,
                 messages=messages, tools=schemas)
         except Exception as e:
+            await check_stop()
             raise Failed(f"the deep dive did not come back ({type(e).__name__}), so I have "
-                         f"nothing to tell you. Nothing was changed — this only reads.")
+                         f"nothing to tell you. Nothing was changed — this only reads.", receipt())
+        await check_stop()
+        if getattr(resp, "stop_reason", None) not in ("end_turn", "tool_use"):
+            raise Failed("The deep dive response was incomplete; no finished answer is available.",
+                         receipt())
         blocks = list(getattr(resp, "content", []) or [])
-        text = "".join(getattr(b, "text", "") or "" for b in blocks
-                       if getattr(b, "type", "") == "text").strip()
         calls = [b for b in blocks if getattr(b, "type", "") == "tool_use"]
         if not calls:
-            answer = text
+            answer = final_answer(resp)
             break
-        # Keep the latest prose as a fallback: if the round budget runs out mid-tool-loop we
-        # still have something he can read, and the final pass below replaces it.
-        if text:
-            answer = text
         messages.append({"role": "assistant", "content": blocks})
         results = []
         for b in calls:
+            await check_stop()
             name = getattr(b, "name", "")
             if name not in DEEP_DIVE_READS:
                 # TWO LAYERS, ON PURPOSE. The model is only offered DEEP_DIVE_READS, so reaching
@@ -1562,6 +1580,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
                     used[name] = _today_iso()
             results.append({"type": "tool_result", "tool_use_id": getattr(b, "id", ""),
                             "content": out})
+        await check_stop()
         messages.append({"role": "user", "content": results})
         await say(f"Read {reads_run} source(s)")
     else:
@@ -1572,18 +1591,22 @@ async def deep_dive(args: dict, call, progress=None, known=None,
         messages.append({"role": "user", "content":
                          "Stop looking things up and write the deep dive now from what you "
                          "have. Say plainly what you did not get to check."})
+        await check_stop()
         try:
             resp = await client.messages.create(
                 model=_DEEP_DIVE_MODEL, max_tokens=2000, system=system, messages=messages)
-            answer = "".join(getattr(b, "text", "") or "" for b in
-                             (getattr(resp, "content", []) or [])
-                             if getattr(b, "type", "") == "text").strip() or answer
         except Exception as e:
-            logger.warning("deep_dive final pass failed: %s", type(e).__name__)
+            await check_stop()
+            raise Failed(f"The final deep-dive answer failed ({type(e).__name__}). "
+                         "The reads finished, but no completed analysis is available. "
+                         "Nothing was changed.", receipt()) from e
+        await check_stop()
+        answer = final_answer(resp)
 
+    await check_stop()
     if not answer:
         raise Failed("the deep dive came back empty, so there is nothing to tell you. "
-                     "Nothing was changed — this only reads.")
+                     "Nothing was changed — this only reads.", receipt())
 
     limits = []
     if budget_hit:
@@ -1600,9 +1623,10 @@ async def deep_dive(args: dict, call, progress=None, known=None,
 
     return {
         "question": question,
-        "answer": answer[:6000],
+        "answer": answer,
         "checked_at": _today_iso(),
         "reads_run": reads_run,
+        "tools_used": dict(used),
         "limits": limits,
         "warnings": limits,
     }

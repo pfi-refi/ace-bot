@@ -39,7 +39,9 @@ class Model:
         self.offered.append(sorted(t["name"] for t in (kw.get("tools") or [])))
         self.systems.append(kw.get("system") or "")
         blocks = self.rounds.pop(0) if self.rounds else [text_block("done")]
-        return types.SimpleNamespace(content=blocks)
+        return types.SimpleNamespace(content=blocks, stop_reason=(
+            "tool_use" if any(getattr(b, "type", "") == "tool_use" for b in blocks)
+            else "end_turn"))
 
 
 class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
@@ -150,6 +152,98 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FAST", model.systems[0])
 
 
+    async def test_failed_final_synthesis_never_returns_the_tool_preamble(self):
+        for outcome in (RuntimeError("offline"), TimeoutError("late"),
+                        types.SimpleNamespace(content=[], stop_reason="end_turn"),
+                        types.SimpleNamespace(content=[text_block("partial")], stop_reason="max_tokens"),
+                        types.SimpleNamespace(content=[text_block("refused")], stop_reason="refusal")):
+            with self.subTest(outcome=outcome):
+                model = Model()
+                model.messages.create = AsyncMock(side_effect=[
+                    types.SimpleNamespace(content=[text_block("Let me check first."),
+                        tool_block("recall")], stop_reason="tool_use"), outcome])
+                with patch.object(cp, "DEEP_DIVE_MAX_ROUNDS", 1):
+                    with self.assertRaises(cp.Failed) as caught:
+                        await self.run_dive(model)
+                self.assertNotIn("answer", caught.exception.result)
+                self.assertEqual(caught.exception.result["reads_run"], 1)
+
+    async def test_truncated_regular_response_cannot_execute_partial_tool_arguments(self):
+        model = Model()
+        model.messages.create = AsyncMock(return_value=types.SimpleNamespace(
+            content=[tool_block("recall")], stop_reason="max_tokens"))
+        with self.assertRaises(cp.Failed):
+            await self.run_dive(model)
+        self.assertEqual(self.executed, [])
+
+    async def test_cancellation_during_context_starts_no_model_work(self):
+        stopped = False
+        async def context():
+            nonlocal stopped
+            stopped = True
+            return "SLOW", "FAST"
+        model = Model()
+        with patch.object(chat, "_live_context", context):
+            with self.assertRaises(cp.Cancelled):
+                await self.run_dive(model, should_stop=AsyncMock(side_effect=lambda: stopped))
+        self.assertEqual(model.offered, [])
+
+    async def test_cancellation_during_model_starts_no_reads_or_final_request(self):
+        for has_tools in (True, False):
+            with self.subTest(has_tools=has_tools):
+                stopped = False
+                async def create(**kw):
+                    nonlocal stopped
+                    stopped = True
+                    return types.SimpleNamespace(
+                        content=[tool_block("recall")] if has_tools else [text_block("done")],
+                        stop_reason="tool_use" if has_tools else "end_turn")
+                model = Model()
+                model.messages.create = AsyncMock(side_effect=create)
+                with patch.object(cp, "DEEP_DIVE_MAX_ROUNDS", 1):
+                    with self.assertRaises(cp.Cancelled):
+                        await self.run_dive(model, should_stop=AsyncMock(side_effect=lambda: stopped))
+                self.assertEqual(model.messages.create.await_count, 1)
+                self.assertEqual(self.executed, [])
+
+    async def test_cancellation_during_tool_batch_prevents_remaining_reads_and_synthesis(self):
+        stopped = False
+        def execute(name, args):
+            nonlocal stopped
+            stopped = True
+            self.executed.append(name)
+            return "verified read"
+        model = Model([tool_block("recall"), tool_block("search_drive", bid="tu_2")])
+        with patch.object(tools, "execute", execute), patch.object(cp, "DEEP_DIVE_MAX_ROUNDS", 1):
+            with self.assertRaises(cp.Cancelled) as caught:
+                await self.run_dive(model, should_stop=AsyncMock(side_effect=lambda: stopped))
+        self.assertEqual(self.executed, ["recall"])
+        self.assertEqual(len(model.offered), 1)
+        self.assertEqual(caught.exception.result["reads_run"], 1)
+        self.assertIn("recall", caught.exception.result["tools_used"])
+
+    async def test_cancellation_during_final_synthesis_cannot_complete(self):
+        stopped = False
+        model = Model([tool_block("recall")], [text_block("Final answer")])
+        original = model.messages.create
+        async def create(**kw):
+            nonlocal stopped
+            response = await original(**kw)
+            if "tools" not in kw:
+                stopped = True
+            return response
+        model.messages.create = create
+        with patch.object(cp, "DEEP_DIVE_MAX_ROUNDS", 1):
+            with self.assertRaises(cp.Cancelled):
+                await self.run_dive(model, should_stop=AsyncMock(side_effect=lambda: stopped))
+        self.assertEqual(len(model.offered), 2)
+
+    async def test_complete_final_answer_is_not_silently_cut_at_6000_characters(self):
+        answer = "A" * 6500
+        result = await self.run_dive(Model([text_block(answer)]))
+        self.assertEqual(result["answer"], answer)
+
+
 class TheReadOnlyGuaranteeIsStructural(unittest.TestCase):
     def test_the_allowed_set_cannot_contain_a_write(self):
         self.assertTrue(cp.DEEP_DIVE_READS <= tools.NATIVE_READS)
@@ -193,7 +287,7 @@ class FinishedWorkReachesTheCall(unittest.TestCase):
         self.assertIn("Chris is next.", out)
         self.assertIn("how the week lines up", out)
         self.assertIn("caveat: Check the amounts.", out)
-        self.assertIn("in your own words", out)
+        self.assertIn("do not announce them yourself", out)
 
     def test_a_failure_is_reported_as_a_failure(self):
         out = chat._format_finished_tasks([{
@@ -230,7 +324,7 @@ class FinishedWorkReachesTheCall(unittest.TestCase):
 class AnnouncedOnce(unittest.IsolatedAsyncioTestCase):
     """Marked spoken only by a turn that actually said something."""
 
-    async def drive(self, reply_text):
+    async def drive(self, reply_text, fail_notice=False, extra_notice=None, accept_notice=True):
         import contextlib
         from backend import planning
         spoken, notice = [], {"id": "t9", "state": tasks.COMPLETED, "title": "the week",
@@ -260,6 +354,10 @@ class AnnouncedOnce(unittest.IsolatedAsyncioTestCase):
         client = types.SimpleNamespace(messages=types.SimpleNamespace(stream=stream))
 
         async def emit(kind, payload):
+            if kind == "task_notice":
+                if fail_notice:
+                    raise asyncio.CancelledError()
+                return accept_notice
             return None
 
         with contextlib.ExitStack() as stack:
@@ -274,7 +372,7 @@ class AnnouncedOnce(unittest.IsolatedAsyncioTestCase):
                 (chat.history, "append", lambda role, text: None),
                 (planning, "capture", lambda *a: None),
                 (planning, "context", lambda: ""),
-                (taskrunner, "pending_voice_notices", lambda limit=3: [notice]),
+                (taskrunner, "pending_voice_notices", lambda limit=3: [notice] + ([extra_notice] if extra_notice else [])),
                 (tasks, "mark_spoken", lambda tid: spoken.append(tid)),
             ):
                 stack.enter_context(patch.object(target, key, value))
@@ -290,8 +388,31 @@ class AnnouncedOnce(unittest.IsolatedAsyncioTestCase):
         left every other test in this class green while Brady heard nothing."""
         _reply, _spoken, sent = await self.drive("Chris is next.")
         system = "".join(b.get("text", "") for b in (sent.get("system") or []))
-        self.assertIn("FINISHED WHILE YOU WERE TALKING", system)
-        self.assertIn("Chris.", system)
+        self.assertIn("announced by the application", system)
+        self.assertIn("Do not announce them yourself", system)
+
+    async def test_unrelated_reply_gets_an_explicit_receipt_before_acknowledgement(self):
+        reply, spoken, _ = await self.drive("How is your afternoon going?")
+        self.assertIn("Your task, the week, has finished", reply)
+        self.assertIn("limitations", reply)
+        self.assertEqual(spoken, ["t9"])
+
+    async def test_unaccepted_notice_remains_pending(self):
+        reply, spoken, _ = await self.drive("Hello.", accept_notice=False)
+        self.assertEqual(reply, "Hello.")
+        self.assertEqual(spoken, [])
+
+    async def test_interrupted_notice_is_not_acknowledged(self):
+        # The stream propagates cancellation before the acknowledgement block.
+        with self.assertRaises(asyncio.CancelledError):
+            await self.drive("Hello.", fail_notice=True)
+
+    async def test_each_acknowledged_task_has_its_own_receipt(self):
+        reply, spoken, _ = await self.drive("Hello.", extra_notice={
+            "id": "t10", "state": tasks.FAILED, "title": "research", "error": "timeout"})
+        self.assertIn("the week, has finished", reply)
+        self.assertIn("research, did not finish", reply)
+        self.assertEqual(spoken, ["t9", "t10"])
 
     async def test_the_fallback_line_does_not_burn_the_notice(self):
         reply, spoken, _ = await self.drive("")

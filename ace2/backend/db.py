@@ -63,6 +63,8 @@ def enabled() -> bool:
 # invalidation and no staleness at all — so the cache is gone and this is what replaced it.
 _POOL = {"p": None}
 _POOL_LOCK = threading.Lock()
+_POOL_SLOTS = threading.BoundedSemaphore(10)
+_POOL_WAIT_SECONDS = 10.0
 
 
 def _pool():
@@ -77,29 +79,35 @@ def _pool():
 
 @contextmanager
 def _conn():
-    pool = _pool()
-    conn = pool.getconn()
-    # A pooled connection can be dead on arrival — Railway restarts, idle timeouts, a network
-    # blip. Returning it to the pool and asking for another is cheaper than failing a request,
-    # and closed connections are discarded rather than recycled.
-    if conn.closed:
-        pool.putconn(conn, close=True)
-        conn = pool.getconn()
+    # psycopg2's pool raises immediately on saturation. Queue for a bounded time
+    # instead, retaining a slot until commit/rollback and return have completed.
+    if not _POOL_SLOTS.acquire(timeout=_POOL_WAIT_SECONDS):
+        raise TimeoutError("Database busy; connection wait exceeded its limit")
+    pool = conn = None
     bad = False
     try:
+        pool = _pool()
+        conn = pool.getconn()
+        if conn.closed:
+            pool.putconn(conn, close=True)
+            conn = None
+            conn = pool.getconn()
         yield conn
         conn.commit()
     except Exception:
         bad = True
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        # A connection that raised may be in an unusable transaction state; drop it rather
-        # than hand the next caller a poisoned one.
-        pool.putconn(conn, close=bad or conn.closed)
+        try:
+            if conn is not None:
+                pool.putconn(conn, close=bad or conn.closed)
+        finally:
+            _POOL_SLOTS.release()
 
 
 def _init_schema():
@@ -764,40 +772,68 @@ def set_custom_lists(names: list) -> bool:
     return add_summary(_json.dumps(_clean_list_names(names)), "board_lists")
 
 
+def _list_metadata(cur):
+    """Serialize list writers across threads AND web processes before reading."""
+    import json
+    cur.execute("SELECT pg_advisory_xact_lock(167027, 1)")
+    values = {}
+    for kind, default in (("board_lists", []), ("board_list_renames", {})):
+        cur.execute("SELECT text FROM summaries WHERE kind=%s ORDER BY id DESC LIMIT 1", (kind,))
+        row = cur.fetchone()
+        values[kind] = json.loads(row[0]) if row else default
+    return values["board_lists"], values["board_list_renames"]
+
+
+def add_custom_list(name: str) -> tuple:
+    """Add from the current locked state; never overwrite a caller's stale snapshot."""
+    import json
+    name = (name or "").strip()[:40]
+    if not name:
+        return False, "a name is required"
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            lists, ren = _list_metadata(cur)
+            areas = [ren.get(b, b) for b in BUCKETS] + lists
+            if name.casefold() in {a.casefold() for a in areas + list(BUCKETS)}:
+                return False, f"'{name}' already exists or is reserved"
+            if len(lists) >= 20:
+                return False, "the 20 custom list limit has been reached"
+            cur.execute("INSERT INTO summaries (kind, text) VALUES (%s, %s)",
+                        ("board_lists", json.dumps(lists + [name])))
+        return True, "list added"
+    except Exception as e:
+        logger.error("add_custom_list rolled back: %s", e)
+        return False, "list could not be saved; nothing was changed"
+
+
 def rename_area(old_name: str, new_name: str) -> tuple:
-    """Rename a list. Every item and link follows it — the rows are updated in place, so
-    ids, history, parents and dates are all preserved."""
+    """Read metadata, validate, move rows and save the name under one database lock."""
+    import json
     old_name = (old_name or "").strip(); new_name = (new_name or "").strip()[:40]
     if not old_name or not new_name:
         return False, "both names are required"
-    if new_name in all_areas() and new_name != old_name:
-        return False, f"'{new_name}' already exists"
-    ren = area_renames()
-    lists = custom_lists()
-    # A built-in is a SLOT, not a label: renaming it records what he calls it now and leaves
-    # the slot itself in place, so keyword filing keeps landing in the same area.
-    canonical = next((b for b in BUCKETS if ren.get(b, b) == old_name), None)
-    if canonical is None and old_name not in lists:
-        return False, f"no list named '{old_name}'"
     ensure_ready()
-    # ONE TRANSACTION, OR NEITHER (Codex, 2026-09-09). The rows were moved and committed
-    # first, and the list metadata was written afterwards through add_summary — a separate
-    # connection whose result was not even read. If that second write failed, every item had
-    # already moved to a name the navigation and the keyword filing still did not know, and
-    # the caller was told "renamed". Both writes now share a cursor, so the commit at the end
-    # of the `with` block is the only thing that makes either of them real.
-    import json as _json
     try:
         with _conn() as c, c.cursor() as cur:
+            lists, ren = _list_metadata(cur)
+            canonical = next((b for b in BUCKETS if ren.get(b, b) == old_name), None)
+            if canonical is None and old_name not in lists:
+                return False, f"no list named '{old_name}'"
+            areas = [ren.get(b, b) for b in BUCKETS] + lists
+            if any(a != old_name and a.casefold() == new_name.casefold() for a in areas):
+                return False, f"'{new_name}' already exists"
+            if any(b != canonical and b.casefold() == new_name.casefold() for b in BUCKETS):
+                return False, f"'{new_name}' is a reserved list name"
             cur.execute("UPDATE daybank_items SET bucket = %s WHERE bucket = %s",
                         (new_name, old_name))
             moved = cur.rowcount or 0
             if canonical is not None:
                 ren[canonical] = new_name
-                payload = _json.dumps({k: v for k, v in ren.items() if v != k})
+                payload = json.dumps({k: v for k, v in ren.items() if v != k})
                 kind = "board_list_renames"
             else:
-                payload = _json.dumps(_clean_list_names(
+                payload = json.dumps(_clean_list_names(
                     [new_name if x == old_name else x for x in lists]))
                 kind = "board_lists"
             cur.execute("INSERT INTO summaries (kind, text) VALUES (%s, %s)", (kind, payload))
@@ -1482,6 +1518,8 @@ def add_summary(text: str, kind: str = "recap") -> bool:
     ensure_ready()
     try:
         with _conn() as c, c.cursor() as cur:
+            if kind in ("board_lists", "board_list_renames"):
+                cur.execute("SELECT pg_advisory_xact_lock(167027, 1)")
             cur.execute("INSERT INTO summaries (kind, text) VALUES (%s, %s)", (kind, text))
         return True
     except Exception as e:

@@ -33,7 +33,7 @@ import os
 import uuid
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytz
@@ -1479,7 +1479,10 @@ async def apply_sweep(h: int, facts_text: str, triage_text: str, reflection_text
                     if parts and parts[-1].upper().startswith("DUE="):
                         cand = parts[-1][4:].strip()
                         if _ISO_DAY.fullmatch(cand):
-                            due = cand
+                            try:
+                                due = date.fromisoformat(cand).isoformat()
+                            except ValueError:
+                                logger.warning("sweep refused an impossible due date: %s", cand)
                         parts = parts[:-1]          # never let the field leak into the title
                     if verb == "ADD" and len(parts) >= 3:
                         cat, title = parts[1], "::".join(parts[2:]).strip()
@@ -2022,6 +2025,9 @@ async def compose_brief_prompt(kind: str = "morning") -> str:
         money_block = (bills_sheet.format_due_soon(_bills, 10, now.date()) if _bills
                        else "(couldn't read the budget sheet — %s. Say so plainly; do NOT quote "
                             "bill amounts from the board, they are not maintained.)" % _bills_err)
+        if _bills and _bills_err:
+            money_block = ("INCOMPLETE VERIFIED LIST: " + _bills_err +
+                           " Disclose this gap; do not claim a complete total or infer the missing amount.\n" + money_block)
         today_str = now.strftime("%Y-%m-%d")
         sched = _format_today_schedule([e for e in events if e.get("date") == today_str], now)
         tomorrow_block = ""
@@ -2920,11 +2926,10 @@ def _format_finished_tasks(rows: list) -> str:
     """Settled background work, written so Ace can say it out loud without reading a card."""
     if not rows:
         return ""
-    lines = ["", "FINISHED WHILE YOU WERE TALKING — tell Brady about this in your next reply, "
-                 "briefly and in your own words. Lead with the answer, not with the fact that a "
-                 "task ran. Do NOT read it out verbatim and do not list every point; give him "
-                 "the headline and offer the rest. If it FAILED, say so plainly and say what "
-                 "did not happen:"]
+    lines = ["", "FINISHED WHILE YOU WERE TALKING — result context for answering questions. "
+                 "The application will announce these tasks after your reply; do not announce "
+                 "them yourself. Answer a direct question about a result using its actual "
+                 "contents and limitations. Failed work is not completed work:"]
     for t in rows:
         res = t.get("result") or {}
         title = (t.get("title") or t.get("capability") or "work").strip()
@@ -2940,6 +2945,17 @@ def _format_finished_tasks(rows: list) -> str:
         for w in (res.get("limits") or [])[:3]:
             lines.append(f"  caveat: {w}")
     return "\n".join(lines) + "\n"
+
+
+def _finished_task_notice(task: dict) -> str:
+    """A deterministic receipt, kept short enough for voice; full results stay on the card.
+
+    This confirms availability, not that the user has physically heard the audio.
+    """
+    title = str(task.get("title") or task.get("capability") or "background work").strip()[:160]
+    if task.get("state") == tasks_mod.FAILED:
+        return f"Your task, {title}, did not finish. Open its activity card for the error and any partial results."
+    return f"Your task, {title}, has finished. Its result and any limitations are ready in the activity card."
 
 
 async def _fast_context() -> str:
@@ -3747,7 +3763,11 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         try:
             from . import taskrunner as _taskrunner
             notices = await asyncio.to_thread(_taskrunner.pending_voice_notices, 2)
-            ctx += _format_finished_tasks(notices)
+            # Delivery is deterministic below; model prose cannot acknowledge a task.
+            # Keep the answer available for questions without asking the model to announce it.
+            if notices:
+                ctx += "\nBackground results will be announced by the application. " \
+                       "Do not announce them yourself.\n" + _format_finished_tasks(notices)
         except Exception as e:
             logger.warning("finished-task notices unavailable: %s", type(e).__name__)
 
@@ -4211,6 +4231,17 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             await asyncio.to_thread(planning.capture, "assistant", reply)
         except Exception as e:
             logger.warning("plan draft save failed: %s", type(e).__name__)
+        delivered_notices = []
+        # A model reply, even a fluent one, is not evidence that it mentioned a result.
+        # Emit a per-task receipt ourselves and acknowledge only after transport accepts it.
+        # No notices on fallback, hang-up, or an interrupted/failed stream.
+        if notices and full_reply and not passthrough_called:
+            for notice in notices:
+                notice_text = " " + _finished_task_notice(notice)
+                accepted = await emit("task_notice", {"text": notice_text, "task_id": notice["id"]})
+                if accepted is True:
+                    reply += notice_text
+                    delivered_notices.append(notice["id"])
         await emit("final", {"text": reply})
 
         # Persist to 2.0's OWN history (best-effort; never blocks the reply). ONLY the real
@@ -4227,10 +4258,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
 
         # Announced once — and only from a turn that actually said something. `full_reply`
         # is empty on the fallback line, which is not Ace telling him anything.
-        if notices and full_reply:
-            for _t in notices:
+        if delivered_notices:
+            for task_id in delivered_notices:
                 try:
-                    await asyncio.to_thread(tasks_mod.mark_spoken, _t["id"])
+                    await asyncio.to_thread(tasks_mod.mark_spoken, task_id)
                 except Exception as e:
                     logger.warning("mark_spoken failed: %s", type(e).__name__)
 

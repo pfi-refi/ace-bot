@@ -84,7 +84,9 @@ async def _wx():
 
 
 async def _bills():
-    return {'ok': True, 'items': [{'name': 'Electric', 'amount': 247.79, 'due': '2026-09-14'}]}
+    from backend.integrations.bills_sheet import parse_bills
+    return parse_bills([["Bill / Expense", "Due Day", "Monthly Amount"],
+                        ["Electric", "14", "$247.79"]], NOW.date()), "INCOMPLETE BILL LIST: row 15 unresolved; do not infer its amount."
 
 
 class _Clock(datetime):
@@ -214,3 +216,7 @@ if fails:
 print('ALL PASS — the composed 9 September input carries his plan, his corrections and the '
       'structured board state, and states the limits of its own change window.')
 print('Input written to /tmp/ace-brief-input.txt for reading. No model was called.')
+
+ok('verified bills survive an unresolved row', '$247.79' in p)
+ok('unresolved bill warning survives brief assembly', 'INCOMPLETE VERIFIED LIST' in p and 'row 15 unresolved' in p)
+ok('incomplete list is not a complete total', 'do not claim a complete total' in p)

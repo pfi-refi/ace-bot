@@ -166,6 +166,47 @@ class ItDoesNotNag(unittest.TestCase):
         self.assertLessEqual(len(found), sa._SAID_MAX)
 
 
+class OccurrencesAreNotHistoricalMatches(unittest.TestCase):
+    def test_old_completed_cycle_does_not_hide_next_month(self):
+        said = turn("I need to pay the water bill next month.")
+        old = {**row("Pay water bill"), "status": "done",
+               "done_ts": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()}
+        found, _ = audit([said], items=[old])
+        self.assertEqual(len(found), 1)
+        self.assertIn("Possibly untracked", found[0]["detail"])
+
+    def test_closure_after_statement_can_cover_it(self):
+        closed = {**row("Pay water bill"), "status": "done",
+                  "done_ts": datetime.now(timezone.utc).isoformat()}
+        found, _ = audit([turn("I need to pay the water bill.")], items=[closed])
+        self.assertEqual(found, [])
+
+    def test_undated_historical_closure_is_not_completion_evidence(self):
+        found, _ = audit([turn("I need to pay the water bill.")],
+                         items=[{**row("Pay water bill"), "status": "dropped"}])
+        self.assertEqual(len(found), 1)
+
+    def test_previous_date_does_not_suppress_same_words_today(self):
+        statement = "I need to pay the water bill."
+        yesterday = turn(statement)
+        yesterday["ts"] = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        _, snapshot = audit([yesterday])
+        today, _ = audit([turn(statement)], prev=snapshot)
+        self.assertEqual(len(today), 1)
+
+    def test_changed_timing_is_not_erased_from_seen_key(self):
+        _, snapshot = audit([turn("I need to pay the water bill this month.")])
+        found, _ = audit([turn("I need to pay the water bill next month.")], prev=snapshot)
+        self.assertEqual(len(found), 1)
+
+    def test_seen_eviction_retains_actual_newest_key(self):
+        prior = {"said_seen": ["v2:2000-01-01:old" + str(i) for i in range(400)]}
+        _, snapshot = audit([turn("I need to pay the water bill.")], prev=prior)
+        self.assertEqual(len(snapshot["said_seen"]), 400)
+        self.assertNotIn("v2:2000-01-01:old0", snapshot["said_seen"])
+        self.assertIn("water", snapshot["said_seen"][-1])
+
+
 class ItStaysFree(unittest.TestCase):
     def test_the_module_still_makes_no_model_call(self):
         """selfaudit's whole premise: 'a guard whose price scales with how broken things are

@@ -26,6 +26,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 from ..db import EASTERN
 
@@ -35,17 +36,32 @@ logger = logging.getLogger("ace2.bills")
 SHEET_ID = "1jLIskX1IYDnt4T5DuEKUxqD_LjZxqIT3NPuTusGP7nw"
 BILLS_TAB = "'1. Bills & Expenses'!A1:L1000"          # tab 1 — Bill / Due Day / Monthly Amount / Paid? / Paid From / Notes
 
-_MONEY = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
+_MONEY = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?")
 _DAY = re.compile(r"^\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*$", re.I)
 
 
-def _money(cell: str):
-    m = _MONEY.search(cell or "")
-    if not m:
+def _money(cell):
+    """Exact cents from a whole currency cell; never extract part of ambiguous prose."""
+    value = str(cell).strip() if cell is not None else ""
+    negative = value.startswith("(") and value.endswith(")")
+    if negative:
+        value = value[1:-1].strip()
+    if value.startswith("-"):
+        if negative:
+            return None
+        negative, value = True, value[1:].strip()
+    if value.startswith("$"):
+        value = value[1:].strip()
+    if value.startswith("-"):
+        if negative:
+            return None
+        negative, value = True, value[1:].strip()
+    if not _MONEY.fullmatch(value):
         return None
     try:
-        return float(m.group(1).replace(",", ""))
-    except ValueError:
+        amount = Decimal(value.replace(",", ""))
+        return (-amount if negative else amount).quantize(Decimal("0.01"))
+    except InvalidOperation:
         return None
 
 
@@ -78,7 +94,7 @@ def _next_occurrence(day: int, today):
     return None
 
 
-def parse_bills(rows: list, today=None) -> list:
+def parse_bills(rows: list, today=None, amount_errors=None) -> list:
     """Turn the raw sheet grid into bill dicts. Section headers and totals are skipped.
 
     Kept deliberately tolerant: a row only counts as a bill if it has a name and an amount,
@@ -110,6 +126,8 @@ def parse_bills(rows: list, today=None) -> list:
             continue
         amount = _money(amount_cell)
         if amount is None:
+            if amount_cell and amount_errors is not None:
+                amount_errors.append(row_number)
             continue
         day = _day(due_cell)
         note_due = None
@@ -125,6 +143,7 @@ def parse_bills(rows: list, today=None) -> list:
         out.append({
             "source_row": row_number, "date_from_notes": bool(note_due),
             "name": name, "section": section, "amount": amount,
+            "source_row": row_number, "date_from_notes": bool(note_due),
             "day": day, "due_on": _next_occurrence(day, today) if day else note_due,
             "paid": paid_cell.casefold() in ("yes", "paid", "true", "✓", "✔", "✅"), "paid_from": from_cell, "notes": notes,
         })
@@ -147,7 +166,14 @@ async def fetch_bills(today=None) -> tuple:
     except Exception as e:
         logger.warning("budget sheet read unavailable: %s", type(e).__name__)
         return [], "I could not verify the budget spreadsheet. Do not substitute board figures."
-    bills = parse_bills(rows, today)
+    amount_errors = []
+    bills = parse_bills(rows, today, amount_errors)
+    if amount_errors:
+        return bills, ("INCOMPLETE BILL LIST: I verified the amounts shown below, but could "
+                       "not verify the amount in spreadsheet row(s) " +
+                       ", ".join(map(str, amount_errors)) +
+                       ". Those rows are excluded, not zero. Do not infer their amounts "
+                       "from notes or board text, or claim a complete total until clarified.")
     if not bills:
         return [], "I reached the sheet but could not read any bill rows out of it"
     return bills, ""
@@ -161,15 +187,19 @@ def format_due_soon(bills: list, within_days: int = 10, today=None) -> str:
     """
     today = today or datetime.now(EASTERN).date()
     horizon = today + timedelta(days=within_days)
-    soon = [b for b in bills if b["due_on"] and today <= b["due_on"] <= horizon and not b["paid"]]
+    soon = [b for b in bills if b["due_on"] and not b["paid"] and
+            (today <= b["due_on"] <= horizon or
+             (b.get("date_from_notes") and b["due_on"] < today))]
     soon.sort(key=lambda b: b["due_on"])
     if not soon:
         return "(nothing due in the next %d days)" % within_days
     lines = []
     for b in soon:
         when = (b["due_on"] - today).days
-        label = "TODAY" if when == 0 else "tomorrow" if when == 1 else "in %dd" % when
-        line = "  %s — $%.2f — %s (sheet row %s)" % (b["name"], b["amount"], label, b.get("source_row", "?"))
+        label = (f"date passed {-when}d ago; not marked paid" if when < 0 else
+                 "TODAY" if when == 0 else "tomorrow" if when == 1 else "in %dd" % when)
+        line = (f"  {b['name']} — ${b['amount']:.2f} — {label} "
+                f"(sheet row {b.get('source_row', '?')})")
         if b.get("date_from_notes"):
             line += " [date from Notes; verify year if omitted]"
         if b["notes"]:

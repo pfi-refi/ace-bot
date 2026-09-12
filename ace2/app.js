@@ -2268,9 +2268,9 @@
       if (cmd.lens==='done') cmd.showDone=true;
       cmd.lens = LENS_MIGRATE[cmd.lens] || 'today';
     }
-    var nWait=cmd.items.filter(function(x){return x.lane==='waiting';}).length;
+    var nWait=cmd.items.filter(function(x){return lensOk(x) && x.status==='open' && x.lane==='waiting';}).length;
     var nWeek=cmd.items.filter(function(x){
-      return x.status==='open' && ((x.due_days!=null && x.due_days<=7) || x.followup); }).length;
+      return lensOk(x) && x.status==='open' && ((x.due_days!=null && x.due_days<=7) || x.followup); }).length;
     var nDec=cmd.items.filter(function(x){return x.needs_decision;}).length;
     var LC={waiting:nWait,decide:nDec,week:nWeek};
     var lenses=LENS_ORDER.map(function(l){
@@ -2314,7 +2314,7 @@
     // today disappear from Today AND Everything at once. Undated reference stays hidden;
     // anything with a real date does not.
     function recordOk(x){ return cmd.showRecords || cmd.lens==='waiting'
-                              || x.entry!=='record' || x.due_days!=null; }
+                              || x.entry!=='record' || x.due_days!=null || !!x.followup; }
     // The filter sheet narrows the WHOLE board, Today included — a Filter badge that says
     // two while Today quietly ignores both of them is a lie about what is on screen.
     function lensOk(x){ return (cmd.cat==='All'||cmdCatOf(x)===cmd.cat)

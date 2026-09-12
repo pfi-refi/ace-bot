@@ -52,17 +52,17 @@ async def _provider(name: str, arguments: dict) -> str:
     return await mcp_client.call(name, arguments)
 
 
-async def _execute(task_id: str, call=None) -> dict:
+async def _execute(task_id: str, call=None, claimed=None) -> dict:
     """One attempt. Only ever advances state on evidence."""
-    t = tasks.get(task_id)
+    t = claimed if claimed is not None else await asyncio.to_thread(tasks.get, task_id)
     if not t:
         return {}
     spec = capabilities.REGISTRY.get(t["capability"])
     if not spec:
-        return tasks.failed(task_id, f"{t['capability']} is not a supported task")
+        return await asyncio.to_thread(tasks.failed, task_id, f"{t['capability']} is not a supported task")
 
     async def progress(detail):
-        await _broadcast(tasks.working(task_id, detail))
+        await _broadcast(await asyncio.to_thread(tasks.working, task_id, detail))
 
     async def checkpoint(patch):
         """Written straight to the row, so a retry after a lost response resumes instead of
@@ -80,6 +80,9 @@ async def _execute(task_id: str, call=None) -> dict:
     used = {}
 
     async def recording_call(name, arguments):
+        if await should_stop():
+            row = await asyncio.to_thread(tasks.get, task_id)
+            raise capabilities.Cancelled("Stopped before the next tool call", row.get("result") or {})
         out = await (call or _provider)(name, arguments)
         if not capabilities._looks_like_error(out):
             used[name] = datetime.now(timezone.utc).isoformat()
@@ -88,9 +91,14 @@ async def _execute(task_id: str, call=None) -> dict:
     async def should_stop():
         # Read fresh each time: the request arrives from another request handler while this
         # coroutine is mid-flight, so a cached value would miss it.
-        return await asyncio.to_thread(tasks.is_cancel_requested, task_id)
+        current = await asyncio.to_thread(tasks.get, task_id)
+        return (not current or current.get("state") in tasks.TERMINAL
+                or current.get("attempts") != t.get("attempts")
+                or bool(current.get("cancel_requested")))
 
     try:
+        if await should_stop():
+            raise capabilities.Cancelled("Stopped before this attempt began", t.get("result") or {})
         result = await spec["handler"](t.get("args") or {}, recording_call, progress,
                                        t.get("result") or {}, checkpoint, should_stop)
     except capabilities.Cancelled as e:
@@ -99,27 +107,27 @@ async def _execute(task_id: str, call=None) -> dict:
         # Stopped at a boundary, carrying what already happened. Settled here — with the
         # receipt — rather than by the cancel request, which is why "cancelled" can no longer
         # be displayed while a file quietly exists.
-        return tasks.cancelled_with_receipt(task_id, e.result, e.message)
+        return await asyncio.to_thread(tasks.cancelled_with_receipt, task_id, e.result, e.message)
     except capabilities.Failed as e:
         if used:
             await asyncio.to_thread(tasks.checkpoint, task_id, {"tools_used": used})
         # A named, explainable failure. Any partial artefact rides along so Brady is told
         # what DOES exist rather than left to guess.
-        return tasks.failed(task_id, e.message, e.result)
+        return await asyncio.to_thread(tasks.failed, task_id, e.message, e.result)
     except asyncio.CancelledError:
         # The awaiting caller went away; the work itself is not cancelled by that. Leave the
-        # row in `working` so it is reclaimable, and never claim it stopped.
+        # row in `working`; heartbeat expiry will report interruption, never replay it.
         logger.info("task %s: awaiter cancelled; execution left to settle", task_id[:8])
         raise
     except Exception as e:
         logger.exception("task %s crashed", task_id[:8])
-        return tasks.failed(task_id, f"unexpected {type(e).__name__} — nothing verified")
+        return await asyncio.to_thread(tasks.failed, task_id, f"unexpected {type(e).__name__} — nothing verified")
     detail = ""
     if result.get("warnings"):
         detail = result["warnings"][0]
     if used:
         result = {**result, "tools_used": used}
-    return tasks.completed(task_id, result, detail)
+    return await asyncio.to_thread(tasks.completed, task_id, result, detail)
 
 
 async def run(task_id: str, call=None) -> dict:
@@ -129,20 +137,37 @@ async def run(task_id: str, call=None) -> dict:
     here, and exactly one of them executes.
     """
     if task_id in _running:
-        return tasks.get(task_id)
-    if not tasks.claim(task_id):
+        return await asyncio.to_thread(tasks.get, task_id)
+    claimed = await asyncio.to_thread(tasks.claim, task_id)
+    if not claimed:
         # Somebody else has it, or it is already finished. Re-broadcast so the caller's
         # surface still gets the current state.
-        cur = tasks.get(task_id)
+        cur = await asyncio.to_thread(tasks.get, task_id)
         await _broadcast(cur)
         return cur
     _running[task_id] = True
+    attempt = claimed.get("attempts", 0)
+    token = tasks._attempt.set((task_id, attempt))
+
+    async def renew():
+        while True:
+            await asyncio.sleep(max(0.1, min(30, tasks.STALE_WORKING_SECONDS / 3)))
+            try:
+                if not await asyncio.to_thread(tasks.heartbeat, task_id, attempt):
+                    return
+            except Exception:
+                logger.exception("task heartbeat unavailable")
+
+    lease = asyncio.create_task(renew())
     try:
-        await _broadcast(tasks.get(task_id))
-        out = await _execute(task_id, call)
+        await _broadcast(claimed)
+        out = await _execute(task_id, call, claimed=claimed)
         await _broadcast(out)
         return out
     finally:
+        lease.cancel()
+        await asyncio.gather(lease, return_exceptions=True)
+        tasks._attempt.reset(token)
         _running.pop(task_id, None)
 
 
@@ -154,6 +179,27 @@ def start(task_id: str, call=None) -> None:
 
 
 _bg: set = set()
+
+
+async def recover_once() -> None:
+    for row in await asyncio.to_thread(tasks.recover_interrupted):
+        await _broadcast(row)
+    for task_id in await asyncio.to_thread(tasks.queued_ids):
+        start(task_id)
+
+
+def start_recovery() -> None:
+    """Bounded maintenance, no model calls or replay of previously started work."""
+    async def monitor():
+        while True:
+            try:
+                await recover_once()
+            except Exception:
+                logger.exception("task recovery unavailable; will retry")
+            await asyncio.sleep(30)
+    task = asyncio.create_task(monitor())
+    _bg.add(task)
+    task.add_done_callback(_bg.discard)
 
 
 async def dispatch(capability: str, args: dict, origin: str = "voice",
@@ -214,22 +260,29 @@ async def dispatch(capability: str, args: dict, origin: str = "voice",
 
 
 async def resume_approved(task_id: str, call=None) -> dict:
-    """Continue a task Brady approved in the Review tray."""
-    t = tasks.get(task_id)
+    """Fail closed: task resumption has no binding to a consumed review authorization.
+
+    The real Review tray executes its stored payload through review_decide. A caller
+    naming this function "approved" is not evidence that this task was authorized.
+    """
+    t = await asyncio.to_thread(tasks.get, task_id)
     if not t or t["state"] != tasks.NEEDS_APPROVAL:
         return tasks.card(t) if t else {}
-    tasks.working(task_id, "Approved — continuing")
-    return await run(task_id, call)
+    out = await asyncio.to_thread(tasks.failed, task_id,
+        "This task cannot resume from an approval flag. No action was executed by this "
+        "request. Use the Review tray to act on the exact stored proposal.")
+    await _broadcast(out)
+    return tasks.card(out)
 
 
 async def deny(task_id: str, reason: str = "") -> dict:
     """Brady said no. That is a finished task with an honest ending, not a failure to retry."""
-    t = tasks.get(task_id)
+    t = await asyncio.to_thread(tasks.get, task_id)
     if not t:
         return {}
     if t["state"] in tasks.TERMINAL:
         return tasks.card(t)
-    out = tasks.failed(task_id, reason or "You said no, so I did not do it.")
+    out = await asyncio.to_thread(tasks.failed, task_id, reason or "You said no, so I did not do it.")
     await _broadcast(out)
     return tasks.card(out)
 
@@ -243,7 +296,7 @@ async def cancel(task_id: str, reason: str = "") -> dict:
     provider call is still in flight is what let Ace report a stopped task and then write the
     file anyway.
     """
-    verdict, t = tasks.request_cancel(task_id)
+    verdict, t = await asyncio.to_thread(tasks.request_cancel, task_id)
     if t:
         await _broadcast(t)
     card = tasks.card(t)

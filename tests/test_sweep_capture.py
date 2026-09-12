@@ -47,6 +47,17 @@ class SweptTasksCanCarryADate(unittest.TestCase):
         self.assertEqual(got[0]["text"], "Pay the electric disconnect")
         self.assertEqual(got[0]["tags"], ["Bills"])
 
+    def test_impossible_calendar_dates_are_not_stored(self):
+        for value in ("2026-02-31", "2026-02-29", "2026-13-01", "2026-00-10", "0000-01-01"):
+            with self.subTest(value=value):
+                got = self.run_sweep(f"ADD :: Bills :: Pay the water bill :: DUE={value}")
+                self.assertIsNone(got[0]["due"])
+                self.assertEqual(got[0]["text"], "Pay the water bill")
+
+    def test_valid_leap_day_survives(self):
+        got = self.run_sweep("ADD :: Bills :: Pay the water bill :: DUE=2028-02-29")
+        self.assertEqual(got[0]["due"], "2028-02-29")
+
     def test_no_date_said_means_no_date_invented(self):
         got = self.run_sweep("ADD :: Money :: Buy and install new tires")
         self.assertEqual(got[0]["due"], None)

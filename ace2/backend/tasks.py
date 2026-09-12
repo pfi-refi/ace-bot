@@ -24,6 +24,7 @@ import logging
 import os
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 from . import db
@@ -40,9 +41,11 @@ TERMINAL = frozenset({COMPLETED, FAILED, CANCELLED})
 LIVE = frozenset({QUEUED, WORKING, NEEDS_APPROVAL})
 STATES = TERMINAL | LIVE
 
-# A task claimed by a worker that dies leaves a row in `working` forever. After this it is
-# reclaimable — long enough that a slow provider is never stolen from.
+# Heartbeat expiry marks interrupted work failed; it never replays uncertain side effects.
+# A worker attempt is fenced from writes after expiry or an explicit retry.
 STALE_WORKING_SECONDS = int(os.environ.get("ACE2_TASK_STALE_SECONDS", "600"))
+_attempt = ContextVar("task_attempt", default=None)
+
 # How long two identical requests are treated as the same request. A repeated voice
 # transcript, a double-tap, or two tabs sending the same thing must not make two documents.
 DEDUP_WINDOW_SECONDS = int(os.environ.get("ACE2_TASK_DEDUP_SECONDS", "900"))
@@ -165,7 +168,7 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
                 cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                             (716296, f"{capability}:{day}"))
                 cur.execute("SELECT count(*) FROM ace_tasks WHERE capability = %s "
-                            "AND state <> %s AND created_at >= %s::date "
+                            "AND (state <> %s OR attempts > 0) AND created_at >= %s::date "
                             "AND created_at < (%s::date + interval '1 day')",
                             (capability, CANCELLED, day, day))
                 used = int(cur.fetchone()[0] or 0)
@@ -231,7 +234,7 @@ def get(task_id: str) -> dict:
         return {}
 
 
-def claim(task_id: str) -> bool:
+def claim(task_id: str) -> dict:
     """Move queued → working, exactly once. False when somebody else already has it.
 
     This is what stops two workers — two tabs, or a retry racing the original — from both
@@ -243,13 +246,52 @@ def claim(task_id: str) -> bool:
         with db._conn() as c, c.cursor() as cur:
             cur.execute("UPDATE ace_tasks SET state=%s, attempts=attempts+1, "
                         "started_at=now(), updated_at=now() WHERE id=%s AND "
-                        "(state=%s OR (state=%s AND started_at < now() - %s::interval)) ",
-                        (WORKING, task_id, QUEUED, WORKING,
-                         f"{STALE_WORKING_SECONDS} seconds"))
-            return (cur.rowcount or 0) > 0
+                        f"state=%s AND cancel_requested=false RETURNING {_COLS}",
+                        (WORKING, task_id, QUEUED))
+            row = cur.fetchone()
+            return _row(row) if row else {}
     except Exception as e:
         logger.warning("tasks.claim failed: %s", e)
         return False
+
+
+def _fence(task_id):
+    current = _attempt.get()
+    if current and current[0] == task_id:
+        return "AND attempts=%s", (current[1],)
+    return "", ()
+
+
+def heartbeat(task_id: str, attempt: int) -> bool:
+    """Renew only this worker's lease; a terminated/retried attempt cannot revive itself."""
+    with db._conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE ace_tasks SET updated_at=now() WHERE id=%s "
+                    "AND state=%s AND attempts=%s", (task_id, WORKING, attempt))
+        return bool(cur.rowcount)
+
+
+def recover_interrupted() -> list:
+    """Fail expired work honestly, preserving receipts and approvals. Never rerun it.
+
+    Conditional UPDATE serializes against heartbeats; a healthy overlapping deployment
+    keeps its jobs. Expired workers are fenced by terminal state and attempt identity.
+    """
+    with db._conn() as c, c.cursor() as cur:
+        cur.execute(f"UPDATE ace_tasks SET state=%s, settled_at=now(), updated_at=now(), "
+                    f"error=%s WHERE state=%s AND updated_at < now() - %s::interval "
+                    f"RETURNING {_COLS}",
+                    (FAILED, "Execution was interrupted and its worker stopped responding. "
+                     "Saved receipts are retained; external changes may already exist. "
+                     "I have not rerun it. Review the result before retrying.",
+                     WORKING, f"{STALE_WORKING_SECONDS} seconds"))
+        return [_row(r) for r in cur.fetchall()]
+
+
+def queued_ids(limit: int = 20) -> list:
+    with db._conn() as c, c.cursor() as cur:
+        cur.execute("SELECT id FROM ace_tasks WHERE state=%s AND cancel_requested=false "
+                    "ORDER BY created_at LIMIT %s", (QUEUED, limit))
+        return [r[0] for r in cur.fetchall()]
 
 
 def _advance(task_id: str, state: str, **fields) -> dict:
@@ -275,11 +317,12 @@ def _advance(task_id: str, state: str, **fields) -> dict:
     if state in TERMINAL:
         sets.append("settled_at=now()")
     args.append(task_id)
+    fence, fence_args = _fence(task_id)
     try:
         with db._conn() as c, c.cursor() as cur:
             cur.execute(f"UPDATE ace_tasks SET {', '.join(sets)} WHERE id=%s "
-                        f"AND state NOT IN %s RETURNING {_COLS}",
-                        tuple(args) + (tuple(TERMINAL),))
+                        f"AND state NOT IN %s {fence} RETURNING {_COLS}",
+                        tuple(args) + (tuple(TERMINAL),) + fence_args)
             r = cur.fetchone()
             if not r:
                 cur.execute(f"SELECT {_COLS} FROM ace_tasks WHERE id=%s", (task_id,))
@@ -309,12 +352,13 @@ def checkpoint(task_id: str, patch: dict) -> dict:
     """
     if not enabled() or not patch:
         return {}
+    fence, fence_args = _fence(task_id)
     try:
         with db._conn() as c, c.cursor() as cur:
             cur.execute(f"UPDATE ace_tasks SET result = COALESCE(result,'{{}}'::jsonb) || "
                         f"%s::jsonb, updated_at=now() WHERE id=%s AND state NOT IN %s "
-                        f"RETURNING {_COLS}",
-                        (json.dumps(patch), task_id, tuple(TERMINAL)))
+                        f"{fence} RETURNING {_COLS}",
+                        (json.dumps(patch), task_id, tuple(TERMINAL)) + fence_args)
             r = cur.fetchone()
             return _row(r) if r else {}
     except Exception as e:
@@ -346,22 +390,30 @@ def request_cancel(task_id: str) -> tuple:
     already running gets a FLAG, and the handler stops at its next side-effect boundary and
     reports what it had already done. Nothing here claims the work did not happen.
     """
-    got = get(task_id)
-    if not got:
+    if not enabled():
         return "gone", {}
-    if got["state"] in TERMINAL:
-        return "too_late", got
-    if got["state"] == QUEUED:
-        out = _advance(task_id, CANCELLED, detail="Stopped before it started")
-        return "cancelled", out
     try:
         with db._conn() as c, c.cursor() as cur:
-            cur.execute("UPDATE ace_tasks SET cancel_requested=true, updated_at=now() "
-                        "WHERE id=%s AND state NOT IN %s", (task_id, tuple(TERMINAL)))
+            # Race claim under the row lock. Only a still-queued row can truthfully
+            # say it stopped before execution; a claimed row needs a cancellation flag.
+            cur.execute(f"UPDATE ace_tasks SET state=%s, detail=%s, settled_at=now(), "
+                        f"updated_at=now() WHERE id=%s AND state=%s RETURNING {_COLS}",
+                        (CANCELLED, "Stopped before it started", task_id, QUEUED))
+            row = cur.fetchone()
+            if row:
+                return "cancelled", _row(row)
+            cur.execute(f"UPDATE ace_tasks SET cancel_requested=true, updated_at=now() "
+                        f"WHERE id=%s AND state IN %s RETURNING {_COLS}",
+                        (task_id, (WORKING, NEEDS_APPROVAL)))
+            row = cur.fetchone()
+            if row:
+                return "requested", _row(row)
+            cur.execute(f"SELECT {_COLS} FROM ace_tasks WHERE id=%s", (task_id,))
+            row = cur.fetchone()
+            return ("too_late", _row(row)) if row else ("gone", {})
     except Exception as e:
         logger.warning("tasks.request_cancel failed: %s", e)
-        return "gone", got
-    return "requested", get(task_id)
+        return "gone", {}
 
 
 def is_cancel_requested(task_id: str) -> bool:
@@ -418,7 +470,7 @@ def reserve_daily(capability: str, cap: int, day: str) -> tuple:
             cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                         (716296, f"{capability}:{day}"))
             cur.execute("SELECT count(*) FROM ace_tasks WHERE capability = %s "
-                        "AND state <> %s AND created_at >= %s::date "
+                        "AND (state <> %s OR attempts > 0) AND created_at >= %s::date "
                         "AND created_at < (%s::date + interval '1 day')",
                         (capability, CANCELLED, day, day))
             used = int(cur.fetchone()[0] or 0)
@@ -440,10 +492,19 @@ def retry(task_id: str) -> dict:
     """
     if not enabled():
         return {}
+    # A paid requeue would reuse yesterday's admission row and bypass today's cap.
+    # Paid retries must enter through dispatch/accept as a newly budgeted attempt.
+    from . import capabilities
+    current = get(task_id)
+    if not current:
+        return {}
+    if (capabilities.REGISTRY.get(current.get("capability")) or {}).get("costs_money"):
+        logger.info("tasks.retry refused paid requeue; use fresh admitted dispatch")
+        return {}
     try:
         with db._conn() as c, c.cursor() as cur:
             cur.execute(f"UPDATE ace_tasks SET state=%s, error=NULL, settled_at=NULL, "
-                        f"updated_at=now() WHERE id=%s AND state=%s RETURNING {_COLS}",
+                        f"updated_at=now(), cancel_requested=false, spoken_at=NULL WHERE id=%s AND state=%s RETURNING {_COLS}",
                         (QUEUED, task_id, FAILED))
             r = cur.fetchone()
             return _row(r) if r else {}
