@@ -4007,6 +4007,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                             missing = ("No question came through. Ask Brady what he wants "
                                        "you to think through, in one short sentence.")
                         task_args = {"question": question}
+                        if a.get("context_scope") in ("general", "personal"):
+                            task_args["context_scope"] = a["context_scope"]
                         task_title = question[:120]
                     if not cap:
                         result = ("No task type came through. Ask Brady what he wants in one "

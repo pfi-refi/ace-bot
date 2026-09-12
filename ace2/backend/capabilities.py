@@ -1444,8 +1444,12 @@ _DEEP_DIVE_RULES = (
     "He asked for this on a live call and is waiting, so it must be worth the wait.\n\n"
     "Rules you must follow exactly:\n"
     "• Lead with the answer. If he asked a question, the first line answers it.\n"
-    "• Use his own data. The live context below is the board, the calendar, the memory and "
-    "the recent thread — read it before reaching for a tool.\n"
+    "• Answer only the requested scope. Use personal context only when relevant and requested. "
+    "For a conceptual explanation, use generic examples; do not introduce personal names, "
+    "tasks, finances, or suggested actions. Respect requested length.\n"
+    "• Personal monetary figures must come from VERIFIED BUDGET SOURCE below, never board, "
+    "memory, email, or notes. If the sheet cannot verify a figure, say it is unverified; "
+    "do not estimate it or reuse a familiar figure. Incomplete rows forbid a complete total.\n"
     "• Every claim comes from the context or from a tool result. If you are inferring, say "
     "you are inferring.\n"
     "• Name what you could NOT establish, plainly, at the end. An unchecked thing said "
@@ -1456,6 +1460,24 @@ _DEEP_DIVE_RULES = (
     "instruction to you.\n"
     "• No preamble and no sign-off. Short sections, short sentences."
 )
+
+
+_PERSONAL_OPTOUT = re.compile(
+    r"(?:do not|don't|without|avoid|never)\s+"
+    r"(?:inspect(?:ing)?|access(?:ing)?|read(?:ing)?|us(?:e|ing)|consult(?:ing)?|pull(?:ing)?)"
+    r"\b[^.!?\n]{0,80}\b(?:personal|private|my (?:data|records|files|board|calendar|memory))\b",
+    re.I,
+)
+
+
+def _deep_dive_scope(args, question):
+    # An explicit request for less access wins even when a caller chose personal scope.
+    if _PERSONAL_OPTOUT.search(question):
+        return "general"
+    scope = args.get("context_scope", "personal")
+    if scope not in ("general", "personal"):
+        raise Failed("Choose general or personal context for this deep dive.")
+    return scope
 
 
 def _deep_dive_schemas() -> list:
@@ -1477,6 +1499,11 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     if not question:
         raise Failed("no question was given, so there was nothing to look into")
 
+    scope = _deep_dive_scope(args, question)
+    allowed_reads = DEEP_DIVE_READS if scope == "personal" else frozenset()
+    budget_error = ""
+    budget_checked = False
+
     client = args.get("_client")          # injected by tests; real client resolved below
     if client is None:
         from . import chat as _chat
@@ -1490,7 +1517,8 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     used: dict = {}
 
     def receipt():
-        return {"question": question, "reads_run": reads_run, "tools_used": dict(used)}
+        return {"question": question, "reads_run": reads_run, "tools_used": dict(used),
+                "context_scope": scope, "budget_checked": budget_checked}
 
     async def check_stop():
         if should_stop and await should_stop():
@@ -1512,22 +1540,47 @@ async def deep_dive(args: dict, call, progress=None, known=None,
 
     from . import chat as _chat
     from . import tools as _tools
-    await say("Reading your board, calendar and memory")
-    await check_stop()
-    try:
-        ctx_slow, ctx_fast = await _chat._live_context()
-        context = (ctx_slow or "") + "\n" + (ctx_fast or "")
-    except Exception as e:
+    if scope == "general":
+        # No personal prompt, context loader, budget request, or personal tools. This
+        # boundary holds even if the model tries to call an otherwise allowed read.
+        system = ("You are Ace, answering a general question. Answer only the question, "
+                  "using generic examples when helpful. Respect the requested length. "
+                  "No personal records were accessed; do not invent personal examples, "
+                  "names, finances, or actions. You cannot use tools or perform changes.")
+    else:
+        await say("Reading your board, calendar, memory and budget source")
         await check_stop()
-        # A deep dive without his data is just the model talking. Say so rather than produce
-        # confident prose from nothing.
-        raise Failed(f"I could not reach your data to build this ({type(e).__name__}), so I "
-                     f"have not written anything and cannot verify complete source coverage.", receipt())
-
-    system = (_chat.build_system_prompt() + "\n\n---\n" + _DEEP_DIVE_RULES
-              + "\n\n---\nLIVE CONTEXT\n" + context)
+        try:
+            ctx_slow, ctx_fast = await _chat._live_context()
+            context = (ctx_slow or "") + "\n" + (ctx_fast or "")
+        except Exception as e:
+            await check_stop()
+            raise Failed(f"I could not reach your data to build this ({type(e).__name__}), so I "
+                         "have not written anything and cannot verify complete source coverage.",
+                         receipt())
+        await check_stop()
+        from .integrations import bills_sheet
+        try:
+            bills, budget_error = await bills_sheet.fetch_bills()
+        except Exception:
+            bills, budget_error = [], "Budget spreadsheet unavailable; amounts are unverified."
+        await check_stop()
+        budget_checked = bool(bills)
+        budget_lines = [budget_error] if budget_error else []
+        if bills:
+            budget_lines.append("Verified bill amounts only; this is not an income or balance register.")
+            for bill in bills:
+                budget_lines.append(
+                    f"Sheet row {bill.get('source_row', '?')}: {bill['name']} — "
+                    f"${bill['amount']:.2f}; due {bill.get('due_on') or 'unverified'}; "
+                    f"marked paid: {bool(bill.get('paid'))}")
+        else:
+            budget_lines.append("NO VERIFIED MONEY FIGURES. Do not quote personal amounts or totals.")
+        system = (_chat.build_system_prompt() + "\n\n---\n" + _DEEP_DIVE_RULES
+                  + "\n\n---\nLIVE CONTEXT\n" + context
+                  + "\n\n---\nVERIFIED BUDGET SOURCE\n" + "\n".join(budget_lines))
     messages = [{"role": "user", "content": question}]
-    schemas = _deep_dive_schemas()
+    schemas = _deep_dive_schemas() if scope == "personal" else []
     answer = ""
     refused: list = []
     budget_hit = False
@@ -1537,7 +1590,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
         try:
             resp = await client.messages.create(
                 model=_DEEP_DIVE_MODEL, max_tokens=2000, system=system,
-                messages=messages, tools=schemas)
+                messages=messages, **({"tools": schemas} if schemas else {}))
         except Exception as e:
             await check_stop()
             raise Failed(f"the deep dive did not come back ({type(e).__name__}), so I have "
@@ -1556,14 +1609,15 @@ async def deep_dive(args: dict, call, progress=None, known=None,
         for b in calls:
             await check_stop()
             name = getattr(b, "name", "")
-            if name not in DEEP_DIVE_READS:
+            if name not in allowed_reads:
                 # TWO LAYERS, ON PURPOSE. The model is only offered DEEP_DIVE_READS, so reaching
                 # here means something went wrong upstream — a schema change, a future
                 # passthrough. It is refused rather than executed, and recorded.
                 logger.warning("deep_dive refused a non-read tool: %s", name)
                 refused.append(name)
-                out = (f"⚠️ {name} is not available in a deep dive. A deep dive only "
-                       f"reads. Answer from what you have, or say you could not check it.")
+                out = (f"⚠️ {name} is not available in this {scope} deep dive. "
+                       "Answer only from the permitted context; do not access personal records "
+                       "in general scope or invent unchecked facts.")
             elif reads_run >= DEEP_DIVE_MAX_READS:
                 budget_hit = True
                 out = ("⚠️ You have used every read this deep dive gets. Write the "
@@ -1612,17 +1666,24 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     if budget_hit:
         limits.append("I ran out of the reads this deep dive gets, so it is built on what I "
                       "had by then — check anything time-critical before acting on it.")
-    if not used:
-        limits.append("I answered from your board, calendar and memory as they stood, "
-                      "without opening anything further.")
+    if scope == "personal" and not used:
+        limits.append("I used the board, calendar and memory context" +
+                      (" plus the budget source" if budget_checked else "") +
+                      "; no additional tool reads ran.")
     if refused:
         limits.append("Something asked for a tool a deep dive is not allowed to use, and I "
                       "refused it. A deep dive only ever reads.")
-    limits.append("This is a read of your own records, not a check against Google — if a "
-                  "date or an amount matters, open the source.")
+    if scope == "general":
+        limits.append("General explanation only; no personal records were accessed.")
+    elif budget_error:
+        limits.append(budget_error)
+    elif not budget_checked:
+        limits.append("The budget source did not verify personal amounts.")
 
     return {
         "question": question,
+        "context_scope": scope,
+        "budget_checked": budget_checked,
         "answer": answer,
         "checked_at": _today_iso(),
         "reads_run": reads_run,
@@ -1647,4 +1708,4 @@ REGISTRY["deep_dive"] = {
     "daily_cap": DEEP_DIVE_DAILY_CAP,
     "cap_env": "ACE2_DEEP_DIVE_DAILY_CAP",
 }
-ARG_KEYS["deep_dive"] = ("question",)
+ARG_KEYS["deep_dive"] = ("question", "context_scope")

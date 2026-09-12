@@ -685,6 +685,12 @@ START_TASK = {
                                 "terms. Include what he actually wants to know, not a "
                                 "keyword."),
             },
+            "context_scope": {
+                "type": "string", "enum": ["general", "personal"],
+                "description": ("For deep_dive: use general for conceptual questions, fictional examples, "
+                                "or a request not to read personal records. General cannot read personal "
+                                "stores or tools. Use personal only when his actual records are needed."),
+            },
             "blocks": {
                 "type": "array",
                 "items": {"type": "string"},

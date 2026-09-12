@@ -19,7 +19,9 @@ Failed or cut-short deep dives say so. Cancellation stops new work at the next b
 After a server interruption, saved receipts remain available; started work is not replayed
 automatically. Week includes follow-up-only records. Bill amounts come from the sheet with
 exact cents and source rows; unclear amount cells are reported, never guessed. The capture
-check offers possible misses, not proof that it remembers everything.
+check offers possible misses, not proof that it remembers everything. General background
+questions can run without personal records; personal deep dives verify bill figures from
+the sheet and disclose gaps instead of borrowing amounts from board text.
 
 
 ## 2026-09-12 (evening) — I know what part of the day it is

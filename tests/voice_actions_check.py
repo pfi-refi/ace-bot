@@ -562,8 +562,11 @@ try:
 
     async def _scripted_dive(args, call, progress=None, known=None,
                              checkpoint=None, should_stop=None):
-        return await _real_dive({**args, "_client": _ScriptedModel()}, call, progress,
-                                known, checkpoint, should_stop)
+        from unittest.mock import patch as _patch, AsyncMock as _AsyncMock
+        with _patch("backend.integrations.bills_sheet.fetch_bills",
+                    _AsyncMock(return_value=([], "Offline fixture; no budget source"))):
+            return await _real_dive({**args, "_client": _ScriptedModel()}, call, progress,
+                                    known, checkpoint, should_stop)
 
     _capmod.REGISTRY["deep_dive"]["handler"] = _scripted_dive
     _was_dive_cap = _capmod.REGISTRY["deep_dive"]["daily_cap"]

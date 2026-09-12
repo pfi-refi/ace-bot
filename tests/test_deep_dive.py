@@ -16,6 +16,7 @@ from unittest.mock import patch, AsyncMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ace2'))
 from backend import capabilities as cp
 from backend import chat, ops, tasks, taskrunner, tools
+from backend.integrations import bills_sheet
 
 
 def text_block(t):
@@ -56,6 +57,7 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
             patch.object(chat, "_live_context", AsyncMock(return_value=("SLOW", "FAST"))),
             patch.object(chat, "build_system_prompt", lambda: "ACE"),
             patch.object(tools, "execute", fake_execute),
+            patch.object(bills_sheet, "fetch_bills", AsyncMock(return_value=([], "Sheet unavailable"))),
         ]
         for p in self.patches:
             p.start()
@@ -242,6 +244,70 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
         answer = "A" * 6500
         result = await self.run_dive(Model([text_block(answer)]))
         self.assertEqual(result["answer"], answer)
+
+
+    async def test_general_context_does_not_load_or_expose_personal_sources(self):
+        model = Model([text_block("Waiting means blocked; ready means actionable.")])
+        with patch.object(chat, "_live_context", AsyncMock()) as context, \
+             patch.object(chat, "build_system_prompt") as profile, \
+             patch.object(bills_sheet, "fetch_bills", AsyncMock()) as budget:
+            result = await cp.deep_dive({"question": "Explain waiting versus ready in two sentences.",
+                                        "context_scope": "general", "_client": model}, None)
+        context.assert_not_awaited()
+        budget.assert_not_awaited()
+        profile.assert_not_called()
+        self.assertEqual(model.offered, [[]])
+        self.assertEqual(result["context_scope"], "general")
+        self.assertFalse(result["budget_checked"])
+        self.assertEqual(result["reads_run"], 0)
+        self.assertIn("no personal records", result["limits"][-1].lower())
+
+    async def test_explicit_optout_overrides_personal_scope(self):
+        for question in ("Do not inspect personal records. Explain waiting versus ready.",
+                         "Explain prioritization without using my data.",
+                         "Don't read my calendar. Give a generic explanation."):
+            with self.subTest(question=question):
+                model = Model([text_block("General answer")])
+                with patch.object(chat, "_live_context", AsyncMock()) as context:
+                    out = await self.run_dive(model, question=question)
+                context.assert_not_awaited()
+                self.assertEqual(out["context_scope"], "general")
+
+    async def test_general_scope_refuses_hallucinated_personal_read_at_execution(self):
+        model = Model([tool_block("recall")], [text_block("General explanation")])
+        with patch.object(chat, "_live_context", AsyncMock()) as context:
+            result = await cp.deep_dive({"question": "Explain waiting", "context_scope": "general",
+                                        "_client": model}, None)
+        context.assert_not_awaited()
+        self.assertEqual(self.executed, [])
+        self.assertEqual(result["reads_run"], 0)
+        self.assertTrue(all(offered == [] for offered in model.offered))
+
+    async def test_personal_context_contains_exact_budget_source_once(self):
+        from decimal import Decimal
+        bills = [{"name": "Fixture bill", "amount": Decimal("247.79"), "source_row": 15,
+                  "notes": "Old figure $999", "paid": False}]
+        model = Model([text_block("Verified amount is $247.79.")])
+        with patch.object(bills_sheet, "fetch_bills", AsyncMock(return_value=(bills, ""))) as budget:
+            out = await self.run_dive(model)
+        budget.assert_awaited_once()
+        source = model.systems[0].split("VERIFIED BUDGET SOURCE\n")[-1]
+        self.assertIn("Sheet row 15: Fixture bill — $247.79", source)
+        self.assertNotIn("999", source)
+        self.assertTrue(out["budget_checked"])
+        self.assertIn("never board", model.systems[0])
+
+    async def test_budget_failure_and_partial_source_are_explicit(self):
+        for bills, error in (([], "Sheet offline"),
+                             ([{"name": "Fixture", "amount": 50}], "INCOMPLETE BILL LIST: row 15")):
+            with self.subTest(error=error):
+                model = Model([text_block("Some amounts are unverified.")])
+                with patch.object(bills_sheet, "fetch_bills", AsyncMock(return_value=(bills, error))):
+                    out = await self.run_dive(model)
+                self.assertIn(error, model.systems[0])
+                self.assertIn(error, out["limits"])
+                if not bills:
+                    self.assertIn("NO VERIFIED MONEY FIGURES", model.systems[0])
 
 
 class TheReadOnlyGuaranteeIsStructural(unittest.TestCase):
