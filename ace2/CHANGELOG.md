@@ -11,6 +11,23 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-12 (later) — I check for what I did NOT write down
+
+**A new self-check: things you said out loud that nothing anywhere is holding.** Every check I
+run on myself asks whether what I wrote down is right. None of them could see the opposite
+problem — you say something on a call and it never becomes anything at all. This one reads
+your own words, and if nothing on the board, the calendar or in memory covers it, it says so.
+
+**It reads all three, deliberately.** Durable context goes to memory and to-dos go to the
+board, on purpose, so a check that only reads the board would flag correctly-filed things as
+misses. That mistake was made while building this, six times over, which is why it reads
+everything.
+
+**It says nothing when it should.** It only picks up the way you actually phrase an
+obligation, it skips the conversational look-alikes like "I have to say", and it raises each
+thing once. Run against a whole day of real conversation it produced no false alarms. Costs
+nothing to run — no model call.
+
 ## 2026-09-12 — Shorter answers, and I know what day Friday is
 
 **I was getting weekdays wrong on calls.** You told me Friday was the 18th and that I keep

@@ -135,6 +135,153 @@ def _parse(ts: str | None):
         return None
 
 
+
+# ── SAID BUT NEVER CAPTURED (2026-09-12) ───────────────────────────────────────
+# Every other detector in this file asks whether what is ON the board is right. None of them
+# could see the failure Brady actually hit on 12 Sept: he listed the truck payment, the water
+# bill and the tires out loud, and only the tires became a row. A guard that only inspects
+# what was written can never find what was never written.
+#
+# NO MODEL CALL, like everything else in this file — so this cannot ask "was that a task?".
+# It leans the other way instead: match only Brady's own explicit obligation phrasing, throw
+# away the conversational look-alikes, and require enough substance to be checkable. It WILL
+# miss things he stated indirectly — "there's the water due next week" has no lead-in and is
+# not caught. A detector that fires on half his sentences is one he stops reading, so recall
+# is the cheaper thing to lose here.
+_SAID_LEAD = re.compile(
+    r"\b(?:i\s+(?:have\s+to|need\s+to|gotta|got\s+to|have\s+got\s+to|still\s+need\s+to|"
+    r"want\s+to\s+get|am\s+going\s+to|'?m\s+going\s+to)|i'?ll\s+need\s+to|"
+    r"don'?t\s+forget\s+to|remind\s+me\s+to)\s+", re.I)
+
+# "I have to say", "I need to know" — the same words doing conversational work. Judged on the
+# few words that FOLLOW the lead-in, which is where the tell is.
+_SAID_NOT_TASK = re.compile(
+    r"^(?:say|know|be\s+honest|admit|tell\s+you|ask\s+you|think|see|understand|"
+    r"remember\s+that|figure\s+out\s+how|explain|mention|be\s+careful|watch\s+out|"
+    r"go\b|do\s+that\b|get\s+going|run\b)", re.I)
+
+# Below this the fragment is too thin to match against anything: "I have to go", "I need to do
+# that" carry no object, so a missing row proves nothing.
+# Clause boundaries in spoken run-ons.
+_SAID_SPLIT = re.compile(r",?\s+(?:and|but|then|also|plus|so)\s+|,\s+", re.I)
+# Two content words is the floor. Three sounded safer and quietly dropped "get my electric
+# bill paid", which is a real obligation with exactly two — so vagueness is handled by the
+# filler list below instead of by a count, which cannot tell "water bill" from "some numbers".
+_SAID_MIN_TOKENS = 2
+# CALIBRATED ON THE LIVE STORES, 2026-09-12. Six things Brady said on that day's call and which
+# are genuinely tracked — electric, tires, truck loan, water, Rebecca's packet, the Michigan
+# training week — all score >= 0.60. Two invented misses score <= 0.50. Re-check this number
+# against real data before moving it.
+_SAID_MATCH = 0.60
+_SAID_MAX = 6              # a chatty day must not produce a wall of findings
+_SAID_LOOKBACK_HOURS = 26  # one overnight plus a morning, so nothing falls between ticks
+
+
+def _obligations(turns: list) -> list:
+    """Fragments where Brady stated an obligation, in his own words. Deterministic."""
+    out = []
+    for t in turns or []:
+        if (t.get("role") or "") != "user":
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", t.get("content") or ""):
+            m = _SAID_LEAD.search(sentence)
+            if not m:
+                continue
+            rest = sentence[m.end():].strip(" ,.;:\u2014-")
+            if not rest or _SAID_NOT_TASK.match(rest):
+                continue
+            # One obligation per sentence. The lead-in often repeats — "I have to get the
+            # tires that I have to put on my truck" — and both halves are the same task.
+            rest = _SAID_LEAD.split(rest)[0].strip(" ,.;:\u2014-")
+            # ONE CLAUSE, NOT ONE BREATH. Brady talks in run-ons: "get my uncle's greenhouse
+            # poured next week at some point, and I know I'm potentially helping Damon on
+            # Friday" is two things, and judged whole it collects so many keywords that the
+            # row which DOES cover the first half cannot clear the threshold. It read as
+            # uncaptured on the first live run for exactly that reason.
+            clause = _SAID_SPLIT.split(rest)[0].strip(" ,.;:\u2014-")
+            if len(_keywords(clause)) < _SAID_MIN_TOKENS:
+                continue
+            out.append({"said": clause[:140], "at": t.get("ts") or ""})
+    return out
+
+
+# Words that carry no identifying weight, on top of _STOP. `_score` is tuned for comparing two
+# BOARD ROWS, which are written alike; a spoken sentence is mostly verbs and filler and scores
+# far too low against a row that genuinely covers it — measured at 0.40 for "I have to get the
+# tires that I have to put on my truck" against "Buy and install new tires for truck (~$100)".
+# So this asks a different question: are the CONTENT words of what he said present somewhere?
+_SAID_FILLER = frozenset({
+    "have", "get", "got", "need", "want", "gotta", "put", "make", "take", "give", "going",
+    "do", "done", "doing", "sent", "send", "pay", "paid", "buy", "new", "some", "thing",
+    "things", "stuff", "really", "just", "also", "still", "then", "now", "today", "tomorrow",
+    "next", "week", "month", "out", "back", "over", "down", "off", "all", "one", "two",
+    "couple", "few", "more", "much", "lot", "look", "see", "check", "start", "keep", "let",
+    "him", "her", "them", "there", "here", "what", "which", "who", "when", "where", "how",
+    "can", "will", "would", "should", "could", "been", "was", "were", "had", "did", "but",
+    "because", "like", "yeah",
+    # Words that name no particular thing. "I have to review some numbers" is not checkable
+    # against any row, and reporting it teaches Brady to ignore the detector.
+    "review", "number", "numbers", "detail", "details", "situation", "option", "options",
+    "idea", "ideas", "note", "notes", "list", "everything", "anything", "something",
+    # Possessives and pronouns _STOP does not cover. "look at our budget" reduced to
+    # {our, budget} and cleared the two-word floor on nothing.
+    "our", "your", "their", "its", "you", "we", "us", "me", "they", "he", "she"})
+
+
+def _stem(tok: str) -> str:
+    """Enough stemming to match speech against a written row, and no more.
+
+    `_norm` strips only a trailing "s", so "poured" never reached "pour" and the uncle's
+    greenhouse pour — which IS on the board — read as uncaptured on the first live run.
+    """
+    for suffix in ("ing", "ed"):
+        if len(tok) > len(suffix) + 2 and tok.endswith(suffix):
+            return tok[:-len(suffix)]
+    return tok
+
+
+def _stems(text: str) -> frozenset:
+    return frozenset(_stem(t) for t in _norm(text))
+
+
+def _keywords(text: str) -> frozenset:
+    return frozenset(_stem(t) for t in _norm(text)
+                     if len(t) > 2 and t not in _SAID_FILLER)
+
+
+def _covered(fragment: str, text: str) -> float:
+    """Share of the fragment's content words that appear in `text`."""
+    k = _keywords(fragment)
+    if not k:
+        return 0.0
+    return len(k & _stems(text)) / len(k)
+
+
+def _already_known(fragment: str, items: list, events: list, facts: list) -> bool:
+    """True when the board, the calendar OR MEMORY already carries this.
+
+    MEMORY IS NOT OPTIONAL HERE, and leaving it out is the exact mistake this detector exists
+    to prevent. Ace routes durable context to memory and actionable to-dos to the board, on
+    purpose. On 12 Sept I read only the board, found no row for the Michigan training week or
+    Gabby's annuity, and reported both to Brady as things Ace had failed to capture. Both were
+    in memory, filed correctly. A guard that checks one store would have produced six false
+    alarms that day — worse than no guard, because he would learn to ignore it.
+
+    Deliberately generous: a false negative here is silence, which is the safe direction for
+    something that nags.
+    """
+    for it in items or []:
+        if _covered(fragment, it.get("text") or "") >= _SAID_MATCH:
+            return True
+    for e in events or []:
+        if _covered(fragment, e.get("title") or "") >= _SAID_MATCH:
+            return True
+    for f in facts or []:
+        if _covered(fragment, f.get("text") or "") >= _SAID_MATCH:
+            return True
+    return False
+
+
 def audit(now: dict, prev: dict | None) -> list:
     """Compare current state against the previous snapshot. Returns findings, worst first."""
     findings = []
@@ -497,6 +644,40 @@ def audit(now: dict, prev: dict | None) -> list:
                        f"in recent memory" + (" (stopped counting)" if capped else "")),
         })
 
+    # --- SAIDNOTCAPTURED: he said it and nothing anywhere holds it ---------------
+    # The only detector here that looks at what is NOT on the board. Reported ONCE per
+    # fragment: an obligation Brady chose not to track must not become a daily nag, so the
+    # snapshot carries what has already been raised.
+    seen = set((prev or {}).get("said_seen") or [])
+    fresh = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_SAID_LOOKBACK_HOURS)
+    for o in _obligations(now.get("turns") or []):
+        at = _parse(o.get("at"))
+        if at and at < cutoff:
+            continue
+        key = " ".join(sorted(_keywords(o["said"])))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        # EVERY row, not just the open ones: a dropped "Pay water bill — $50" means the
+        # obligation was seen and decided, which is not a capture failure.
+        if _already_known(o["said"], now.get("items") or [],
+                          now.get("events") or [], now.get("facts") or []):
+            continue
+        fresh.append(o)
+        if len(fresh) >= _SAID_MAX:
+            break
+    for o in fresh:
+        findings.append({
+            "class": "SAIDNOTCAPTURED", "severity": "medium",
+            "detail": "Brady said this out loud and nothing on the board, the calendar or in "
+                      "memory covers it — it may simply not be worth tracking, but nothing "
+                      "caught it either way",
+            "text": o["said"],
+        })
+    # Bounded, newest last: the oldest keys fall off rather than growing without limit.
+    now["said_seen"] = list(seen)[-400:]
+
     order = {"high": 0, "medium": 1, "low": 2}
     findings.sort(key=lambda f: order.get(f["severity"], 3))
     return findings
@@ -520,6 +701,10 @@ def _collect() -> dict:
         out["facts"] = db.read_facts_full()
     except Exception as e:
         out["facts"] = []; out["errors"].append(f"facts: {e}")
+    try:
+        out["turns"] = db.recent_turns(300)
+    except Exception as e:
+        out["turns"] = []; out["errors"].append(f"turns: {e}")
     return out
 
 
@@ -546,7 +731,10 @@ def _save_snapshot(now: dict) -> None:
     try:
         slim = {"at": now.get("at"),
                 "items": [{"id": i.get("id"), "status": i.get("status"), "state": i.get("state")}
-                          for i in now.get("items") or []]}
+                          for i in now.get("items") or []],
+                # Which spoken obligations have already been raised, so one Brady chose not to
+                # track does not become a daily nag. Written by audit() onto `now`.
+                "said_seen": now.get("said_seen") or []}
         db.add_summary(json.dumps(slim), _SNAP_KIND)
     except Exception as e:
         logger.warning("selfaudit snapshot save failed: %s", e)
