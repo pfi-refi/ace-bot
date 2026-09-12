@@ -11,6 +11,22 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-12 — Shorter answers, and I know what day Friday is
+
+**I was getting weekdays wrong on calls.** You told me Friday was the 18th and that I keep
+getting it wrong. You were right. I have had a table of the actual dates for named days since
+the 10th, and it was only ever wired into the typed side — the one that was not making the
+mistake. Voice has it now, so a day you say out loud gets looked up instead of counted.
+
+**I was talking far too much.** On our call, seventeen of my twenty-nine replies ran past
+sixty words and the longest was a hundred and sixty-nine. That is over a minute of me talking
+without a break, which is most of why I seemed slow. Two or three sentences is the rule now,
+and I will not read a list out loud — you get the one thing that matters and the rest goes on
+your screen.
+
+**No more asterisks.** Formatting meant for reading was going to the speaker. It is stripped
+before anything is spoken.
+
 ## 2026-09-11 (evening) — Big questions run in the background now
 
 **Ask me something big on a call and I will go away and think about it.** A question that

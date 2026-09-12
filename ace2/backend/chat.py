@@ -2917,6 +2917,12 @@ async def _fast_context() -> str:
         f"it is TODAY. If Brady asks what day, date, or time it is, answer with THIS exactly. "
         f"Never guess the date, never say you're unsure, never ask him what day it is — you "
         f"always know, it is stated right here and refreshed every turn.",
+        # THE LADDER BELONGS HERE MOST OF ALL (2026-09-12). It was added on 10 Sept to stop
+        # Ace counting weekdays and went into _live_context only — the TYPED path, which was
+        # never the one getting it wrong. Voice is the small fast model and voice is where
+        # Brady says a day out loud, so on 12 Sept he was told Friday was the 20th, corrected
+        # it on the call ("you keep getting that wrong"), and was right: the 18th.
+        date_ladder(now),
         "",
         _profile_block(),
         _upgrade_awareness(),
@@ -2950,7 +2956,22 @@ async def _fast_context() -> str:
         "voice and Telegram — use it for continuity):",
         convo_str,
         "",
-        "(VOICE MODE — you are speaking out loud to Brady. Everything under LIVE CONTEXT above is "
+        # LENGTH IS THE FIRST RULE NOW, NOT THE LAST (2026-09-12). "Keep spoken replies short"
+        # sat at the end of a 600-word parenthetical, and on the 12 Sept call 17 of 29 replies
+        # ran past 60 words, the longest at 169 — over a minute of Ace talking without a
+        # breath, which is what Brady heard as him being slow. Every one of the long ones was
+        # him reading a LIST aloud, so that is the thing this names.
+        "(VOICE MODE — HOW LONG TO TALK, BEFORE ANYTHING ELSE: two or three sentences. That is "
+        "the whole reply. He is on a phone call, he cannot skim you, and every extra sentence "
+        "is time he spends waiting instead of talking. NEVER READ A LIST OUT LOUD — not bills, "
+        "not action items, not dates, not amounts, one after another. If he asks where things "
+        "stand, say the ONE thing that matters most, then ask if he wants the rest; if he says "
+        "yes, give him the next one, still out loud, still short. Put the full list on his "
+        "screen with display_card instead of speaking it. Markdown is silent on a phone — no "
+        "asterisks, no bullets, no headings, no bold. If you catch yourself about to say "
+        "'let me lay it all out' or 'here's what's live', stop: that is the sentence that "
+        "turns into a two-minute monologue. "
+        "You are speaking out loud to Brady. Everything under LIVE CONTEXT above is "
         "live and in front of you — ANSWER FROM IT directly and confidently; never say you \"can't "
         "see\" something that's here, and never tell him to open a screen for it. You ALSO have your "
         "tools on this call: use display_card to put things on his screen, get_calendar_range / "
@@ -2971,7 +2992,7 @@ async def _fast_context() -> str:
         "GATED: follow the tool's actual approval instructions. When it requires More → Review, "
         "direct Brady there; spoken yes alone is not authorization to execute the proposal. "
         + _expressive_line() +
-        "Keep spoken replies short and natural — a sentence or two, no lists or markdown. When "
+        "Two or three sentences, as stated at the top of this block. When "
         "it's just conversation — Brady, or a friend he puts on the mic — BE good company: warm, "
         "a little personality, react to what they actually said, carry the thread, and toss back "
         "a natural question so it flows; never clipped or robotic, and don't narrate tools. "

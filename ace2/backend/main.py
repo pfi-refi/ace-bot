@@ -293,6 +293,31 @@ def _resume_break(text: str, after_tool: bool, tail: str = "") -> str:
 _AUDIO_TAG = re.compile(r"\[[a-z][a-z ]{0,18}\]\s*")
 
 
+# MARKDOWN IS FOR READING, AND THIS IS GOING TO A SPEAKER (2026-09-12). Ace's voice
+# instructions have said "no lists or markdown" for weeks; on the 12 Sept call he still sent
+# "**Money in motion:** …" and bulleted lines to ElevenLabs. The markers are not speech, so
+# they are removed here rather than hoped away in a prompt.
+#
+# STREAMING-SAFE, which is the whole difficulty: "**" frequently arrives as two fragments, so
+# a scrub applied per fragment sees a single "*" and leaves it. A trailing run of markers is
+# therefore HELD and prepended to the next fragment. Only `*` and backtick are touched —
+# stripping `#` would turn "#1" into "1", and `_` is ordinary punctuation in speech.
+_MD_MARK = re.compile(r"[*`]+")
+_MD_BULLET = re.compile(r"(?m)^[ \t]*[-•]\s+")
+
+
+def _speakable(text: str) -> str:
+    """Emphasis markers and list bullets removed. Nothing else is altered."""
+    return _MD_BULLET.sub("", _MD_MARK.sub("", text))
+
+
+# NO CROSS-FRAGMENT BUFFER, AND THAT WAS A CORRECTION. I first held a trailing marker run
+# back for the next fragment, reasoning that "**" arrives split. It does — and it does not
+# matter, because the strip is greedy: "*" and "*Money" each lose their marker on their own.
+# A deliberate mutation removing the buffer left every test green, which is the buffer telling
+# me it does nothing. Deleted rather than kept with a test written to justify it.
+
+
 def _strip_voice_noise(text: str) -> str:
     t = _AUDIO_TAG.sub("", text)
     t = _NOISE_CONT.sub("", t)
@@ -2253,7 +2278,11 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         resumed = {"after_tool": False, "tail": ""}   # see _resume_break
 
         async def say(text: str):
-            """Every spoken fragment goes out through here, so nothing can glue again."""
+            """Every spoken fragment goes out through here, so nothing can glue again —
+            and nothing reaches the speaker still wearing its markdown."""
+            text = _speakable(text)
+            if not text:
+                return          # the fragment was pure markup; there is nothing to say
             text = _resume_break(text, resumed["after_tool"], resumed["tail"])
             resumed["after_tool"] = False
             if text:
