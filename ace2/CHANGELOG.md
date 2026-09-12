@@ -11,6 +11,26 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-11 (evening) — Big questions run in the background now
+
+**Ask me something big on a call and I will go away and think about it.** A question that
+needs me to read eight or ten things and then work something out — a deep dive, everything on
+one deal, how the whole week lines up, what you have missed — used to run inside the call.
+You would hear me say "still on it" a couple of times and then nothing at all for the best
+part of a minute, and then the answer was thrown away. Now I start it in the background, tell
+you in one sentence that I am on it, and we keep talking.
+
+**You get the answer in the same conversation.** When it lands I bring it up on my next turn,
+in my own words, and the full version stays on your screen until you dismiss it — it no
+longer disappears after nine seconds like a receipt does.
+
+**It can only read.** A deep dive looks at your board, calendar, memory, email and Drive. It
+cannot send, delete, schedule or change anything. If something needs doing it says so and
+leaves the decision to you.
+
+**It is capped.** Twenty a day, and each one has a hard limit on how much it reads, because
+this costs real money on the same key everything else uses.
+
 ## 2026-09-11 (later) — A Week tab, and days that land in the date field
 
 **Week.** The board now has Today, Week, Waiting and Everything. Week is overdue plus the

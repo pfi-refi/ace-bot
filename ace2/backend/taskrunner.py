@@ -181,7 +181,11 @@ async def dispatch(capability: str, args: dict, origin: str = "voice",
     daily_cap, day = 0, ""
     if spec.get("costs_money"):
         conn = connectors.get(spec.get("connector") or "")
-        daily_cap = int(conn.get("daily_task_cap") or 0)
+        # A capability without a CONNECTOR can still cost money: a briefing spends model
+        # tokens on the same key every turn uses. It declares its own cap rather than being
+        # forced to invent a connector, which would put native read tools into
+        # connectors.connector_of() and change what the main loop is allowed to call.
+        daily_cap = int(conn.get("daily_task_cap") or spec.get("daily_cap") or 0)
         day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
     verdict, t = await asyncio.to_thread(tasks.accept, capability, args, origin, title,
                                          daily_cap, day)
@@ -191,7 +195,8 @@ async def dispatch(capability: str, args: dict, origin: str = "voice",
                 "title": spec.get("title") or capability,
                 "error": (f"That would be paid lookup number {t['used'] + 1} today and the "
                           f"daily limit is {t['cap']}. I have not run it. Raise "
-                          f"ACE2_RESEARCH_DAILY_CAP if you want more.")}
+                          f"{spec.get('cap_env') or 'ACE2_RESEARCH_DAILY_CAP'} if you want "
+                          f"more.")}
     if verdict == "unavailable":
         # Fail closed, like ops.py: without the record that makes a task single-use we
         # cannot tell a redelivery from a new request, and the failure mode is two documents.

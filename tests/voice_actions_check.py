@@ -535,6 +535,69 @@ try:
         _capmod.REGISTRY["research"]["handler"] = _real_research
         _cn.CONNECTORS["web_research"]["daily_task_cap"] = _was_cap
 
+    # ── 14. A DEEP DIVE IS A TASK, END TO END ─────────────────────────────────
+    # The long-voice-turn fix. A wide question must reach a real row, complete off the turn,
+    # produce something to READ, and be offered to the conversation exactly once.
+    import types as _types
+
+    class _ScriptedModel:
+        """Two rounds: one read, then the answer. No network, no key, no spend."""
+
+        def __init__(self):
+            self.rounds = [
+                [_types.SimpleNamespace(type="tool_use", name="recall",
+                                        input={"query": "chris"}, id="tu_1")],
+                [_types.SimpleNamespace(type="text",
+                                        text="Chris is next. Ken is still waiting on you.")],
+            ]
+            self.messages = _types.SimpleNamespace(create=self._create)
+
+        async def _create(self, **kw):
+            blocks = self.rounds.pop(0) if self.rounds else [
+                _types.SimpleNamespace(type="text", text="done")]
+            return _types.SimpleNamespace(content=blocks)
+
+    _real_dive = _capmod.REGISTRY["deep_dive"]["handler"]
+
+    async def _scripted_dive(args, call, progress=None, known=None,
+                             checkpoint=None, should_stop=None):
+        return await _real_dive({**args, "_client": _ScriptedModel()}, call, progress,
+                                known, checkpoint, should_stop)
+
+    _capmod.REGISTRY["deep_dive"]["handler"] = _scripted_dive
+    _was_dive_cap = _capmod.REGISTRY["deep_dive"]["daily_cap"]
+    try:
+        dv = run(taskrunner.dispatch("deep_dive", {"question": "how does my week line up?"}))
+        did = dv["task_id"]
+        for _ in range(300):
+            if tasks.get(did)["state"] in tasks.TERMINAL:
+                break
+            run(asyncio.sleep(0.02))
+        row = tasks.get(did)
+        assert row["state"] == tasks.COMPLETED, f'deep dive ended {row["state"]}: {row["error"]}'
+        assert "Chris is next" in (row["result"] or {}).get("answer", ""), \
+            'the deep dive completed without an answer to show him'
+        dcard = tasks.card(row)
+        assert dcard["answer"] and dcard["title"] == "Deep dive"
+        assert dcard["auto_dismiss_ms"] == 0 and dcard["sticky"], \
+            'a briefing he is meant to read would have vanished in nine seconds'
+        # ...and it is offered to the live conversation once, then never again.
+        assert any(n["id"] == did for n in taskrunner.pending_voice_notices()), \
+            'a finished deep dive never reached the conversation'
+        assert tasks.mark_spoken(did) is True
+        assert not any(n["id"] == did for n in taskrunner.pending_voice_notices())
+
+        # THE CAP IS ADMITTED, NOT DECLARED. deep_dive has no connector, so its limit lives on
+        # the registry entry — the whole point of the taskrunner change. Prove dispatch reads it.
+        _capmod.REGISTRY["deep_dive"]["daily_cap"] = 1
+        blocked = run(taskrunner.dispatch("deep_dive", {"question": "a different question?"}))
+        assert not blocked.get("task_id"), 'the deep dive daily cap admitted one too many'
+        assert "ACE2_DEEP_DIVE_DAILY_CAP" in blocked["error"], \
+            f'the refusal names the wrong environment variable: {blocked["error"]}'
+    finally:
+        _capmod.REGISTRY["deep_dive"]["handler"] = _real_dive
+        _capmod.REGISTRY["deep_dive"]["daily_cap"] = _was_dive_cap
+
     print('PASS: a dispatched request is never reported as done; the link is built from a '
           'provider id that survived a read-back; duplicate dispatch, a re-spaced transcript '
           'and three tabs make ONE document; a lost response after creation resumes from the '
@@ -550,6 +613,8 @@ try:
           'create reports stopping rather than cancelled and keeps the receipt for anything '
           'that already existed; a wrong cell value fails verification by coordinate; and the '
           'paid daily cap admits exactly its limit, refuses the rest without creating a task, '
-          'and holds under three simultaneous requests for one remaining slot.')
+          'and holds under three simultaneous requests for one remaining slot; and a deep '
+          'dive runs off the turn to a real row, produces an answer that stays on screen, '
+          'reaches the conversation exactly once, and is refused past its own daily cap.')
 finally:
     server.cleanup(); tmp.cleanup()

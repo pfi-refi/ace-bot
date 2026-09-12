@@ -639,21 +639,31 @@ START_TASK = {
     "name": "start_task",
     "description": (
         "Start a longer task that runs in the BACKGROUND while you keep talking — building a "
-        "Google Sheet, or researching something on the live internet. He does not need "
+        "Google Sheet, researching something on the live internet, or thinking through a "
+        "WIDE question about his own world. He does not need "
         "a screen open and you must not tell him to watch one — a small progress card appears "
         "wherever he is. You get back a task id and a state, which will be 'queued'. "
         "ACKNOWLEDGE IT IN ONE SHORT SENTENCE AND SAY NOTHING ABOUT THE RESULT: it has not run "
         "yet. Never say it is built, populated, ready or open, and never invent or read out a "
         "link — the card carries the real link once the file has been read back and verified, "
         "and you will be told the outcome separately. Do not use this for calendar, tasks, "
-        "email, Drive search, memory, recall or the data bank; you do those yourself."
+        "email, Drive search, memory, recall or the data bank; you do those yourself.\n\n"
+        "WHEN HE IS ON A CALL, THE BIGGEST REASON TO USE THIS IS `deep_dive`. A question that "
+        "would take you many lookups and then some thinking — a deep dive, everything on a "
+        "deal, how the whole week lines up, what he has missed — must NOT be answered "
+        "inside the call. Answering it live means he hears a couple of holding phrases "
+        "and then nothing at all for a long stretch, and the answer is lost when the turn "
+        "gives up. Start a `deep_dive` instead, say in ONE sentence that you are working it "
+        "out, and carry on talking. You will be handed the finished deep dive to tell him "
+        "about. A question you can answer from the context in front of you is NOT a "
+        "deep dive — just answer it."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "capability": {
                 "type": "string",
-                "enum": ["create_spreadsheet", "create_doc", "create_folder", "research"],
+                "enum": ["create_spreadsheet", "create_doc", "create_folder", "research", "deep_dive"],
                 "description": (
                     "create_spreadsheet — build a Google Sheet. "
                     "create_doc — write a Google Doc (put the text in `blocks`, one entry "
@@ -662,13 +672,18 @@ START_TASK = {
                     "research — look something up on the live internet and come back with "
                     "sources and the date checked. Use research whenever Brady asks what "
                     "something costs, what is current, or what someone is doing now; do NOT "
-                    "answer those from memory."
+                    "answer those from memory. "
+                    "deep_dive — think a WIDE question about his own world through properly, "
+                    "reading his board, calendar, memory, email and Drive as needed. This "
+                    "is for the questions too big to answer inside a live call. It only "
+                    "ever reads; it cannot change or send anything."
                 ),
             },
             "question": {
                 "type": "string",
-                "description": ("For research: the question, in full. Include what he "
-                                "actually wants to know, not a keyword."),
+                "description": ("For research and deep_dive: the question, in full, in his own "
+                                "terms. Include what he actually wants to know, not a "
+                                "keyword."),
             },
             "blocks": {
                 "type": "array",

@@ -2835,6 +2835,41 @@ def _recap_block() -> str:
     return recap or "(no recap yet — this builds after your next few conversations)"
 
 
+# ── TELLING HIM WHAT FINISHED WHILE HE WAS TALKING ─────────────────────────────
+# taskrunner.pending_voice_notices has existed since 9 September, with tests, and NOTHING
+# called it. So a background task could complete perfectly and the only place it appeared was
+# a card — which is no use at all on a phone call, where Brady is talking and not reading.
+# That gap is the reason a long question could not simply be dispatched: there was no way to
+# give him the answer afterwards. This is the other half of the deep_dive capability.
+#
+# Announced ONCE: the rows are marked spoken at the end of a turn that actually produced a
+# reply, so a turn that fell back to "say that again for me?" does not burn the notice.
+def _format_finished_tasks(rows: list) -> str:
+    """Settled background work, written so Ace can say it out loud without reading a card."""
+    if not rows:
+        return ""
+    lines = ["", "FINISHED WHILE YOU WERE TALKING — tell Brady about this in your next reply, "
+                 "briefly and in your own words. Lead with the answer, not with the fact that a "
+                 "task ran. Do NOT read it out verbatim and do not list every point; give him "
+                 "the headline and offer the rest. If it FAILED, say so plainly and say what "
+                 "did not happen:"]
+    for t in rows:
+        res = t.get("result") or {}
+        title = (t.get("title") or t.get("capability") or "work").strip()
+        if t.get("state") == tasks_mod.FAILED:
+            why = t.get("error") or "no reason recorded"
+            lines.append(f"• [{title}] DID NOT FINISH — {why}")
+            continue
+        answer = (res.get("answer") or "").strip()
+        if answer:
+            lines.append(f"• [{title}] finished. What it found:\n{answer[:2500]}")
+        else:
+            lines.append(f"• [{title}] finished.")
+        for w in (res.get("limits") or [])[:3]:
+            lines.append(f"  caveat: {w}")
+    return "\n".join(lines) + "\n"
+
+
 async def _fast_context() -> str:
     """Lean context for LOW-LATENCY voice, served from the pre-warmed cache (see _refresh_ctx).
     Formats the string from cached data + the LIVE clock, so CURRENT TIME is always correct
@@ -2922,7 +2957,13 @@ async def _fast_context() -> str:
         "search_gmail / read_gmail to pull anything not already in context, and create_calendar_event, "
         "delete_calendar_event, capture_item (add to his task board), update_item (mark a board "
         "item done — match his words to an id in HIS TASK BOARD above), send_email, draft_email, "
-        "search_drive to ACT — actually do these, then tell him it's done. For anything you have no "
+        "search_drive to ACT — actually do these, then tell him it's done. A question that would "
+        "take you MANY of those lookups and then some thinking — a deep dive, everything on a "
+        "deal, how the whole week lines up, what he has missed — does not get answered inside "
+        "the call: call start_task with capability \"deep_dive\" and the question in his own "
+        "words, say in ONE sentence that you are working it out, and keep talking. You will be "
+        "handed the finished answer to tell him about. Anything you can answer from the "
+        "context above is NOT that — just answer it. For anything you have no "
         "spoken tool for — CREATING or EDITING a Google Doc, building or updating a Sheet or a "
         "Slides deck, or making a shareable link — call build_on_screen with the full instruction, "
         "then tell him in one short sentence to watch his screen; NEVER say you can't do it. "
@@ -3593,6 +3634,18 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     except Exception as e:
         logger.warning("planning notebook unavailable: %s", type(e).__name__)
 
+    # Background work that settled since his last turn rides into THIS turn's context, so a
+    # dispatched deep dive is answered in the conversation he is already having rather than
+    # sitting unread on a card. Voice only: the typed path shows him the card itself.
+    notices = []
+    if fast:
+        try:
+            from . import taskrunner as _taskrunner
+            notices = await asyncio.to_thread(_taskrunner.pending_voice_notices, 2)
+            ctx += _format_finished_tasks(notices)
+        except Exception as e:
+            logger.warning("finished-task notices unavailable: %s", type(e).__name__)
+
     full_reply = []
     guard_actions = action_request(user_text)
     confirmations = []
@@ -3822,6 +3875,12 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                         if not question:
                             missing = ("No question came through. Ask Brady what he wants "
                                        "looked up, in one short sentence.")
+                        task_args = {"question": question}
+                        task_title = question[:120]
+                    elif cap == "deep_dive":
+                        if not question:
+                            missing = ("No question came through. Ask Brady what he wants "
+                                       "you to think through, in one short sentence.")
                         task_args = {"question": question}
                         task_title = question[:120]
                     if not cap:
@@ -4060,6 +4119,15 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                 await asyncio.to_thread(history.append, "assistant", reply)
         except Exception as e:
             logger.warning("history persist skipped: %s", e)
+
+        # Announced once — and only from a turn that actually said something. `full_reply`
+        # is empty on the fallback line, which is not Ace telling him anything.
+        if notices and full_reply:
+            for _t in notices:
+                try:
+                    await asyncio.to_thread(tasks_mod.mark_spoken, _t["id"])
+                except Exception as e:
+                    logger.warning("mark_spoken failed: %s", type(e).__name__)
 
         return reply
 

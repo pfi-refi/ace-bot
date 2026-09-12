@@ -20,9 +20,15 @@ class UpgradeAwareness(unittest.TestCase):
             slow,_=asyncio.run(chat._live_context())
             voice=asyncio.run(chat._fast_context())
             self.assertIn(block,slow); self.assertIn(block,voice)
-            self.assertIn('Paperclip continuity',block)
-            self.assertIn('More menu organized',block)
-            self.assertIn('physical iPhone',block)
+            # PIN THE CONTRACT, NOT A PARTICULAR RELEASE (2026-09-11). This used to name
+            # three entry titles, and the window only holds _CHANGELOG_ENTRIES of them — so
+            # every release silently aged one assertion out and the next author had to decide
+            # whether a red test meant a real regression. What must hold is that the NEWEST
+            # entry reaches both paths, bounded, with its limitations intact.
+            newest=[l for l in chat._CHANGELOG.read_text().splitlines() if l.startswith('## ')][0]
+            self.assertIn(newest[3:].split('—')[0].strip(),block)
+            self.assertLessEqual(len([l for l in block.splitlines() if l.startswith('- ')]),
+                                 chat._CHANGELOG_ENTRIES)
             self.assertIn('spoken yes alone',voice)
             self.assertNotIn('confirmed true',voice)
 

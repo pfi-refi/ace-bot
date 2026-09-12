@@ -511,7 +511,10 @@ def card(t: dict) -> dict:
         "settled_at": t.get("settled_at"),
         # Only a completed task may carry an action, and only from a verified result.
         "action": None,
-        # Success dismisses itself; an approval or a failure waits for Brady.
+        # Success dismisses itself; an approval or a failure waits for Brady. A result he is
+        # meant to READ is neither: nine seconds is a receipt's lifetime, not a briefing's,
+        # and a deep dive that vanished before he finished the first line would be worse than
+        # not showing it. Set below, once the result is in hand.
         "auto_dismiss_ms": 9000 if state == COMPLETED else 0,
         "sticky": state in (NEEDS_APPROVAL, FAILED),
     }
@@ -521,6 +524,16 @@ def card(t: dict) -> dict:
         # The lead warning is already the card's `detail`; repeating it underneath made the
         # card say the same caveat twice.
         out["warnings"] = [w for w in res["warnings"] if w != out["detail"]]
+    # AN ANSWER IS THE POINT OF THE CARD, for anything whose product is words rather than a
+    # file. This used to be nested under `sources`, so a capability that answers WITHOUT web
+    # citations — a briefing reads his own records — produced a card with a title, a tick and
+    # nothing to read. The answer now rides whenever there is one.
+    if res.get("answer"):
+        out["answer"] = (res.get("answer") or "")[:4000]
+        out["checked_at"] = res.get("checked_at", "")
+        # Something to read stays until he dismisses it.
+        out["auto_dismiss_ms"] = 0
+        out["sticky"] = True
     # RESEARCH SHOWS ITS WORKING. The sources and the date checked ride on the card itself,
     # so an answer can never appear without the evidence for it and without saying how old
     # that evidence is.
@@ -528,8 +541,8 @@ def card(t: dict) -> dict:
         out["sources"] = res["sources"][:6]
         out["checked_at"] = res.get("checked_at", "")
         out["support"] = res.get("support", "")
-        out["answer"] = (res.get("answer") or "")[:1200]
     return out
 
 
-_DEFAULT_TITLES = {"create_spreadsheet": "Spreadsheet", "research": "Research"}
+_DEFAULT_TITLES = {"create_spreadsheet": "Spreadsheet", "research": "Research",
+                   "deep_dive": "Deep dive"}
