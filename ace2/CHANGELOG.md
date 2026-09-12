@@ -11,6 +11,13 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-12 (evening) — I know what part of the day it is
+
+**No more "goodnight" at lunchtime.** I closed a midday call with "Goodnight, Brady" twice
+this week. I had the clock; what I did not have was the word. My context now says whether it
+is the morning, afternoon, evening or night, and my sign-off fits it. "Goodnight" is a night
+word and I will not say it before the evening.
+
 ## 2026-09-12 (later) — I check for what I did NOT write down
 
 **A new self-check: things you said out loud that nothing is holding.** Every other check I run

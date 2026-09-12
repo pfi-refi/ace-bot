@@ -1070,6 +1070,33 @@ async def _run_ui_tool(name: str, tool_input: dict, emit) -> str:
     return f"⚠️ Unknown UI tool: {name}"
 
 
+def daypart(now) -> str:
+    """The part of the day as a WORD, so the small voice model never has to derive it.
+
+    He had the clock — "RIGHT NOW IT IS: Saturday, September 12, 2026 — 12:04 PM" — and still
+    closed a midday call with "Goodnight, Brady", twice in three days. The sign-off ritual's only
+    examples were evening ones, and turning 12:04 PM into "not night" is arithmetic the fast
+    model does not do. This gives it the word instead.
+    """
+    h = now.hour
+    if 5 <= h < 12:
+        return "morning"
+    if 12 <= h < 17:
+        return "afternoon"
+    if 17 <= h < 21:
+        return "evening"
+    return "night"
+
+
+# What a sign-off sounds like at each part of the day. "Goodnight" is a NIGHT word.
+SIGN_OFFS = {
+    "morning": "'Go get it.' / 'Talk soon.' / 'Have a good one.'",
+    "afternoon": "'Talk soon.' / 'Go get it.' / 'Catch you later.'",
+    "evening": "'Enjoy your evening.' / 'Talk soon.' / 'Have a good night.'",
+    "night": "'Goodnight, Brady.' / 'Get some rest.'",
+}
+
+
 def date_ladder(now) -> str:
     """Every named day for the next two weeks, resolved to a real date.
 
@@ -2957,8 +2984,10 @@ async def _fast_context() -> str:
     # the fast/small model — it HAS the date but a passive line let it drift on live calls.
     # State it as ground truth + an explicit instruction so it can never guess or ask.
     now_line = now.strftime("%A, %B %d, %Y — %-I:%M %p")
+    part = daypart(now)
     return "\n".join([
-        f"⏰ RIGHT NOW IT IS: {now_line} (US Eastern). This is the current date and time — "
+        f"⏰ RIGHT NOW IT IS: {now_line} (US Eastern) — it is the {part.upper()}. This is the "
+        f"current date and time — "
         f"it is TODAY. If Brady asks what day, date, or time it is, answer with THIS exactly. "
         f"Never guess the date, never say you're unsure, never ask him what day it is — you "
         f"always know, it is stated right here and refreshed every turn.",
@@ -3055,8 +3084,11 @@ async def _fast_context() -> str:
         "'pause', 'one sec', 'meeting mode', or starts talking to someone else: call skip_turn "
         "with NO words if you have it (otherwise say only 'Standing by.') and then stay silent — "
         "do not speak again, and never respond to background conversation, until he addresses you "
-        "directly. (3) SIGN-OFF — when he's clearly done ('goodnight, Ace', 'that's all for "
-        "tonight'): one short, warm sign-off line, then call end_call if you have it to hang up. "
+        "directly. (3) SIGN-OFF — when he's clearly done ('that's all', 'thanks, Ace', 'talk "
+        "later', 'goodnight, Ace'): one short, warm sign-off line that FITS THE TIME OF DAY "
+        f"stated at the top — it is the {part.upper()} right now, so sign off like this: "
+        f"{SIGN_OFFS[part]} 'Goodnight' is a night word: never say it before the evening, "
+        "whatever he said to you. Then call end_call if you have it to hang up. "
         "Never call end_call in any other situation. (4) UNFINISHED THOUGHT — the platform ends "
         "your turn on a SHORT SILENCE, so what reaches you is sometimes only half of what Brady "
         "is saying: it trails off on a conjunction or article ('...so I need to call Ken and'), "
