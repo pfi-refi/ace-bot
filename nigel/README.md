@@ -22,6 +22,11 @@ python3 -m http.server -d nigel 8080   # then http://localhost:8080
 
 ## Navigate
 
+The cloud is a map: drag to pan, scroll or pinch to zoom, arrows or WASD,
+Home to reset, double-click a system to fly to it. A focused system shows its
+sectors as satellites; a chosen sector shows its records. Panels open in a
+right-hand drawer so the map stays in play.
+
 StarCloud → Systems → Sectors → Records. Click a label on the cloud, use the
 sidebar (Today = attention, My Office = open cases), the breadcrumb, the
 conversation bar ("what needs attention", "open Investments", "where is the

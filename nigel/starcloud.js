@@ -16,6 +16,12 @@ window.StarCloud = (function () {
   let base = null, nodes = [], twinkle = [], pulses = [], frameCbs = [];
   let arcs = [], dust = [], comets = [], sparks = [], ringPulses = [], shooting = null, nextShot = 4, nextRing = 1.5;
   let focusId = null, dim = 0, dimTarget = 0;
+  let inset = 0;                     // px reserved on the right for the drawer
+  let sats = [];                     // satellites: sectors / records shown around a focused system
+  const mouse = { x: -1, y: -1, on: false, down: false, dragging: false, sx: 0, sy: 0, cx: 0, cy: 0 };
+  const pointers = new Map();
+  let pinch = null, camCbs = [], pings = [], userMoved = false;
+  const ZMIN = 0.75, ZMAX = 2.8;
   const cam = { x: 0.5, y: 0.5, z: 1, tx: 0.5, ty: 0.5, tz: 1 };
   const core = { x: 0.53, y: 0.46 };   // where the column crosses the field
   function coreX() { return portrait ? 0.5 : core.x; }
@@ -178,11 +184,74 @@ window.StarCloud = (function () {
   }
 
   function clampCam() {
-    const half = 0.5 / cam.z;
-    cam.tx = Math.min(1 - half, Math.max(half, cam.tx));
-    cam.ty = Math.min(1 - half, Math.max(half, cam.ty));
+    cam.tz = Math.min(ZMAX, Math.max(ZMIN, cam.tz));
+    const half = Math.min(0.5, 0.5 / cam.tz);
+    const lo = Math.max(0.12, half - 0.15), hi = Math.min(0.88, 1 - half + 0.15);
+    cam.tx = Math.min(hi, Math.max(lo, cam.tx));
+    cam.ty = Math.min(hi, Math.max(lo, cam.ty));
   }
-  function project(nx, ny) { return [W / 2 + (nx - cam.x) * W * cam.z, H / 2 + (ny - cam.y) * H * cam.z]; }
+  const viewCX = () => (W - inset) / 2;
+  function project(nx, ny) { return [viewCX() + (nx - cam.x) * W * cam.z, H / 2 + (ny - cam.y) * H * cam.z]; }
+  function unproject(sx, sy) { return [(sx - viewCX()) / (W * cam.z) + cam.x, (sy - H / 2) / (H * cam.z) + cam.y]; }
+  function satScreen(st) {
+    const parent = nodes.find(n => n.id === st.parent); if (!parent) return null;
+    const [px, py] = nodePos(parent); const [sx, sy] = project(px, py);
+    const r = st.ring === 2 ? 215 : 104; const k = Math.sqrt(cam.z);
+    return [sx + Math.cos(st.angle) * r * k, sy + Math.sin(st.angle) * r * 0.55 * k];
+  }
+  function hitNode(sx, sy) {
+    let best = null, bd = 40;
+    for (const n of nodes) { const [nx, ny] = nodePos(n); const [x, y] = project(nx, ny); const d = Math.hypot(x - sx, y - sy); if (d < bd) { bd = d; best = n; } }
+    return best;
+  }
+
+  /* ---------- input: drag, wheel, pinch, keys ---------- */
+  canvas.style.touchAction = 'none';
+  canvas.addEventListener('pointerdown', (e) => {
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    canvas.setPointerCapture(e.pointerId);
+    if (pointers.size === 1) { mouse.down = true; mouse.dragging = false; mouse.sx = e.clientX; mouse.sy = e.clientY; mouse.cx = cam.tx; mouse.cy = cam.ty; }
+    if (pointers.size === 2) { const [a, b] = [...pointers.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: cam.tz }; }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    mouse.x = e.clientX; mouse.y = e.clientY; mouse.on = e.pointerType !== 'touch';
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2 && pinch) {
+      const [a, b] = [...pointers.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y);
+      cam.tz = pinch.z * (d / pinch.d); clampCam(); userMoved = true; return;
+    }
+    if (!mouse.down) return;
+    const dx = e.clientX - mouse.sx, dy = e.clientY - mouse.sy;
+    if (!mouse.dragging && Math.hypot(dx, dy) > 4) mouse.dragging = true;
+    if (mouse.dragging) { cam.tx = mouse.cx - dx / (W * cam.z); cam.ty = mouse.cy - dy / (H * cam.z); cam.x = cam.tx; cam.y = cam.ty; clampCam(); cam.x = cam.tx; cam.y = cam.ty; userMoved = true; }
+  });
+  const endPointer = (e) => {
+    pointers.delete(e.pointerId); if (pointers.size < 2) pinch = null;
+    if (pointers.size === 0) {
+      if (mouse.down && !mouse.dragging && e.type === 'pointerup') { const n = hitNode(e.clientX, e.clientY); if (n) { ping(n.id); for (const cb of camCbs) cb({ type: 'select', id: n.id }); } }
+      mouse.down = false; mouse.dragging = false;
+    }
+  };
+  canvas.addEventListener('pointerup', endPointer); canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('pointerleave', () => { mouse.on = false; });
+  canvas.addEventListener('dblclick', (e) => { const n = hitNode(e.clientX, e.clientY); if (n) for (const cb of camCbs) cb({ type: 'open', id: n.id }); else zoomAt(e.clientX, e.clientY, 1.5); });
+  function zoomAt(sx, sy, factor) {
+    const [wx, wy] = unproject(sx, sy); const nz = Math.min(ZMAX, Math.max(ZMIN, cam.tz * factor));
+    cam.tx = wx - (sx - viewCX()) / (W * nz); cam.ty = wy - (sy - H / 2) / (H * nz); cam.tz = nz; clampCam(); userMoved = true;
+  }
+  canvas.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0016)); }, { passive: false });
+  const keys = new Set();
+  document.addEventListener('keydown', (e) => {
+    const tag = (e.target.tagName || '').toLowerCase(); if (tag === 'input' || tag === 'textarea') return;
+    const k = e.key.toLowerCase();
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(k)) { keys.add(k); e.preventDefault(); }
+    if (k === '+' || k === '=') zoomAt(viewCX(), H / 2, 1.25);
+    if (k === '-' || k === '_') zoomAt(viewCX(), H / 2, 0.8);
+    if (k === 'home' || k === '0') { cam.tx = 0.5; cam.ty = 0.5; cam.tz = 1; userMoved = false; }
+  });
+  document.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+  function ping(id) { const n = nodes.find(n => n.id === id); if (!n) return; const [x, y] = nodePos(n); pings.push({ x, y, r: 6, a: 0.7 }); }
+  function hoverNode() { return mouse.on ? hitNode(mouse.x, mouse.y) : null; }
 
   /* ---------- moving parts ---------- */
   function initLive() {
@@ -209,6 +278,12 @@ window.StarCloud = (function () {
     const dt = Math.min(0.05, (now - last) / 1000); last = now; const t = now / 1000;
     if (base) {
       const k = reduceMotion ? 1 : 1 - Math.pow(0.001, dt);
+      if (keys.size) {
+        const sp = 0.45 * dt / cam.z;
+        if (keys.has('arrowleft') || keys.has('a')) cam.tx -= sp; if (keys.has('arrowright') || keys.has('d')) cam.tx += sp;
+        if (keys.has('arrowup') || keys.has('w')) cam.ty -= sp; if (keys.has('arrowdown') || keys.has('s')) cam.ty += sp;
+        clampCam(); userMoved = true;
+      }
       cam.x += (cam.tx - cam.x) * k; cam.y += (cam.ty - cam.y) * k; cam.z += (cam.tz - cam.z) * k; dim += (dimTarget - dim) * k;
       const cx = coreX() * W, cy = core.y * H, minDim = Math.min(W, H);
       // the whole field sways and breathes very slowly
@@ -217,7 +292,8 @@ window.StarCloud = (function () {
       const breathe = reduceMotion ? 1 : 1 + Math.sin(t * 0.19) * 0.012;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
       ctx.save();
-      ctx.translate(W / 2, H / 2); ctx.scale(cam.z, cam.z); ctx.translate(-cam.x * W, -cam.y * H);
+      ctx.translate(viewCX(), H / 2); ctx.scale(cam.z, cam.z); ctx.translate(-cam.x * W, -cam.y * H);
+      const [mwx, mwy] = mouse.on ? unproject(mouse.x, mouse.y) : [-9, -9]; const mx = mwx * W, my = mwy * H;
       ctx.save(); ctx.translate(cx + swayX, cy + swayY); ctx.rotate(rot); ctx.scale(breathe, breathe); ctx.translate(-cx, -cy);
       ctx.drawImage(base, 0, 0, W, H);
       ctx.restore();
@@ -226,6 +302,7 @@ window.StarCloud = (function () {
       if (!reduceMotion) {
         // drifting dust with depth
         for (const d of dust) {
+          if (mouse.on) { const ddx = d.x - mx, ddy = d.y - my, dd = Math.hypot(ddx, ddy); if (dd < 140 && dd > 0.1) { const f = (1 - dd / 140) * 260 * dt / dd; d.x += ddx * f; d.y += ddy * f; } }
           d.x += d.vx * dt; d.y += d.vy * dt;
           if (d.x < -4) d.x = W + 4; else if (d.x > W + 4) d.x = -4;
           if (d.y < -4) d.y = H + 4; else if (d.y > H + 4) d.y = -4;
@@ -320,10 +397,12 @@ window.StarCloud = (function () {
         }
       }
       // system nodes: pulse, orbit and a mote circling each one
+      const hov = hoverNode();
+      canvas.style.cursor = hov ? 'pointer' : mouse.dragging ? 'grabbing' : 'crosshair';
       for (const n of nodes) {
         const [nx, ny] = nodePos(n); const x = nx * W + swayX, y = ny * H + swayY;
         const pulse = reduceMotion ? 0.5 : 0.5 + 0.5 * Math.sin(t * 1.3 + (n.phase || 0));
-        const r = Math.max(16, minDim * 0.03) * (1 + pulse * 0.3);
+        const r = Math.max(16, minDim * 0.03) * (1 + pulse * 0.3) * (n === hov ? 1.35 : 1);
         const col = n.attention ? '255,186,80' : '160,205,255';
         const g = ctx.createRadialGradient(x, y, 0, x, y, r);
         g.addColorStop(0, `rgba(${col},${(0.4 + pulse * 0.3).toFixed(2)})`); g.addColorStop(0.5, `rgba(${col},0.12)`); g.addColorStop(1, `rgba(${col},0)`);
@@ -341,9 +420,54 @@ window.StarCloud = (function () {
           ctx.restore();
         }
         if (n.attention) { ctx.strokeStyle = `rgba(255,186,80,${(0.3 + pulse * 0.35).toFixed(2)})`; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y, r * 1.4, 0, TAU); ctx.stroke(); }
-        if (n.id === focusId) { ctx.strokeStyle = 'rgba(225,240,255,0.55)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y, r * 2, 0, TAU); ctx.stroke(); }
+        if (n.id === focusId || n === hov) {
+          // targeting brackets, turning slowly
+          const R = r * 2.6, L = R * 0.45, a = n.id === focusId ? 0.75 : 0.4;
+          ctx.save(); ctx.translate(x, y); ctx.rotate(n.id === focusId ? t * 0.35 : 0);
+          ctx.strokeStyle = `rgba(225,240,255,${a})`; ctx.lineWidth = 1.2;
+          for (let q = 0; q < 4; q++) { ctx.rotate(Math.PI / 2); ctx.beginPath(); ctx.moveTo(R, R - L); ctx.lineTo(R, R); ctx.lineTo(R - L, R); ctx.stroke(); }
+          ctx.restore();
+        }
+      }
+      // satellites: sectors or records arranged around the focused system
+      for (const st of sats) {
+        const parent = nodes.find(n => n.id === st.parent); if (!parent) continue;
+        const [px, py] = nodePos(parent); const kx = W * 0.0, ky = 0;
+        const r = (st.ring === 2 ? 215 : 104) * Math.sqrt(cam.z) / cam.z; // in world-scaled px
+        const x = px * W + swayX + Math.cos(st.angle) * r, y = py * H + swayY + Math.sin(st.angle) * r * 0.55;
+        st._x = x; st._y = y;
+        const col = st.attention ? '255,186,80' : st.current ? '255,255,255' : '160,205,255';
+        ctx.strokeStyle = `rgba(160,205,255,0.10)`; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(px * W + swayX, py * H + swayY); ctx.lineTo(x, y); ctx.stroke();
+        const g = ctx.createRadialGradient(x, y, 0, x, y, 12);
+        g.addColorStop(0, `rgba(${col},${st.current ? 0.95 : 0.7})`); g.addColorStop(0.35, `rgba(${col},0.25)`); g.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 12, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 1.6, 0, TAU); ctx.fill();
+      }
+      if (sats.length) {
+        const parent = nodes.find(n => n.id === sats[0].parent);
+        if (parent) {
+          const [px, py] = nodePos(parent); const x = px * W + swayX, y = py * H + swayY;
+          for (const ring of [1, 2]) {
+            if (!sats.some(s => s.ring === ring)) continue;
+            const r = (ring === 2 ? 215 : 104) * Math.sqrt(cam.z) / cam.z;
+            ctx.strokeStyle = 'rgba(160,205,255,0.18)'; ctx.lineWidth = 0.8; ctx.setLineDash([6, 8]); ctx.lineDashOffset = -t * 20;
+            ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.55, 0, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+          }
+        }
+      }
+      // click pings
+      for (let i = pings.length - 1; i >= 0; i--) {
+        const p = pings[i]; p.r += 140 * dt; p.a -= 1.4 * dt; if (p.a <= 0) { pings.splice(i, 1); continue; }
+        ctx.strokeStyle = `rgba(225,240,255,${p.a.toFixed(2)})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p.x * W + swayX, p.y * H + swayY, p.r, 0, TAU); ctx.stroke();
       }
       ctx.restore();
+      // cursor reticle on the field
+      if (mouse.on && !mouse.dragging) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = 'rgba(200,228,255,0.45)'; ctx.lineWidth = 0.8;
+        ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 14, 0, TAU); ctx.stroke();
+        ctx.beginPath(); for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { ctx.moveTo(mouse.x + ax * 18, mouse.y + ay * 18); ctx.lineTo(mouse.x + ax * 26, mouse.y + ay * 26); } ctx.stroke();
+      }
       if (dim > 0.002) { ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = `rgba(1,4,11,${(dim * 0.45).toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
       // intro fade
       if (intro > 0) { intro = Math.max(0, intro - dt / 1.6); ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = `rgba(1,4,11,${intro.toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
@@ -352,8 +476,16 @@ window.StarCloud = (function () {
         if (!n.label) continue;
         const [nx, ny] = nodePos(n); const [sx, sy] = project(nx, ny);
         n.label.style.transform = `translate(${(sx + swayX * cam.z).toFixed(1)}px, ${(sy + swayY * cam.z - 30 * cam.z).toFixed(1)}px) translate(-50%, -100%)`;
+        n.label.classList.toggle('is-hover', n === hov);
+      }
+      for (const st of sats) {
+        if (!st.label || st._x == null) continue;
+        const sx = viewCX() + (st._x / W - cam.x) * W * cam.z, sy = H / 2 + (st._y / H - cam.y) * H * cam.z;
+        const above = Math.sin(st.angle) < -0.2;
+        st.label.style.transform = above ? `translate(${sx.toFixed(1)}px, ${(sy - 14).toFixed(1)}px) translate(-50%, -100%)` : `translate(${sx.toFixed(1)}px, ${(sy + 14).toFixed(1)}px) translate(-50%, 0)`;
       }
       for (const cb of frameCbs) cb();
+      for (const cb of camCbs) cb({ type: 'camera', z: cam.z, moved: userMoved, hover: hov ? hov.id : null });
     }
     requestAnimationFrame(frame);
   }
@@ -375,12 +507,17 @@ window.StarCloud = (function () {
     setAttention(id, on) { const n = nodes.find(n => n.id === id); if (n) n.attention = !!on; },
     bindLabel(id, el) { const n = nodes.find(n => n.id === id); if (n) n.label = el; },
     focus(id, zoom) {
-      focusId = id; const n = nodes.find(n => n.id === id);
-      if (n) { const [x, y] = nodePos(n); cam.tx = x; cam.ty = y; cam.tz = zoom || 1.35; }
+      focusId = id; const n = nodes.find(n => n.id === id); userMoved = false;
+      if (n) { const [x, y] = nodePos(n); cam.tx = x; cam.ty = y + (sats.length ? 0.04 : 0); cam.tz = zoom || 1.35; }
       else { cam.tx = coreX(); cam.ty = core.y; cam.tz = zoom || 1; }
       clampCam();
     },
-    reset() { focusId = null; cam.tx = 0.5; cam.ty = 0.5; cam.tz = 1; },
+    reset() { focusId = null; cam.tx = 0.5; cam.ty = 0.5; cam.tz = 1; userMoved = false; },
+    setInset(px) { inset = px; },
+    setSatellites(list) { sats = list.map(s => Object.assign({}, s)); },
+    bindSatellite(id, el) { const st = sats.find(s => s.id === id); if (st) st.label = el; },
+    onCamera(cb) { camCbs.push(cb); },
+    ping,
     veil(on) { dimTarget = on ? 1 : 0; },
     onFrame(cb) { frameCbs.push(cb); },
     isPortrait() { return portrait; },

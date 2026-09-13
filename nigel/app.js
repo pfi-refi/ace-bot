@@ -4,6 +4,7 @@
    "submission" is simulated in this file; nothing is sent anywhere. */
 (function () {
   const D = window.NIGEL_DATA;
+  let current = null;
   const SC = window.StarCloud;
   const $ = (s, r) => (r || document).querySelector(s);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -47,7 +48,9 @@
       const b = document.createElement('button');
       b.className = 'label'; b.dataset.system = s.id;
       b.innerHTML = `<span class="label-name">${esc(s.name)}</span><span class="label-sub"></span>`;
-      b.addEventListener('click', () => go(`/systems/${s.id}`));
+      b.addEventListener('click', () => { SC.ping(s.id); go(`/systems/${s.id}`); });
+      b.addEventListener('mouseenter', () => showTip(s.id, b));
+      b.addEventListener('mouseleave', () => { if (!hoverTipId) tip.hidden = true; });
       labelsRoot.appendChild(b); SC.bindLabel(s.id, b);
     }
     refreshLabels();
@@ -65,6 +68,62 @@
     $('#topbar-attention-text').textContent = total ? `${total} need${total === 1 ? 's' : ''} attention` : 'All clear';
     $('#topbar-attention').classList.toggle('is-clear', total === 0);
   }
+
+  /* ---------- map: drawer inset, satellites, HUD ---------- */
+  const isPhone = () => window.innerWidth <= 860;
+  function drawerWidth() { return isPhone() ? 0 : Math.max(480, Math.min(620, Math.round(window.innerWidth * 0.42))); }
+  function applyInset() {
+    const w = document.body.dataset.panel ? drawerWidth() : 0;
+    document.documentElement.style.setProperty('--drawer-w', (isPhone() ? window.innerWidth : drawerWidth()) + 'px');
+    SC.setInset(w);
+  }
+  const satsRoot = document.createElement('div'); satsRoot.className = 'sats'; labelsRoot.after(satsRoot);
+  function buildSatellites(sys, sec) {
+    satsRoot.innerHTML = '';
+    if (!sys) { SC.setSatellites([]); return; }
+    const list = [];
+    sys.sectors.forEach((x, i) => {
+      const angle = -Math.PI / 2 + (i / sys.sectors.length) * Math.PI * 2;
+      const open = x.attention ? openReviews(sys.id).length : 0;
+      list.push({ id: 's:' + x.id, parent: sys.id, ring: 1, angle, name: x.name, sub: x.attention ? (open ? open + ' open' : 'clear') : String(x.count), attention: open > 0, current: !!sec && sec.id === x.id,
+        go: x.attention ? '/today' : x.records.length ? `/systems/${sys.id}/${x.id}` : null });
+    });
+    if (sec && sec.records.length) {
+      sec.records.forEach((rid, i) => {
+        const h = D.households[rid]; const c = caseOf(rid);
+        const angle = Math.PI * 0.2 + (i / Math.max(1, sec.records.length - 1)) * Math.PI * 0.6;
+        list.push({ id: 'r:' + rid, parent: sys.id, ring: 2, angle, name: h.name.replace(' Household', '').replace(' Family Trust', ' Trust'), sub: STAGES[c.stage], current: current && current.rid === rid, go: `/systems/${sys.id}/${sec.id}/${rid}` });
+      });
+    }
+    SC.setSatellites(list);
+    for (const st of list) {
+      const b = document.createElement('button');
+      b.className = 'sat' + (st.attention ? ' is-amber' : '') + (st.current ? ' is-current' : '') + (st.go ? '' : ' is-disabled') + (st.ring === 2 ? ' is-record' : '');
+      b.innerHTML = `<span class="sat-name">${esc(st.name)}</span><span class="sat-sub">${esc(st.sub)}</span>`;
+      if (st.go) b.addEventListener('click', () => go(st.go)); else b.disabled = true;
+      satsRoot.appendChild(b); SC.bindSatellite(st.id, b);
+    }
+  }
+  const tip = $('#tip');
+  function showTip(sysId, el) {
+    const s = sysById(sysId); if (!s) { tip.hidden = true; return; }
+    const n = openReviews(s.id).length;
+    tip.innerHTML = `<span class="tip-name">${esc(s.name)}</span><span class="tip-line">${esc(s.tagline)} · ${s.sectors.length} sectors</span>${n ? `<span class="tip-line is-amber">${n} need${n === 1 ? 's' : ''} attention</span>` : ''}<span class="tip-hint">Click to open</span>`;
+    const r = el.getBoundingClientRect();
+    tip.style.left = Math.min(window.innerWidth - 220, r.left + r.width / 2 + 16) + 'px'; tip.style.top = (r.top - 6) + 'px'; tip.hidden = false;
+  }
+  let hoverTipId = null;
+  SC.onCamera((ev) => {
+    if (ev.type === 'select') { go(`/systems/${ev.id}`); return; }
+    if (ev.type === 'open') { go(`/systems/${ev.id}`); return; }
+    if (ev.type === 'camera') {
+      const z = ev.z.toFixed(1) + '×'; const hz = $('#hud-zoom'); if (hz.textContent !== z) hz.textContent = z;
+      $('#hud-reset').hidden = !ev.moved;
+      if (ev.hover !== hoverTipId) { hoverTipId = ev.hover; if (ev.hover) showTip(ev.hover, labelsRoot.querySelector(`[data-system="${ev.hover}"]`)); else tip.hidden = true; }
+    }
+  });
+  $('#hud-reset').addEventListener('click', () => { if (current && current.sid) go(`/systems/${current.sid}`); SC.reset(); });
+  window.addEventListener('resize', applyInset);
 
   /* ---------- routing ---------- */
   function go(path) { location.hash = '#' + path; }
@@ -97,9 +156,11 @@
     }
     for (const el of labelsRoot.children) el.classList.toggle('is-focus', !!sys && el.dataset.system === sys.id);
 
+    applyInset();
+    buildSatellites(sys, sec);
     if (r.view === 'starcloud') { SC.reset(); SC.veil(false); }
-    else if (sys) { SC.focus(sys.id, r.view === 'sectors' ? 1.3 : 1.5); SC.veil(true); }
-    else { SC.focus(null, 1.08); SC.veil(true); }
+    else if (sys) { SC.focus(sys.id, sec ? 1.45 : 1.3); SC.veil(false); }
+    else { SC.focus(null, 1.0); SC.veil(true); }
 
     const stage = $('#stage'); stage.scrollTop = 0;
     const body = ({
@@ -411,6 +472,6 @@
   $('#scrim').addEventListener('click', () => { document.body.classList.remove('menu-open'); $('#menu-toggle').setAttribute('aria-expanded', 'false'); });
   window.addEventListener('hashchange', render);
 
-  SC.start(); buildLabels(); render();
+  SC.start(); buildLabels(); applyInset(); render();
   window.NIGEL = { go, state, ask };
 })();

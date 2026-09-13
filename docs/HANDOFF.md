@@ -1,6 +1,6 @@
 # HANDOFF — NIGEL StarCloud prototype
 
-_Last updated: 2026-09-13 (third pass: built against the visual reference, then animated). Branch: `claude/nigel-dashboard-redesign-4tcpd7`._
+_Last updated: 2026-09-13 (fourth pass: reference look, animated, and navigable like a game map). Branch: `claude/nigel-dashboard-redesign-4tcpd7`._
 
 ## Context and assumptions
 
@@ -37,6 +37,8 @@ against it. So:
 | System labels | `app.js` → `buildLabels` | Plain uppercase letterspaced text, centred above each node and projected through the camera each frame. An amber dot and an amber "N need attention" line appear when the system has open reviews. Portrait screens use a two-column layout of node positions. |
 | Sidebar | `index.html` / `styles.css` | Text only, no panel: NIGEL wordmark and tagline, the reference's eleven items with ring bullets (active item filled, with a soft blue bar), Praxis Technologies and a prototype note at the foot. Off-canvas drawer with a scrim on phones. Today carries the amber badge. |
 | Corners | | Top right: live date and time, a rule, an amber "N need attention" link, the quote. Bottom right: the tagline. On panel views the top-right block collapses to one line and the quote and tagline hide. The breadcrumb (StarCloud › Paraclete 1 › Pending annuity clients › household) sits above the panel; on phones it collapses to back-link + current. |
+| Explorable map | `starcloud.js` input handlers, `app.js` → `buildSatellites` | The field plays like a game map while staying a work tool. Drag to pan, scroll or pinch to zoom around the cursor (0.75× to 2.8×), arrow keys or WASD to pan, + / − to zoom, Home or 0 to reset; double-click a system or click its node to open it. A focused system shows a slowly turning targeting bracket and its sectors as satellites on a dashed orbit; choosing a sector adds its records on an outer ring. Satellites are clickable and drive the same routes as the drawer. A hover shows a HUD tip (tagline, sector count, attention); a cursor reticle follows the mouse; dust particles scatter from the cursor; clicking a node sends a ping ripple. A HUD line bottom left shows zoom and the controls, with a Reset view button once you have moved. |
+| Drawer | `styles.css` → `.stage` | Panels open in a right-hand drawer (42% of the width, 480–620px) so the map stays visible and usable beside a record. The clock and attention count move left of the drawer; labels and satellites clip under it. On phones the drawer is full width. |
 | Views | `app.js` | StarCloud, Today (attention + recent activity), My Office (open cases), Systems, Sectors, Records, Record, Activity, Settings (placeholder). Hash-routed, so every view has a URL and the browser back button works. Escape goes up one level. Sidebar items for Clients, Pipeline, Investments, Planning, Servicing, Knowledge and GodPod open that system's sectors. |
 | Sample case | `data.js` | Paraclete 1 → Pending annuity clients → **Okonkwo-Reyes Household** (fixed index annuity, 1035 exchange, $250k, fictional carrier "Northwind Assurance"). Three other fictional households at other stages. |
 | Case workflow | `app.js` → `draftMemo`, `illustrate`, `runSubmit` | Intake → Suitability → Illustration → Submission → Issued. "Draft memo" types out a canned memo labelled *simulated AI draft*. "Generate" builds a 10-year illustration table. "Submit" asks for confirmation in a modal that says plainly it is simulated, then animates Packaging → Transmitting → Acknowledged and prints a `SIM-…` receipt. "Reset case" replays it. |
@@ -74,6 +76,8 @@ reach Google Fonts. All 50 assertions pass on the final build:
 - Breadcrumb back works; Escape closes the conversation log, then goes up one level.
 - Today shows 3 reviews grouped 2 AUM / 1 Insurance; approving one drops the badge to 2 and clears the Servicing label.
 - Conversation answers "what needs attention" and navigates to Investments on "open AUM".
+
+A second script exercised the map: hover shows the tip; a drag moves the camera and reveals Reset view; a wheel zoom reaches 2.6×; Home resets; clicking a node on the canvas opens the system with 4 satellites; clicking the Pending sector satellite adds 4 record satellites; clicking a record satellite opens the record drawer. No page errors.
 - Phone menu opens and closes; no page errors or console errors at either size.
 
 Screenshots were compared against the reference by eye and iterated: filament
@@ -87,6 +91,7 @@ GPU-backed browser should hold 60 at both.
 
 ## Remaining limitations
 
+- Map feel is a first draft: satellite spacing is fixed in screen pixels, so very long sector names could touch at low zoom; touch pinch works but has no inertia; there is no minimap.
 - Motion density is a taste call: comet count, dust count, ring alpha and sway amplitude are the first lines of `initLive()` and `frame()` in `starcloud.js`.
 - The reference's cloud is a painted image; this one is procedural. It is
   close in structure and palette but softer detail (dust density, the way
