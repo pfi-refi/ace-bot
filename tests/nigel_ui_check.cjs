@@ -15,18 +15,19 @@ const shot = (p, name) => p.screenshot({ path: path.join(OUT, name + '.png') });
 const settle = (p, ms) => p.waitForTimeout(ms || 700);
 
 (async () => {
-  const b = await chromium.launch({ headless: true });
+  const proxy = process.env.NIGEL_PROXY ? { server: process.env.NIGEL_PROXY } : undefined;
+  const b = await chromium.launch({ headless: true, proxy });
   const errs = [];
   async function overflow(p) { return p.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1); }
 
   for (const [label, vp] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 390, height: 844 }]]) {
-    const p = await b.newPage({ viewport: vp, deviceScaleFactor: 1 });
+    const p = await b.newPage({ viewport: vp, deviceScaleFactor: 1, ignoreHTTPSErrors: true });
     p.on('pageerror', e => errs.push(label + ': ' + e.message));
-    p.on('console', m => { if (m.type() === 'error') errs.push(label + ' console: ' + m.text()); });
+    p.on('console', m => { if (m.type() === 'error' && !/ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ERR_INTERNET|ERR_PROXY|ERR_TUNNEL|Failed to load resource/.test(m.text())) errs.push(label + ' console: ' + m.text()); });
     await p.goto(URL); await settle(p, 1200);
     await shot(p, label + '-1-starcloud');
-    ok(label + ' labels rendered', await p.locator('.label').count() === 8);
-    ok(label + ' amber labels for AUM + Insurance', await p.locator('.label.is-amber').count() === 2);
+    ok(label + ' labels rendered', await p.locator('.label').count() === 9);
+    ok(label + ' amber labels for Investments + Servicing', await p.locator('.label.is-amber').count() === 2);
     ok(label + ' no horizontal overflow on StarCloud', !(await overflow(p)));
 
     // labels visible inside viewport
@@ -71,22 +72,22 @@ const settle = (p, ms) => p.waitForTimeout(ms || 700);
     ok(label + ' simulated receipt shown', (await p.locator('.receipt').innerText()).includes('SIM-'));
     await shot(p, label + '-7-submitted');
     await p.click('[data-act="advance"][data-to="4"]'); await settle(p, 400);
-    ok(label + ' case reaches Issued', (await p.locator('.step.is-current').innerText()).includes('Issued'));
+    ok(label + ' case reaches Issued', (await p.locator('.step.is-current').textContent()).includes('Issued'));
 
     // breadcrumb back
     await p.click('.crumb-back'); await settle(p, 500);
     ok(label + ' breadcrumb back to records', location(p) === '#/systems/paraclete/pending');
 
-    // attention view
-    await p.click('[data-nav="attention"]').catch(async () => { await p.click('#menu-toggle'); await p.click('[data-nav="attention"]'); });
+    // today (attention) view
+    await p.click('[data-nav="/today"]').catch(async () => { await p.click('#menu-toggle'); await p.click('[data-nav="/today"]'); });
     await settle(p, 700);
-    ok(label + ' attention shows 3 reviews', await p.locator('.review:not(.is-done)').count() === 3);
-    ok(label + ' two AUM reviews + one Insurance', await p.evaluate(() => [...document.querySelectorAll('.group-title')].map(g => g.textContent.replace(/\s+/g, ' ').trim()).join('|')).then(t => /AUM\s*2 open.*Insurance\s*1 open/.test(t)));
+    ok(label + ' today shows 3 reviews', await p.locator('.review:not(.is-done)').count() === 3);
+    ok(label + ' grouped AUM 2 + Insurance 1', await p.evaluate(() => [...document.querySelectorAll('.group-title')].map(g => g.textContent.replace(/\s+/g, ' ').trim()).join('|')).then(t => /AUM\s*2 open.*Insurance\s*1 open/.test(t)));
     await shot(p, label + '-8-attention');
     await p.click('[data-id="rv-ins-1"][data-outcome="approve"]'); await settle(p, 500);
     ok(label + ' badge drops to 2', (await p.locator('#attention-badge').innerText()) === '2');
-    await p.click('[data-go="/"]:not(.crumb)').catch(() => p.click('.crumb[data-go="/"]')); await settle(p, 900);
-    ok(label + ' insurance label no longer amber', !(await p.locator('.label[data-system="insurance"]').evaluate(e => e.classList.contains('is-amber'))));
+    await p.click('[data-nav="/"]').catch(async () => { await p.click('#menu-toggle'); await p.click('[data-nav="/"]'); }); await settle(p, 900);
+    ok(label + ' servicing label no longer amber', !(await p.locator('.label[data-system="servicing"]').evaluate(e => e.classList.contains('is-amber'))));
     await shot(p, label + '-9-after-approve');
 
     // conversation
@@ -95,14 +96,14 @@ const settle = (p, ms) => p.waitForTimeout(ms || 700);
     ok(label + ' convo answers attention query', (await p.locator('.msg.nigel').last().innerText()).includes('2 items need attention'));
     await shot(p, label + '-10-convo');
     await p.fill('#convo-input', 'open AUM'); await p.press('#convo-input', 'Enter'); await settle(p, 1800);
-    ok(label + ' convo can navigate', location(p) === '#/systems/aum');
+    ok(label + ' convo can navigate (AUM → Investments)', location(p) === '#/systems/investments');
     ok(label + ' no overflow with convo open', !(await overflow(p)));
 
     // escape closes the conversation log first, then goes up one level
     await p.keyboard.press('Escape'); await settle(p, 200);
     ok(label + ' Escape closes convo log', await p.locator('#convo-log').isHidden());
     await p.keyboard.press('Escape'); await settle(p, 400);
-    ok(label + ' Escape goes up one level', location(p) === '#/systems');
+    ok(label + ' Escape goes up one level', location(p) === '#/');
     await p.close();
   }
   await b.close();

@@ -2,76 +2,65 @@
    Every name, household, carrier, balance and reference number here is invented.
    Nothing in this file is connected to a live system. */
 window.NIGEL_DATA = (function () {
+  // Systems on the cloud. Labels follow the reference; Paraclete 1 is the annuity flagship.
   const systems = [
-    {
-      id: 'paraclete', name: 'Paraclete 1', tagline: 'Annuity pipeline',
-      pos: [0.32, 0.30], posPortrait: [0.25, 0.16],
+    { id: 'people', name: 'People', tagline: 'Team and partners', pos: [0.50, 0.14], posPortrait: [0.74, 0.18],
+      sectors: [
+        { id: 'team', name: 'Team', count: 5, note: 'Praxis staff and roles', records: [] },
+        { id: 'partners', name: 'Partners', count: 14, note: 'Carriers, custodians, attorneys', records: [] },
+        { id: 'coi', name: 'Centers of influence', count: 9, note: 'Referral relationships', records: [] }
+      ] },
+    { id: 'clients', name: 'Clients', tagline: 'Households and prospects', pos: [0.335, 0.18], posPortrait: [0.26, 0.18],
+      sectors: [
+        { id: 'households', name: 'Households', count: 61, note: 'Active relationships', records: [] },
+        { id: 'prospects', name: 'Prospects', count: 12, note: 'In conversation', records: [] },
+        { id: 'milestones', name: 'Milestones', count: 4, note: 'Birthdays and anniversaries this month', records: [] }
+      ] },
+    { id: 'knowledge', name: 'Knowledge', tagline: 'Playbooks and guides', pos: [0.76, 0.20], posPortrait: [0.74, 0.31],
+      sectors: [
+        { id: 'playbooks', name: 'Playbooks', count: 18, note: 'How Praxis does things', records: [] },
+        { id: 'carriers', name: 'Carrier guides', count: 22, note: 'Product and underwriting notes', records: [] },
+        { id: 'notes', name: 'Notes', count: 140, note: 'Captured from meetings', records: [] }
+      ] },
+    { id: 'investments', name: 'Investments', tagline: 'Managed assets', pos: [0.255, 0.42], posPortrait: [0.26, 0.31],
+      sectors: [
+        { id: 'aum', name: 'AUM', count: 2, note: 'Model drift and billing reviews', records: [], attention: true },
+        { id: 'households', name: 'Households', count: 61, note: 'Advisory relationships', records: [] },
+        { id: 'rebalancing', name: 'Rebalancing', count: 5, note: 'Queued for next trade window', records: [] },
+        { id: 'fees', name: 'Fee schedules', count: 4, note: 'Tiered and flat schedules', records: [] }
+      ] },
+    { id: 'planning', name: 'Planning', tagline: 'Plans and scenarios', pos: [0.845, 0.39], posPortrait: [0.74, 0.45],
+      sectors: [
+        { id: 'plans', name: 'Financial plans', count: 33, note: 'Current plans on file', records: [] },
+        { id: 'due', name: 'Reviews due', count: 6, note: 'Annual plan reviews in the next 60 days', records: [] },
+        { id: 'scenarios', name: 'Scenarios', count: 9, note: 'What-if models in progress', records: [] }
+      ] },
+    { id: 'paraclete', name: 'Paraclete 1', tagline: 'Annuity pipeline', pos: [0.45, 0.60], posPortrait: [0.26, 0.59],
       sectors: [
         { id: 'pending', name: 'Pending annuity clients', count: 4, note: 'Cases between intake and carrier issue', records: ['okonkwo-reyes', 'thornbury', 'halvorsen', 'adeyemi-park'] },
         { id: 'active', name: 'Active contracts', count: 27, note: 'Issued and in force', records: [] },
         { id: 'submissions', name: 'Carrier submissions', count: 3, note: 'Transmitted, awaiting acknowledgement', records: [] },
         { id: 'illustrations', name: 'Illustrations', count: 9, note: 'Generated in the last 30 days', records: [] }
-      ]
-    },
-    {
-      id: 'aum', name: 'AUM', tagline: 'Managed assets',
-      pos: [0.70, 0.27], posPortrait: [0.75, 0.16],
+      ] },
+    { id: 'servicing', name: 'Servicing', tagline: 'Policies and service', pos: [0.755, 0.60], posPortrait: [0.74, 0.59],
       sectors: [
-        { id: 'reviews', name: 'Reviews', count: 2, note: 'Model drift and billing checks', records: [], attention: true },
-        { id: 'households', name: 'Households', count: 61, note: 'Advisory relationships', records: [] },
-        { id: 'rebalancing', name: 'Rebalancing', count: 5, note: 'Queued for next trade window', records: [] },
-        { id: 'fees', name: 'Fee schedules', count: 4, note: 'Tiered and flat schedules', records: [] }
-      ]
-    },
-    {
-      id: 'insurance', name: 'Insurance', tagline: 'Policies in force',
-      pos: [0.74, 0.64], posPortrait: [0.75, 0.33],
-      sectors: [
-        { id: 'reviews', name: 'Reviews', count: 1, note: 'Lapse and underwriting flags', records: [], attention: true },
+        { id: 'insurance', name: 'Insurance', count: 1, note: 'Lapse and underwriting flags', records: [], attention: true },
         { id: 'policies', name: 'Policies', count: 38, note: 'Term, whole and universal life', records: [] },
-        { id: 'underwriting', name: 'Underwriting', count: 2, note: 'Awaiting carrier decision', records: [] },
+        { id: 'requests', name: 'Service requests', count: 7, note: 'Open client requests', records: [] },
         { id: 'renewals', name: 'Renewals', count: 6, note: 'Next 90 days', records: [] }
-      ]
-    },
-    {
-      id: 'compliance', name: 'Compliance', tagline: 'Attestations and audit',
-      pos: [0.30, 0.70], posPortrait: [0.25, 0.33],
+      ] },
+    { id: 'pipeline', name: 'Pipeline', tagline: 'Opportunities', pos: [0.32, 0.62], posPortrait: [0.26, 0.45],
       sectors: [
-        { id: 'attestations', name: 'Attestations', count: 12, note: 'Annual and event-driven', records: [] },
-        { id: 'audit', name: 'Audit log', count: 140, note: 'Actions recorded this quarter', records: [] }
-      ]
-    },
-    {
-      id: 'calendar', name: 'Calendar', tagline: 'Client meetings',
-      pos: [0.585, 0.14], posPortrait: [0.75, 0.50],
-      sectors: [
-        { id: 'week', name: 'This week', count: 7, note: 'Confirmed appointments', records: [] },
+        { id: 'opportunities', name: 'Opportunities', count: 15, note: 'Qualified and in motion', records: [] },
+        { id: 'proposals', name: 'Proposals', count: 6, note: 'Sent, awaiting a decision', records: [] },
         { id: 'followups', name: 'Follow-ups', count: 3, note: 'Promised call-backs', records: [] }
-      ]
-    },
-    {
-      id: 'ledger', name: 'Ledger', tagline: 'Revenue and commissions',
-      pos: [0.62, 0.80], posPortrait: [0.25, 0.50],
+      ] },
+    { id: 'godpod', name: 'GodPod', tagline: 'Faith and reflection', pos: [0.615, 0.73], posPortrait: [0.74, 0.72],
       sectors: [
-        { id: 'commissions', name: 'Commissions', count: 8, note: 'Expected this month', records: [] },
-        { id: 'advisory', name: 'Advisory fees', count: 4, note: 'Quarterly billing runs', records: [] }
-      ]
-    },
-    {
-      id: 'signal', name: 'Signal', tagline: 'Client communications',
-      pos: [0.88, 0.45], posPortrait: [0.75, 0.67],
-      sectors: [
-        { id: 'inbox', name: 'Inbox', count: 11, note: 'Unread client threads', records: [] },
-        { id: 'campaigns', name: 'Campaigns', count: 2, note: 'Scheduled sends', records: [] }
-      ]
-    },
-    {
-      id: 'archive', name: 'Archive', tagline: 'Closed and historical',
-      pos: [0.21, 0.51], posPortrait: [0.25, 0.67],
-      sectors: [
-        { id: 'closed', name: 'Closed cases', count: 212, note: 'Read-only', records: [] }
-      ]
-    }
+        { id: 'reading', name: 'Morning reading', count: 1, note: 'Today\'s passage', records: [] },
+        { id: 'prayer', name: 'Prayer list', count: 11, note: 'People and needs', records: [] },
+        { id: 'journal', name: 'Journal', count: 40, note: 'Entries this year', records: [] }
+      ] }
   ];
 
   const households = {
@@ -137,21 +126,21 @@ window.NIGEL_DATA = (function () {
 
   const reviews = [
     {
-      id: 'rv-aum-1', system: 'aum', sector: 'reviews', kind: 'Model drift',
+      id: 'rv-aum-1', system: 'investments', sector: 'aum', kind: 'Model drift',
       title: 'Drift beyond band — Thornbury Family Trust',
       summary: 'Equity sleeve is 68% against a 60% target. The 5-point band was crossed on Sep 10.',
       detail: 'Proposed rebalance sells $41,200 of the domestic equity sleeve into short-duration bonds. Estimated realized gain $3,900. Trust has no wash-sale exposure in the window.',
       due: 'Sep 16', severity: 'amber', status: 'open'
     },
     {
-      id: 'rv-aum-2', system: 'aum', sector: 'reviews', kind: 'Billing check',
+      id: 'rv-aum-2', system: 'investments', sector: 'aum', kind: 'Billing check',
       title: 'Fee schedule mismatch — Halvorsen IRA',
       summary: 'Account is billed at 1.10% but the household schedule says 0.95% above $500k combined.',
       detail: 'Combined household assets crossed $500,000 on Aug 31. The tier change did not propagate to the IRA. Proposed fix: apply the 0.95% tier and issue a $62 credit for the partial period.',
       due: 'Sep 15', severity: 'amber', status: 'open'
     },
     {
-      id: 'rv-ins-1', system: 'insurance', sector: 'reviews', kind: 'Lapse warning',
+      id: 'rv-ins-1', system: 'servicing', sector: 'insurance', kind: 'Lapse warning',
       title: 'Premium lapse notice — Vasquez term life',
       summary: 'Quarterly premium of $412 was not received. Grace period ends Sep 27.',
       detail: 'Autopay failed twice on a closed card. Client was emailed on Sep 8 with no reply. Proposed action: call today and offer to move autopay to the joint checking account on file.',
@@ -162,8 +151,8 @@ window.NIGEL_DATA = (function () {
   const activity = [
     { when: 'Today 08:40', what: 'Morning sweep found 3 items that need attention.', system: 'nigel' },
     { when: 'Yesterday', what: 'Adeyemi-Park case submitted to carrier (simulated).', system: 'paraclete' },
-    { when: 'Sep 10', what: 'Thornbury drift crossed the 5-point band.', system: 'aum' },
-    { when: 'Sep 8', what: 'Lapse notice emailed to Vasquez household.', system: 'insurance' }
+    { when: 'Sep 10', what: 'Thornbury drift crossed the 5-point band.', system: 'investments' },
+    { when: 'Sep 8', what: 'Lapse notice emailed to Vasquez household.', system: 'servicing' }
   ];
 
   return { systems, households, reviews, activity };
