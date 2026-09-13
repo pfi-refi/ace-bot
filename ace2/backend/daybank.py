@@ -72,10 +72,10 @@ def _save(service, fid, items: list):
         service.files().create(body={"name": FILE_NAME}, media_body=media, fields="id").execute()
 
 
-def read_items(active_only: bool = True) -> list:
+def read_items(active_only: bool = True, *, settings=None) -> list:
     """Read the data bank. Postgres when enabled, else the Drive JSON store."""
     if db.enabled():
-        return db.read_items(active_only)
+        return db.read_items(active_only, settings=settings)
     return _drive_read_items(active_only)
 
 

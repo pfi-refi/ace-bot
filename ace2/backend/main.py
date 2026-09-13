@@ -664,17 +664,21 @@ async def board_payload(all_items: bool = True, suggest: int = 3) -> dict:
     silently shrink the visible set (Codex, 2026-09-08).
     """
     from . import classify
-    items = await asyncio.to_thread(daybank.read_items, not all_items)
+    # One request-owned snapshot feeds row derivation and every presentation pass.
+    # Database work stays off the event loop; no cache can outlive this response.
+    settings = await asyncio.to_thread(db.board_settings)
+    items = await asyncio.to_thread(daybank.read_items, not all_items, settings=settings)
+    renames = settings["renames"]
     today = chat.datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
-    return {"items": [classify.decorate(i) for i in items],
-            "summary": classify.summarise(items),
+    return {"items": [classify.decorate(i, renames=renames) for i in items],
+            "summary": classify.summarise(items, renames=renames),
             "today": today,
             # Computed here so Due Today and the Command Center cannot disagree about what
             # counts as a deadline, a choice, or a suggestion.
             # `suggest` is how many optional suggestions to return; the group also carries
             # `suggested_total`, so "Show more" asks for more of the SAME server-computed
             # list rather than each surface inventing its own extras.
-            "due_today": classify.due_today_sections(items, today, max(1, min(suggest, 50))),
+            "due_today": classify.due_today_sections(items, today, max(1, min(suggest, 50)), renames=renames),
             "lane_order": list(classify.LANE_ORDER),
             "lane_labels": classify.LANE_LABELS}
 

@@ -68,7 +68,7 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   // hidden by default (2026-09-11). A record with a due date is an obligation and stays —
   // that is the whole point of the exemption, so the expectation states the same rule
   // rather than being loosened to make the number fit.
-  const shown = rows => (rows || []).filter(r => r.entry !== 'record' || r.due_days != null);
+  const shown = rows => (rows || []).filter(r => r.entry !== 'record' || r.due_days != null || !!r.followup);
   const count = f => f(dt.deadlines).length + f(dt.chosen).length + f(dt.suggested).length
                    + f(dt.decisions).length + f(dt.review).length + f(dt.waiting).length;
   const expected = count(shown);                 // the board honours the records preference

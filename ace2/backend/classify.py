@@ -55,7 +55,7 @@ LANE_LABELS = {
 SHELVES = ("Bills", "Goals")
 
 
-def area_of(item: dict) -> str:
+def area_of(item: dict, *, renames=None) -> str:
     """The life/work area for this row.
 
     A STORED bucket always wins — it is either the judgment pass or Brady's own correction.
@@ -70,7 +70,7 @@ def area_of(item: dict) -> str:
         return stored
     try:
         from . import db
-        return db.derive_bucket(item.get("text"), (item.get("tags") or [""])[0]) or "Unassigned"
+        return db.derive_bucket(item.get("text"), (item.get("tags") or [""])[0], renames=renames) or "Unassigned"
     except Exception:
         return "Unassigned"
 
@@ -169,7 +169,7 @@ def lane_of(item: dict) -> str:
     return LANE_ANYTIME
 
 
-def decorate(item: dict) -> dict:
+def decorate(item: dict, *, renames=None) -> dict:
     """Attach the shared interpretation. Additive only — no stored field is altered."""
     lane = lane_of(item)
     return {
@@ -178,16 +178,16 @@ def decorate(item: dict) -> dict:
         "carried_over": carried_over(item),
         "needs_decision": needs_decision(item),
         "lane_label": LANE_LABELS[lane],
-        "area": area_of(item),
+        "area": area_of(item, renames=renames),
         "shelves": shelves_of(item),
         "actionable": lane in ACTIONABLE,
         "completable": lane in COMPLETABLE,
     }
 
 
-def summarise(items: list) -> dict:
+def summarise(items: list, *, renames=None) -> dict:
     """Counts per lane plus the totals a view needs to prove nothing is hidden."""
-    rows = [decorate(i) for i in (items or [])]
+    rows = [decorate(i, renames=renames) for i in (items or [])]
     counts = {lane: 0 for lane in LANE_ORDER}
     for r in rows:
         counts[r["lane"]] += 1
@@ -220,7 +220,7 @@ def chosen_today(item: dict, today: str) -> bool:
     return (item.get("chosen_on") or "")[:10] == today
 
 
-def due_today_sections(items: list, today: str, suggest: int = 3) -> dict:
+def due_today_sections(items: list, today: str, suggest: int = 3, *, renames=None) -> dict:
     """The compact groups both Today surfaces show. Pure — it writes nothing and proposes
     nothing that is not already on the board.
 
@@ -228,7 +228,7 @@ def due_today_sections(items: list, today: str, suggest: int = 3) -> dict:
     and desktop with a Show more option." `suggested_total` carries the real size so a
     surface can offer the rest without a second request, and so the count is never hidden.
     """
-    rows = [decorate(i) for i in (items or [])]
+    rows = [decorate(i, renames=renames) for i in (items or [])]
     live = [r for r in rows if r["lane"] != LANE_DONE]
     deadlines = [r for r in live if r["lane"] in (LANE_OVERDUE, LANE_TODAY)]
     picked = [r for r in live if chosen_today(r, today)

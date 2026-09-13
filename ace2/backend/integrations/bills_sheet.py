@@ -143,7 +143,6 @@ def parse_bills(rows: list, today=None, amount_errors=None) -> list:
         out.append({
             "source_row": row_number, "date_from_notes": bool(note_due),
             "name": name, "section": section, "amount": amount,
-            "source_row": row_number, "date_from_notes": bool(note_due),
             "day": day, "due_on": _next_occurrence(day, today) if day else note_due,
             "paid": paid_cell.casefold() in ("yes", "paid", "true", "✓", "✔", "✅"), "paid_from": from_cell, "notes": notes,
         })

@@ -745,9 +745,14 @@ def area_renames() -> dict:
         return {}
 
 
-def area_name(canonical: str) -> str:
+def board_settings() -> dict:
+    """Fresh, request-owned display settings. Never retained across requests."""
+    return {"renames": area_renames(), "review_boundary": review_boundary()}
+
+
+def area_name(canonical: str, *, renames=None) -> str:
     """The name Brady sees for a built-in slot."""
-    return area_renames().get(canonical, canonical)
+    return (area_renames() if renames is None else renames).get(canonical, canonical)
 
 
 def all_areas() -> list:
@@ -856,7 +861,7 @@ _B_SIDE = _re.compile(r"\b(damon|woody|concrete|pour(?:s|ing)?|ready\s*mix|green
                       r"|gantz|dns|site\s+build)\b", _re.I)
 
 
-def derive_bucket(text: str, cat: str) -> str:
+def derive_bucket(text: str, cat: str, *, renames=None) -> str:
     """The area to SHOW for a row that has none stored. Legacy display, unchanged.
 
     This deliberately still falls back to Personal. Changing it to Inbox looked right in
@@ -866,7 +871,7 @@ def derive_bucket(text: str, cat: str) -> str:
     approval, which is the one thing he asked not to happen. New capture lands in Inbox via
     `derive_bucket_for_capture`; these rows move only when he says so.
     """
-    return area_name(_derive_bucket_slot(text, cat) or "Personal")
+    return area_name(_derive_bucket_slot(text, cat) or "Personal", renames=renames)
 
 
 def derive_bucket_for_capture(text: str, cat: str) -> str:
@@ -953,7 +958,7 @@ def _is_recurring_bill_row(it) -> bool:
                 or _re.search(r"\bmonthly\b", t, _re.I))
 
 
-def read_items(active_only: bool = True) -> list:
+def read_items(active_only: bool = True, *, settings=None) -> list:
     ensure_ready()
     try:
         with _conn() as c, c.cursor() as cur:
@@ -963,7 +968,8 @@ def read_items(active_only: bool = True) -> list:
                         "FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
-        _boundary = review_boundary()
+        settings = board_settings() if settings is None else settings
+        _boundary = settings["review_boundary"]
         items = []
         for r in rows:
             it = {
@@ -986,7 +992,7 @@ def read_items(active_only: bool = True) -> list:
             # exactly what the comment above promises cannot happen. Derivation is still
             # limited to actions here, so Ace's context is unchanged; the presentation-layer
             # fallback in classify.area_of covers records without touching stored data.
-            it["bucket"] = r[14] or (derive_bucket(it.get("text"), _item_cat(it))
+            it["bucket"] = r[14] or (derive_bucket(it.get("text"), _item_cat(it), renames=settings["renames"])
                                      if it["entry"] == "action" else None)
             # Callers need to tell a JUDGED/corrected bucket from the keyword default — the
             # classification pass fills only empties, so it must never overwrite Brady.
