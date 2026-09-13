@@ -342,3 +342,26 @@ body[data-panel] .crumbs { max-width: none; margin-left: 0; padding-right: 440px
   .panel, .convo-log, .modal-card, .toast { animation: none; }
   .pstep.is-active .pd, .memo.is-typing::after { animation: none; }
 }
+
+/* ---------- ambient motion ---------- */
+@keyframes label-glow { 0%, 100% { text-shadow: 0 0 10px rgba(1, 4, 11, 0.9), 0 1px 3px rgba(1, 4, 11, 0.9), 0 0 0 rgba(140, 190, 255, 0); } 50% { text-shadow: 0 0 10px rgba(1, 4, 11, 0.9), 0 1px 3px rgba(1, 4, 11, 0.9), 0 0 14px rgba(140, 190, 255, 0.75); } }
+.label-name { animation: label-glow 5.5s ease-in-out infinite; }
+.label:nth-child(2n) .label-name { animation-delay: -1.8s; } .label:nth-child(3n) .label-name { animation-delay: -3.4s; }
+@keyframes orb-breathe { 0%, 100% { box-shadow: 0 0 12px 3px rgba(91, 156, 255, 0.7), 0 0 0 0 rgba(91, 156, 255, 0.5); } 50% { box-shadow: 0 0 18px 5px rgba(91, 156, 255, 0.9), 0 0 0 9px rgba(91, 156, 255, 0); } }
+.convo-orb { animation: orb-breathe 2.8s ease-in-out infinite; }
+@keyframes bar-glow { 0%, 100% { box-shadow: 0 0 30px rgba(60, 120, 240, 0.25), inset 0 0 18px rgba(60, 120, 240, 0.12); } 50% { box-shadow: 0 0 44px rgba(60, 120, 240, 0.42), inset 0 0 24px rgba(60, 120, 240, 0.18); } }
+.convo-bar { animation: bar-glow 4s ease-in-out infinite; }
+@keyframes dot-pulse { 0%, 100% { box-shadow: 0 0 8px currentColor; opacity: 1; } 50% { box-shadow: 0 0 14px currentColor; opacity: 0.6; } }
+.attn-dot, .nav-item.is-active::before { animation: dot-pulse 2.2s ease-in-out infinite; color: var(--amber); }
+.nav-item.is-active::before { color: #fff; }
+@keyframes badge-pulse { 0%, 100% { box-shadow: 0 0 6px rgba(240, 179, 82, 0.6); } 50% { box-shadow: 0 0 14px rgba(240, 179, 82, 0.95); } }
+.badge { animation: badge-pulse 2.2s ease-in-out infinite; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.sidebar .nav-item { animation: rise .6s ease both; }
+.sidebar .nav-item:nth-child(1) { animation-delay: .2s; } .sidebar .nav-item:nth-child(2) { animation-delay: .27s; } .sidebar .nav-item:nth-child(3) { animation-delay: .34s; } .sidebar .nav-item:nth-child(4) { animation-delay: .41s; } .sidebar .nav-item:nth-child(5) { animation-delay: .48s; } .sidebar .nav-item:nth-child(6) { animation-delay: .55s; } .sidebar .nav-item:nth-child(7) { animation-delay: .62s; } .sidebar .nav-item:nth-child(8) { animation-delay: .69s; } .sidebar .nav-item:nth-child(9) { animation-delay: .76s; } .sidebar .nav-item:nth-child(10) { animation-delay: .83s; } .sidebar .nav-item:nth-child(11) { animation-delay: .9s; }
+.brand, .sidebar-foot, .corner, .convo-bar { animation-name: rise; animation-duration: .9s; animation-fill-mode: both; animation-timing-function: ease; }
+.convo-bar { animation: rise .9s ease both, bar-glow 4s ease-in-out 1s infinite; }
+.corner { animation-delay: .5s; } .sidebar-foot { animation-delay: .7s; }
+@media (prefers-reduced-motion: reduce) {
+  .label-name, .convo-orb, .convo-bar, .attn-dot, .nav-item.is-active::before, .badge, .sidebar .nav-item, .brand, .sidebar-foot, .corner { animation: none; }
+}

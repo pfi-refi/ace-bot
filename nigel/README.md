@@ -3,7 +3,10 @@
 A static, desktop-first prototype of the NIGEL experience built to the visual
 reference: a near-black field with a blue nebula and starburst core, filament
 arcs and a thin light column, floating system labels, a text-only left sidebar,
-date / time / quote in the corner and a centred "Ask NIGEL..." pill.
+date / time / quote in the corner and a centred "Ask NIGEL..." pill. The
+field is alive: light travels the filaments, dust drifts, sparks rise in the
+column, the core breathes inside rotating holographic rings, and each system
+has an orbiting mote. Honors `prefers-reduced-motion`.
 
 **Everything here is fictional and simulated.** No live systems, no model,
 no network calls. Nothing is sent anywhere.

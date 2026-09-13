@@ -1,6 +1,6 @@
 # HANDOFF — NIGEL StarCloud prototype
 
-_Last updated: 2026-09-13 (second pass, built against the visual reference). Branch: `claude/nigel-dashboard-redesign-4tcpd7`._
+_Last updated: 2026-09-13 (third pass: built against the visual reference, then animated). Branch: `claude/nigel-dashboard-redesign-4tcpd7`._
 
 ## Context and assumptions
 
@@ -33,6 +33,7 @@ against it. So:
 | Piece | Where | Notes |
 |------|-------|-------|
 | StarCloud | `starcloud.js` | Canvas. Black ground, elliptical blue haze, ~2,300 stars, 44 noisy elliptical filament arcs drawn as glow plus particle dust, soft dendrites from the column and from each node, faint vertical streaks, a thin full-height column with a starburst and horizontal flare at the core, node blooms, vignette. Seeded so it renders the same every load. Static layers are pre-rendered once per viewport; the camera zooms toward a system when you enter it. Respects `prefers-reduced-motion`. |
+| Motion | `starcloud.js` → `initLive`, `frame` | Everything moves: a cinematic fade-and-zoom on load; the whole field sways, breathes and rotates a fraction of a degree; ~340 dust motes drift with depth parallax; ~48 comets travel along the filament arcs with trails; sparks rise inside the column; the core breathes, its flare beams rotate, three holographic tick rings turn at different speeds and a ring pulse expands from the core every few seconds; each system has an orbit with a circling mote (faster and amber when it needs attention); a shooting star crosses every 5–12 s. CSS adds a slow glow pulse on labels, a breathing orb and bar, a pulsing active bullet and attention dot, and a staggered rise-in for the chrome. All of it is off under `prefers-reduced-motion`. |
 | System labels | `app.js` → `buildLabels` | Plain uppercase letterspaced text, centred above each node and projected through the camera each frame. An amber dot and an amber "N need attention" line appear when the system has open reviews. Portrait screens use a two-column layout of node positions. |
 | Sidebar | `index.html` / `styles.css` | Text only, no panel: NIGEL wordmark and tagline, the reference's eleven items with ring bullets (active item filled, with a soft blue bar), Praxis Technologies and a prototype note at the foot. Off-canvas drawer with a scrim on phones. Today carries the amber badge. |
 | Corners | | Top right: live date and time, a rule, an amber "N need attention" link, the quote. Bottom right: the tagline. On panel views the top-right block collapses to one line and the quote and tagline hide. The breadcrumb (StarCloud › Paraclete 1 › Pending annuity clients › household) sits above the panel; on phones it collapses to back-link + current. |
@@ -79,10 +80,14 @@ Screenshots were compared against the reference by eye and iterated: filament
 lines were softened and given more dust, the Paraclete 1 label was moved off
 the starburst flare, the phone label grid was moved clear of the attention
 count, and the top-right block was collapsed on panel views so it no longer
-overlaps the panel.
+overlaps the panel. Motion was checked by sampling frames at 0.4 s, 2.5 s and
+6 s and confirming the canvas changes between frames. Headless software
+rendering measured roughly 35 fps at 1440×900 and 60 fps at 390×844; a
+GPU-backed browser should hold 60 at both.
 
 ## Remaining limitations
 
+- Motion density is a taste call: comet count, dust count, ring alpha and sway amplitude are the first lines of `initLive()` and `frame()` in `starcloud.js`.
 - The reference's cloud is a painted image; this one is procedural. It is
   close in structure and palette but softer detail (dust density, the way
   filaments braid) is a matter of taste and easy to tune in `buildBase()`.
