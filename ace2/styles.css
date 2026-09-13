@@ -633,8 +633,7 @@ body.dropping::after { content: 'DROP TO CAPTURE'; position: fixed; inset: 14px;
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
   filter: drop-shadow(0 0 10px rgba(69,255,166,.35)); }
 #login .title .v { font-size: 13px; letter-spacing: 2px; -webkit-text-fill-color: currentColor; color: var(--text-faint); }
-#login .sub { font-family: var(--mono); font-size: 10px; letter-spacing: 3px; color: var(--text-faint);
-  margin: 9px 0 26px; text-transform: uppercase; }
+#login .title { margin-bottom: 26px; }   /* the company line under it is gone (2026-09-13) */
 #login input { width: 100%; background: rgba(2,10,10,.7); border: 1px solid rgba(69,255,166,.3); color: var(--text);
   font-family: var(--mono); font-size: 14px; padding: 12px; border-radius: 12px; outline: none;
   text-align: center; letter-spacing: 3px; transition: border-color .2s, box-shadow .2s; }
