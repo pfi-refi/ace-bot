@@ -1354,3 +1354,11 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   .card, .card-body, .card-head, .db-item, .db-meta, .cmd-row {
     overflow-wrap: anywhere; word-break: break-word; }
 }
+
+/* Consistent, keyboard-accessible task controls on the board and pushed Today cards. */
+.cmd-box,.db-box{width:44px;height:44px;min-width:44px;min-height:44px;padding:0;background:transparent;}
+.cmd-pencil,.db-edit{width:44px;height:44px;min-width:44px;min-height:44px;flex:none;border-radius:var(--r-ctl);border:1px solid rgba(120,200,170,.3);background:transparent;color:#9fb3aa;cursor:pointer;}
+.cmd-box:focus-visible,.db-box:focus-visible,.cmd-pencil:focus-visible,.db-edit:focus-visible{outline:2px solid var(--aurora);outline-offset:2px;}
+.cmd-box[aria-busy=true]{opacity:.5;cursor:wait;}
+
+.board-confirm{width:min(440px,calc(100vw - 32px));max-height:80dvh;overflow:auto;background:#081713;color:#eafff5;border:1px solid #345648;border-radius:14px;padding:24px;font-family:var(--sans);}.board-confirm::backdrop{background:#000b}.board-confirm h2{font-size:19px;margin:0 0 16px}.board-confirm p{line-height:1.5;overflow-wrap:anywhere}.board-confirm-item{font-weight:600}.board-confirm-why{color:#aabfb5}.board-confirm>div{display:flex;gap:10px;flex-wrap:wrap}.board-confirm button{min-height:44px;padding:10px;border:1px solid #4a7861;border-radius:6px;background:#122b21;color:#eafff5;cursor:pointer}.board-confirm button:focus-visible{outline:2px solid #45ffa6;outline-offset:3px}

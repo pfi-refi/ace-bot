@@ -271,18 +271,17 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   await wr.scrollIntoViewIfNeeded();
   const before9 = (await api('/daybank?all=true')).items.find(i => /Permit sign-off/.test(i.text));
 
-  let asked = '';
-  // once(), not on(): a lingering listener double-handles the next dialog and Playwright
-  // throws "Cannot dismiss dialog which is already handled".
-  p.once('dialog', d => { asked = d.message(); d.dismiss(); });
-  await wr.locator('.cmd-box').click(); await p.waitForTimeout(1100);
+  await wr.locator('.cmd-box').click();
+  const asked = await p.locator('.board-confirm').innerText();
+  await p.getByRole('button', {name:'Keep open', exact:true}).click();
   const after9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
-  ok('closing a parked row asks first', /close it anyway/i.test(asked), asked.replace(/\n+/g, ' '));
+  ok('closing a parked row asks first', /complete this item/i.test(asked), asked.replace(/\n+/g, ' '));
   ok('...and names what it is parked on', /waiting on the county/i.test(asked));
   ok('a stray tap still cannot close a waiting record', after9.status === 'open', after9.status);
 
-  p.once('dialog', d => d.accept());
-  await wr.locator('.cmd-box').click(); await p.waitForTimeout(1100);
+  await wr.locator('.cmd-box').click();
+  await p.getByRole('button', {name:'Yes, complete this item', exact:true}).click();
+  await p.waitForTimeout(1100);
   const forced9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
   ok('...but confirming does close it', forced9.status === 'done', forced9.status);
   // Put it back through the UI — reopening is not a close, so it asks nothing.

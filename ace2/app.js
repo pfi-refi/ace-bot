@@ -1348,15 +1348,14 @@
         opts = opts || {};
         var r = document.createElement('div'); r.className = 'db-item ' + cls;
         var box = document.createElement('button'); box.className = 'db-box';
-        // completable comes from the server; a waiting row or a record has no checkbox here
-        // OR anywhere else, and the API refuses it too.
-        if (!it.completable) {
-          box.className = 'db-box parked-box'; box.disabled = true;
-          box.title = it.waiting_on ? ('Waiting on ' + it.waiting_on) : 'Not yours to close';
-        } else {
-          box.title = 'Mark done';
-          box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
-        }
+        box.title = it.completable ? 'Mark done' : 'Review completion';
+        box.setAttribute('aria-label', 'Complete ' + (it.text || 'item'));
+        box.addEventListener('click', async function () {
+          var forced = it.completable === false;
+          if (forced && !await confirmBoardCompletion(it)) return;
+          box.disabled = true;
+          toggleBankItem(it.id, 'done', forced).finally(function(){ box.disabled = false; });
+        });
         var mid = document.createElement('div'); mid.className = 'db-mid';
         var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
         var meta = document.createElement('div'); meta.className = 'db-meta';
@@ -1413,6 +1412,11 @@
         }
         mid.appendChild(txt); mid.appendChild(meta);
         r.appendChild(box); r.appendChild(mid);
+        var edit = document.createElement('button'); edit.className = 'db-edit';
+        edit.textContent = '✎'; edit.title = 'Edit in Command Center';
+        edit.setAttribute('aria-label', 'Edit ' + (it.text || 'item'));
+        edit.addEventListener('click', function(){ cmdOpenItem(it.id); });
+        r.appendChild(edit);
         body6.appendChild(r);
       }
 
@@ -1597,11 +1601,29 @@
   }
   window.__notice = boardNotice;   // one notice surface, reachable from every board path
 
-  function toggleBankItem(id, status) {
-    fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
+  function confirmBoardCompletion(it) {
+    return new Promise(function(resolve){
+      if(document.querySelector('.board-confirm')) { resolve(false); return; }
+      var dialog=document.createElement('dialog'); dialog.className='board-confirm';
+      dialog.setAttribute('aria-labelledby','board-confirm-title');
+      dialog.innerHTML='<h2 id="board-confirm-title">Complete this item?</h2><p class="board-confirm-item"></p><p class="board-confirm-why"></p><div><button type="button" class="board-confirm-cancel">Keep open</button><button type="button" class="board-confirm-yes">Yes, complete this item</button></div>';
+      dialog.querySelector('.board-confirm-item').textContent=it.text||'';
+      dialog.querySelector('.board-confirm-why').textContent=(it.waiting_on?'This is waiting on '+it.waiting_on+'.':'This is a reference record.')+' Confirm that the underlying item is finished, not just the follow-up.';
+      var settled=false;
+      function finish(value){ if(settled)return; settled=true; dialog.close(); dialog.remove(); resolve(value); }
+      dialog.querySelector('.board-confirm-cancel').onclick=function(){finish(false);};
+      dialog.querySelector('.board-confirm-yes').onclick=function(){finish(true);};
+      dialog.addEventListener('cancel',function(e){e.preventDefault();finish(false);});
+      dialog.addEventListener('click',function(e){if(e.target===dialog){var r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)finish(false);}});
+      document.body.appendChild(dialog);dialog.showModal();dialog.querySelector('.board-confirm-cancel').focus();
+    });
+  }
+
+  function toggleBankItem(id, status, forced) {
+    return fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status, force_close: !!forced }) })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
-        if (!d) return;
+        if (!d) throw new Error('No save receipt');
         // The SERVER decides completability now, so any caller — this panel, the older
         // overlay, a stale tab — gets the same answer. A refusal must be SEEN: silently
         // doing nothing is how the old disabled checkbox failed everywhere it wasn't.
@@ -1615,7 +1637,7 @@
         // Keep an open Command board in step — same store, one truth (2026-07-31).
         if (typeof cmdSync === 'function') cmdSync();
       })
-      .catch(function () {});
+      .catch(function () { boardNotice('Could not confirm the save. Refresh the board before trying again.'); });
   }
 
   function openLink(url, label) {
@@ -2053,12 +2075,16 @@
           .catch(function(){});   // an unreachable list endpoint must not blank the board
       });
   }
+  function cmdOpenItem(id){
+    cmd.lens='all'; cmd.area='All'; cmd.cat='All'; cmd.showRecords=true;
+    cmd.editing=id; cmd.draft=null; cmdOpen();
+  }
   function cmdOpen(){
     cmd.open=true; cmd.min=false;
     var v=document.getElementById('command-view');
     if(!v){ v=document.createElement('div'); v.id='command-view'; $('app').appendChild(v); }
     v.style.display='flex'; v.innerHTML='<div class="cmd-empty">loading…</div>';
-    cmdFetch().then(cmdRender).catch(function(){});
+    cmdFetch().then(function(){ cmdRender(); var edit=v.querySelector('.cmd-editing'); if(edit) edit.scrollIntoView({block:'center'}); }).catch(function(){ boardNotice('Could not load the board. Try opening it again.'); });
     // LIVE BOARD (2026-07-31): an open Command view used to be a stale snapshot — Ace could
     // complete items by voice/chat and Brady would watch them stay open. Refresh on a slow
     // pulse (skipping while he's mid-edit) so the board is always telling the truth.
@@ -2169,7 +2195,7 @@
     // register is always complete, and rolls over on the 1st (2026-08-26).
     var paid = !!it.paid_this_period;
     return '<div class="cmd-row '+(paid?'paid':(done?'done':''))+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
-      +'<div class="cmd-box"></div>'
+      +'<button type="button" class="cmd-box" aria-label="'+(done?'Reopen ':'Complete ')+cmdEsc(it.text)+'" aria-pressed="'+done+'"></button>'
       +'<div class="cmd-b"><div class="cmd-t">'+cmdEsc(it.text)+'</div><div class="cmd-m">'
       +'<span class="cmd-tag" style="color:'+col+';border-color:'+col+'55;background:'+col+'14">'
       +'<span class="cmd-d" style="background:'+col+'"></span>'+c+'</span>'
@@ -2213,7 +2239,7 @@
           + 'Push a week</button><span class="cmd-fuphint">the task stays open</span></div>'
         : '')
       +'</div></div>'
-      +'<button class="cmd-pencil" title="Edit">✎</button></div>';
+      +'<button class="cmd-pencil" title="Edit" aria-label="Edit '+cmdEsc(it.text)+'">✎</button></div>';
   }
   function cmdRender(resetScroll){
     var v=document.getElementById('command-view'); if(!v) return;
@@ -2510,41 +2536,33 @@
         .catch(function(why){ b.textContent=was; b.disabled=false;
           if(typeof why==='string'&&why) boardNotice(why); });
     }; });
-    Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=function(){
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=async function(){
       var id=b.parentNode.getAttribute('data-id');
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
-      // VERIFIED tick (2026-07-31): optimistic flip, but if the server doesn't confirm, the
-      // row reverts — a completion can no longer be silently lost to a 401/network blip.
-      var prev=it.status, prevTs=it.done_ts;
+      // Confirm the save before changing the displayed status.
       var ns=it.status==='done'?'open':'done';
-      // CLOSING A PARKED ROW IS ALLOWED, BUT IT HAS TO BE MEANT (2026-09-11, Brady: "am I
-      // not about to mark those off?"). His Due Today was nine rows, every one waiting and
-      // none of them tickable, so the one surface named for action had nothing to act on.
-      // Something can finish without the other person ever coming back, and he had no way
-      // to say so. force_close already exists end to end — only the UI never sent it.
-      //
-      // It asks first, deliberately: on 5 Sept four records vanished to one stray tap, which
-      // is why the plain checkbox refuses these in the first place.
       var forced=false;
       if(ns==='done' && it.completable===false){
-        var why = it.waiting_on ? ('This is waiting on ' + it.waiting_on + '.')
-                                : 'This is a record, not a task.';
-        if(!window.confirm(why + '\n\nClose it anyway?')) return;
+        if(!await confirmBoardCompletion(it)) return;
         forced=true;
       }
-      it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
+      // Wait for the receipt and replace BOTH item copies and Today groups together.
+      // Optimistically changing cmd.items alone left Today visibly unchecked after a save.
+      b.disabled=true; b.setAttribute('aria-busy','true');
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),
             body:JSON.stringify(forced?{id:id,status:ns,force_close:true}:{id:id,status:ns})})
-        .then(function(r){ if(r.status===401){ toLogin(); throw 0; } return r.json(); })
+        .then(function(r){ if(r.status===401){ toLogin(); throw new Error('Sign in to save.'); } return r.json(); })
         .then(function(d){
-          // A REFUSAL IS NOT A NETWORK BLIP. The revert was already correct, but silent —
-          // the tick flicked back with no reason given. The server now says WHY (waiting on
-          // someone, or a record with a lifecycle), so show that instead of nothing.
-          if(!d||!d.ok){ var why = d && d.error; throw (why || 0); }
+          if(!d||!d.ok) throw new Error((d&&d.error)||'Could not confirm the save.');
+          cmd.items=d.items; cmd.dueToday=d.due_today; cmd.today=d.today;
+          cmdRender();
+          var card=document.querySelector('.card[data-panel="DUE TODAY"]');
+          if(card) materializeCard('daybank',d);
+          boardNotice(ns==='done'?'Marked complete.':'Reopened.');
         })
         .catch(function(why){
-          it.status=prev; it.done_ts=prevTs; cmdRender();
-          if (typeof why === 'string' && why) boardNotice(why);
+          b.disabled=false; b.removeAttribute('aria-busy');
+          boardNotice((why&&why.message)||'Could not confirm the save. Refresh before retrying.');
         });
     }; });
     // FULL EDITING (Brady): ✎ opens the inline editor — rewrite text, move category, set due.
@@ -2647,7 +2665,7 @@
         .then(function(d){
           if (!d || !d.ok) { serverWhy = (d && d.error) || ''; throw 0; }
           cmd.editing = null; cmd.draft = null;
-          return cmdFetch().then(cmdRender);
+          return cmdFetch().then(function(){cmdRender();if(document.querySelector('.card[data-panel="DUE TODAY"]'))materializeCard('daybank',d);});
         })
         .catch(function(){
           // keep the editor open with the typed values — never eat an edit silently

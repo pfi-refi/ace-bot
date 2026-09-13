@@ -226,3 +226,10 @@ Finished sentences still send immediately; unfinished ones wait for the rest.
 
 "Tomorrow" is frozen to a real date when it is written, so an item cannot claim to be due
 tomorrow for four days running.
+
+## 2026-09-13 — Board control repair (prepared, not deployed)
+
+Today refreshes its rows from the save receipt immediately after completion. Floating Today
+cards can open the matching item for editing and offer explicit confirmation to finish a
+waiting/reference item. Completion and edit controls have 44px targets and keyboard labels.
+Failed saves show a notice. Waiting items still require deliberate confirmation.
