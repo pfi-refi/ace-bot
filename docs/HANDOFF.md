@@ -111,6 +111,14 @@ GPU-backed browser should hold 60 at both.
   canvas labels has not been tuned.
 - Not a PWA, no offline manifest, no icons.
 
+## Handing to Codex
+
+The repo now carries `AGENTS.md` at the root and `nigel/AGENTS.md` with the
+design intent, constraints, how to open and test, style notes and a
+prioritised upgrade list. The reference image is saved at
+`nigel/reference/starcloud-reference.png`. Start Codex in the repo on branch
+`claude/nigel-dashboard-redesign-4tcpd7` and point it at `nigel/AGENTS.md`.
+
 ## Next steps
 
 1. Confirm the Today / My Office interpretation and the AUM-under-Investments, Insurance-under-Servicing mapping.
