@@ -24,6 +24,13 @@ questions can run without personal records; personal deep dives verify bill figu
 the sheet and disclose gaps instead of borrowing amounts from board text.
 
 
+## 2026-09-13 — A cleaner face, same dashboard
+
+**Nothing moved.** Same stage, same dock, same Command Center. PFI is gone from the header;
+the conversation text is a touch larger with a firmer bubble behind it; the board rows and
+their labels are easier to read; every small control in the Command Center now shares one
+shape; and on a phone the dock fills the width in two tidy rows instead of wrapping.
+
 ## 2026-09-12 (evening) — I know what part of the day it is
 
 **No more "goodnight" at lunchtime.** I closed a midday call with "Goodnight, Brady" twice

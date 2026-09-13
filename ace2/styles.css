@@ -63,6 +63,12 @@
 
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  /* ---- type scale (2026-09-13 polish) — labels are mono, words are sans ---- */
+  --fs-label: 10.5px;   /* mono UI labels: dock, chips, lenses, tags */
+  --fs-meta:  11px;     /* mono meta: timestamps, group headers */
+  --fs-body:  15.5px;   /* conversation and row text on desktop */
+  --fs-body-m: 16px;    /* conversation and row text on phones */
+  --r-ctl: 6px;         /* one radius for every secondary control */
 
   /* ---- rhythm ---- */
   --r-md: 10px; --r-lg: 16px; --r-pill: 999px;
@@ -202,7 +208,7 @@ body {
 
 /* ---------- Transcript ---------- */
 #messages { width: min(720px, 92vw); min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 10px; padding: 6px 10px 12px;
+  display: flex; flex-direction: column; gap: 12px; padding: 6px 10px 12px;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px, #000 100%);
           mask-image: linear-gradient(to bottom, transparent 0, #000 18px, #000 100%); }
 #messages::-webkit-scrollbar { width: 8px; }
@@ -211,13 +217,13 @@ body {
 #messages::-webkit-scrollbar-thumb:hover { background: var(--aurora-60); }
 @supports (-moz-appearance: none) { #messages { scrollbar-width: thin; scrollbar-color: var(--aurora-40) transparent; } }
 
-.msg { max-width: 86%; font-size: 15px; line-height: 1.65; letter-spacing: .1px;
-  padding: 12px 16px; border-radius: var(--r-lg); word-wrap: break-word; white-space: pre-wrap;
+.msg { max-width: 86%; font-size: var(--fs-body); line-height: 1.6; letter-spacing: 0;
+  padding: 13px 16px; border-radius: var(--r-lg); word-wrap: break-word; white-space: pre-wrap;
   animation: msgin .3s var(--ease-out) backwards; }
 @keyframes msgin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .msg.ace  { align-self: flex-start; color: var(--text);
   border: 1px solid transparent;
-  background: var(--panel-fill) padding-box, var(--panel-edge) border-box;
+  background: linear-gradient(172deg, rgba(13,31,27,.94) 0%, rgba(6,15,18,.90) 52%, rgba(4,10,14,.92) 100%) padding-box, var(--panel-edge) border-box;
   border-left: 2px solid var(--aurora);
   box-shadow: 0 12px 32px -10px rgba(0,0,0,.6), 0 0 24px -6px rgba(69,255,166,.08), inset 0 1px 0 rgba(234,255,245,.06);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
@@ -228,9 +234,9 @@ body {
   box-shadow: 0 12px 32px -10px rgba(0,0,0,.55);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   border-top-right-radius: 4px; }
-.msg .sender { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 2.5px;
+.msg .sender { font-family: var(--mono); font-size: var(--fs-label); font-weight: 700; letter-spacing: 2.5px;
   color: var(--aurora); margin-bottom: 6px; text-shadow: 0 0 4px var(--aurora-40); }
-.msg .ts { font-family: var(--mono); font-size: 10.5px; color: rgba(234,255,245,.52); margin-top: 6px;
+.msg .ts { font-family: var(--mono); font-size: var(--fs-meta); color: rgba(234,255,245,.62); margin-top: 7px;
   letter-spacing: .5px; font-variant-numeric: tabular-nums; }
 .msg.user .ts { text-align: right; }
 /* HELD, NOT LOST (2026-09-10). Something Brady said while Ace was mid-turn used to be
@@ -262,8 +268,8 @@ body {
 .tool-pill.receipt .receipt-head { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tool-pill.receipt .receipt-body { display: none; margin-top: 8px; padding-top: 8px;
   border-top: 1px dashed var(--aurora-25); white-space: pre-wrap; text-transform: none;
-  letter-spacing: .2px; font-weight: 400; font-size: 12px; line-height: 1.55;
-  color: rgba(234,255,245,.78); max-height: 42vh; overflow-y: auto; }
+  letter-spacing: .2px; font-weight: 400; font-size: 13px; line-height: 1.55;
+  color: rgba(234,255,245,.82); max-height: 42vh; overflow-y: auto; }
 .tool-pill.receipt.open .receipt-body { display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -508,10 +514,10 @@ body {
 .cmd-orb { width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto;
   background: radial-gradient(circle at 38% 34%, #eafff5, #45ffa6 36%, #0c6b47 74%, #03130d 100%); box-shadow: 0 0 14px -3px rgba(69,255,166,.5); }
 .cmd-ttl { flex: 1; font-family: var(--mono); font-size: 12px; letter-spacing: .22em; color: #eafaf4; }
-.cmd-ic { width: 32px; height: 32px; border-radius: 5px; border: 1px solid rgba(140,160,175,.2); background: transparent; color: #8fa4a0; font-size: 15px; cursor: pointer; }
+.cmd-ic { width: 32px; height: 32px; border-radius: var(--r-ctl); border: 1px solid rgba(140,160,175,.2); background: transparent; color: #8fa4a0; font-size: 15px; cursor: pointer; }
 .cmd-ic:active { transform: scale(.92); }
 .cmd-lens { display: flex; gap: 4px; padding: 12px 14px 8px; }
-.cmd-lens button { flex: 1; font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; padding: 9px 4px; border-radius: 4px; border: 1px solid transparent; background: rgba(255,255,255,.03); color: #8fa4a0; cursor: pointer; }
+.cmd-lens button { flex: 1; font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .12em; text-transform: uppercase; padding: 9px 4px; border-radius: var(--r-ctl); border: 1px solid transparent; background: rgba(255,255,255,.03); color: #8fa4a0; cursor: pointer; }
 .cmd-lens button.on { color: #04080c; background: #45ffa6; font-weight: 700; }
 .cmd-chips { display: flex; gap: 7px; padding: 2px 14px 12px; overflow-x: auto; }
 /* ONE ROW, NOT THREE (2026-09-11). Areas and categories keep their own styling — they moved
@@ -524,25 +530,25 @@ body {
   padding: 8px 0 4px; }
 .cmd-sheet .cmd-areas, .cmd-sheet .cmd-chips { padding-left: 0; padding-right: 0; }
 .cmd-toggles { display: flex; gap: 7px; flex-wrap: wrap; }
-.cmd-tog { font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
-  text-transform: uppercase; padding: 7px 11px; border-radius: 999px;
+.cmd-tog { font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .1em;
+  text-transform: uppercase; padding: 7px 11px; border-radius: var(--r-ctl);
   border: 1px solid rgba(255,255,255,.14); background: transparent; color: #8fa4a0;
   cursor: pointer; min-height: 34px; }
 .cmd-tog.on { color: #04080c; background: #45ffa6; border-color: #45ffa6; font-weight: 700; }
 .cmd-chips::-webkit-scrollbar { display: none; }
 /* Tactical menu pass (2026-08-01): pills → angular console buttons, dots → status blocks */
-.cmd-chip { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; padding: 6px 11px; border-radius: 4px; border: 1px solid rgba(140,160,175,.22); background: rgba(255,255,255,.02); color: #8fa4a0; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.cmd-chip { flex: 0 0 auto; font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .1em; text-transform: uppercase; padding: 6px 11px; border-radius: var(--r-ctl); border: 1px solid rgba(140,160,175,.22); background: rgba(255,255,255,.02); color: #8fa4a0; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
 .cmd-chip.on { border-color: rgba(190,210,225,.45); background: rgba(255,255,255,.07); color: #fff; }
 .cmd-d { width: 8px; height: 8px; border-radius: 1px; display: inline-block; }
 .cmd-list { flex: 1; overflow-y: auto; padding: 2px 14px 100px; }
-.cmd-grp { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: #63796f; margin: 16px 4px 8px; display: flex; align-items: center; gap: 7px; }
+.cmd-grp { font-family: var(--mono); font-size: var(--fs-meta); letter-spacing: .14em; text-transform: uppercase; color: #7d9389; margin: 18px 4px 8px; display: flex; align-items: center; gap: 7px; }
 .cmd-sq { width: 8px; height: 8px; border-radius: 2px; }
-.cmd-row { display: flex; align-items: flex-start; gap: 11px; padding: 12px; border-radius: 7px; background: rgba(16,24,30,.6); border: 1px solid rgba(140,160,175,.14); border-left-width: 3px; margin-bottom: 7px; }
+.cmd-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border-radius: 8px; background: rgba(16,24,30,.6); border: 1px solid rgba(140,160,175,.14); border-left-width: 3px; margin-bottom: 7px; }
 .cmd-box { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; border-radius: 4px; border: 1.5px solid rgba(160,180,195,.35); cursor: pointer; position: relative; }
 .cmd-row.done .cmd-box { background: #2fd36b; border-color: #2fd36b; }
 .cmd-row.done .cmd-box::after { content: "✓"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #03130d; font-size: 13px; font-weight: 800; }
 .cmd-b { flex: 1; min-width: 0; }
-.cmd-t { font-size: 14px; color: #eef7f3; line-height: 1.35; }
+.cmd-t { font-size: var(--fs-body); color: #eef7f3; line-height: 1.4; }
 .cmd-row.done .cmd-t { color: #63796f; text-decoration: line-through; }
 /* PAID BILL (2026-08-26): stays on the shelf as part of the register — checked and dimmed a
    little, but NOT struck through, because the obligation still exists and returns next month. */
@@ -554,8 +560,8 @@ body {
   border-radius: 3px; color: #2fd36b; border: 1px solid rgba(47,211,107,.4);
   background: rgba(47,211,107,.1); }
 .cmd-m { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.cmd-tag { font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; display: flex; align-items: center; gap: 5px; color: #9db0bd; border: 1px solid rgba(140,160,175,.18); }
-.cmd-due { font-family: var(--mono); font-size: 9px; color: #38bdf8; border: 1px solid rgba(56,189,248,.3); background: rgba(56,189,248,.07); padding: 2px 7px; border-radius: 3px; }
+.cmd-tag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; display: flex; align-items: center; gap: 5px; color: #9db0bd; border: 1px solid rgba(140,160,175,.18); }
+.cmd-due { font-family: var(--mono); font-size: 9.5px; color: #38bdf8; border: 1px solid rgba(56,189,248,.3); background: rgba(56,189,248,.07); padding: 2px 7px; border-radius: 3px; }
 .cmd-empty { text-align: center; color: #63796f; font-size: 13px; padding: 50px; font-family: var(--mono); }
 .cmd-add { position: absolute; left: 14px; right: 14px; bottom: 16px; display: flex; gap: 9px; align-items: center; background: rgba(8,14,18,.94); border: 1px solid rgba(140,160,175,.28); border-radius: 8px; padding: 10px 12px; }
 .cmd-plus { width: 26px; height: 26px; border-radius: 5px; background: #2fd36b; color: #03130d; font-size: 18px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
@@ -584,7 +590,7 @@ body {
   box-shadow: 0 24px 60px -16px rgba(0,0,0,.7), 0 0 34px -4px rgba(69,255,166,.18),
     inset 0 1px 0 rgba(234,255,245,.08); }
 #chat-input { flex: 1; background: transparent; border: none; outline: none; color: var(--text);
-  font-family: var(--sans); font-size: 15px; padding: 6px 4px; letter-spacing: .1px; }
+  font-family: var(--sans); font-size: var(--fs-body); padding: 6px 4px; letter-spacing: 0; }
 #chat-input::placeholder { color: var(--text-faint); }
 
 .icon-btn { width: 40px; height: 40px; flex: none; display: flex; align-items: center; justify-content: center;
@@ -665,6 +671,17 @@ body.dropping::after { content: 'DROP TO CAPTURE'; position: fixed; inset: 14px;
   #orb-wrap::after { display: none; }                 /* skip the instrument ring on phones */
   #chat-panel { width: 100vw; }
   #app.chat-open { padding-right: 12px; }
+  /* PHONE DOCK (2026-09-13). Five plates used to flex-wrap into 3 + 2 centred leftovers.
+     A six-column grid gives the top row three equal plates and the bottom row two, edge
+     to edge. Same buttons, same handlers, same chamfer. */
+  #quick { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+  #quick > .qa { grid-column: span 2; display: flex; align-items: center; justify-content: center;
+    min-height: 44px; padding: 8px 10px; letter-spacing: 1.2px; white-space: nowrap; }
+  #quick > .qa:nth-of-type(4), #quick > .qa:nth-of-type(5) { grid-column: span 3; }
+  /* conversation: a phone screen is narrower, so the bubbles take more of it */
+  .msg { max-width: 92%; font-size: var(--fs-body-m); }
+  #chat-input { font-size: var(--fs-body-m); }   /* 16px stops iOS zooming the composer */
+  .cmd-t { font-size: var(--fs-body-m); }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 
@@ -796,7 +813,7 @@ body::after { content: ""; position: fixed; inset: 0 0 40% 0; z-index: 1; pointe
 /* ============================== v36: panel editing + color + centered stage ===== */
 /* Category accent stripe on every board row (color set inline per category) */
 .cmd-row { border-left: 3px solid transparent; }
-.cmd-pencil { flex: none; align-self: center; width: 30px; height: 30px; border-radius: 8px;
+.cmd-pencil { flex: none; align-self: center; width: 30px; height: 30px; border-radius: var(--r-ctl);
   border: 1px solid rgba(120,200,170,.16); background: transparent; color: #63796f;
   font-size: 13px; cursor: pointer; transition: color .15s, border-color .15s; }
 .cmd-pencil:hover { color: #45ffa6; border-color: rgba(69,255,166,.4); }
@@ -963,8 +980,8 @@ body.mode-chat #discreet-btn { display: none; }
 .more-group { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .more-group h2 { margin: 0 0 3px; font: 10px var(--mono); color: var(--text-faint);
   letter-spacing: .08em; text-transform: uppercase; }
-#quick-more .qa { width: 100%; min-height: 44px; text-align: left; padding: 10px;
-  white-space: normal; overflow-wrap: anywhere; font-size: 10px; letter-spacing: .6px; }
+#quick-more .qa { width: 100%; min-height: 44px; text-align: left; padding: 10px 12px;
+  white-space: normal; overflow-wrap: anywhere; font-size: var(--fs-label); letter-spacing: 1.2px; }
 #quick-more button:focus-visible { outline: 2px solid var(--aurora); outline-offset: 2px; }
 .qa.qa-more.active { color: var(--aurora); border-color: rgba(69,255,166,.4); }
 @media (max-width: 360px) { .more-groups { grid-template-columns: 1fr; } }
@@ -1122,7 +1139,8 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 .cmd-list { padding-bottom: 132px; }
 /* Phone: the lens row scrolls sideways rather than squeezing six labels to nothing. */
 @media (max-width: 560px) {
-  .cmd-lens { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .cmd-lens { overflow-x: auto; -webkit-overflow-scrolling: touch;
+    -webkit-mask-image: linear-gradient(to right, #000 88%, transparent); mask-image: linear-gradient(to right, #000 88%, transparent); }
   .cmd-lens button { flex: 0 0 auto; padding-left: 14px; padding-right: 14px; }
   .cmd-chips { overflow-x: auto; }
   .db-meta { flex-wrap: wrap; row-gap: 4px; }
@@ -1136,8 +1154,8 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 /* AREAS ROW. Primary navigation, above the category chips, which are now secondary. */
 .cmd-areas { display: flex; gap: 7px; padding: 2px 14px 8px; overflow-x: auto; }
 .cmd-areas::-webkit-scrollbar { display: none; }
-.cmd-area { flex: 0 0 auto; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
-  text-transform: uppercase; padding: 7px 12px; border-radius: 4px; cursor: pointer;
+.cmd-area { flex: 0 0 auto; font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .1em;
+  text-transform: uppercase; padding: 7px 12px; border-radius: var(--r-ctl); cursor: pointer;
   white-space: nowrap; display: flex; align-items: center; gap: 6px;
   border: 1px solid rgba(140,160,175,.22); background: rgba(255,255,255,.02); color: #8fa4a0; }
 .cmd-area.on { border-color: rgba(190,210,225,.5); background: rgba(255,255,255,.08); color: #fff; }
@@ -1146,7 +1164,7 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 
 /* A group note explains an optional or advisory section, so a suggestion never reads as
    an instruction and a carried-over row never reads as a change that was made. */
-.cmd-note { font-size: 11.5px; line-height: 1.45; color: #8fa4a0; padding: 2px 16px 8px; }
+.cmd-note { font-size: 12.5px; line-height: 1.45; color: #8fa4a0; padding: 2px 16px 8px; }
 
 /* THE REVIEW FLAG. Deliberately not styled like the Needs-a-decision badge: it marks a row
    nobody has looked at, not a decision Brady made. */
@@ -1159,8 +1177,8 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
    checkbox keeps exactly one meaning. */
 .cmd-fuprow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 6px; width: 100%; }
-.cmd-fup { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
-  text-transform: uppercase; padding: 5px 9px; min-height: 30px; border-radius: 6px;
+.cmd-fup { font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 5px 10px; min-height: 32px; border-radius: var(--r-ctl);
   cursor: pointer; color: #53e7ff; border: 1px solid rgba(83,231,255,.34);
   background: rgba(83,231,255,.07); }
 .cmd-fup:disabled { opacity: .5; }
@@ -1168,7 +1186,7 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 
 /* EDITOR. Labelled controls and real pickers — the brief's "understandable without knowing
    the backend". The three date meanings each get their own labelled row. */
-.cmd-el { font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em;
+.cmd-el { font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
   text-transform: uppercase; color: #7d8f8b; align-self: center; flex: 0 0 auto;
   min-width: 62px; }
 .cmd-ebucket, .cmd-eentry, .cmd-estate, .cmd-efup, .cmd-enext, .cmd-ewait {
@@ -1177,21 +1195,21 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   outline: none; font-family: inherit; }
 .cmd-ebucket option, .cmd-eentry option, .cmd-estate option { background: #06121a; }
 .cmd-edates .cmd-edue, .cmd-edates .cmd-efup { flex: 1; min-height: 34px; }
-.cmd-eclear { flex: 0 0 auto; font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
-  text-transform: uppercase; padding: 6px 10px; min-height: 34px; border-radius: 6px;
+.cmd-eclear { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 6px 10px; min-height: 34px; border-radius: var(--r-ctl);
   cursor: pointer; color: #8fa4a0; background: transparent;
   border: 1px solid rgba(120,200,170,.2); }
 .cmd-ehint { font-size: 10.5px; color: #7d8f8b; align-self: center; }
 .cmd-etoday { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
-  text-transform: uppercase; padding: 8px 12px; min-height: 34px; border-radius: 8px;
+  text-transform: uppercase; padding: 8px 12px; min-height: 34px; border-radius: var(--r-ctl);
   cursor: pointer; color: #8fa4a0; background: transparent;
   border: 1px solid rgba(120,200,170,.2); }
 .cmd-etoday.on { color: #04120b; background: #45ffa6; border-color: #45ffa6; font-weight: 700; }
 
 /* SECONDARY TAGS: extra filters inside an area. One record, several labels — never a copy. */
 .cmd-etags { flex-wrap: wrap; gap: 5px; }
-.cmd-etag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
-  text-transform: uppercase; padding: 5px 9px; min-height: 30px; border-radius: 6px;
+.cmd-etag { font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 5px 10px; min-height: 32px; border-radius: var(--r-ctl);
   cursor: pointer; color: #7d8f8b; background: transparent;
   border: 1px solid rgba(120,200,170,.18); }
 .cmd-etag.on { background: rgba(255,255,255,.06); }
@@ -1212,8 +1230,8 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 /* SHOW MORE. Suggestions are capped at three on both surfaces; the rest are one tap away
    and the count is always stated, so a short list never looks like the whole list. */
 .cmd-more, .db-more { display: block; width: calc(100% - 32px); margin: 4px 16px 10px;
-  font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
-  padding: 10px 8px; min-height: 40px; border-radius: 8px; cursor: pointer; color: #8fa4a0;
+  font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .1em; text-transform: uppercase;
+  padding: 10px 8px; min-height: 40px; border-radius: var(--r-ctl); cursor: pointer; color: #8fa4a0;
   background: rgba(255,255,255,.02); border: 1px solid rgba(120,200,170,.2); }
 .cmd-more:disabled, .db-more:disabled { opacity: .6; }
 @media (max-width: 560px) { .cmd-more, .db-more { min-height: 44px; } }
@@ -1221,8 +1239,8 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
 /* "I've looked at this" — one tap to retire the review flag, with nothing else changed.
    Deliberately quieter than the follow-up buttons: reviewing is an acknowledgement, not
    an action on the work itself. (Codex, 2026-09-09) */
-.cmd-rev { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
-  text-transform: uppercase; padding: 5px 9px; min-height: 30px; border-radius: 6px;
+.cmd-rev { font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 5px 10px; min-height: 32px; border-radius: var(--r-ctl);
   cursor: pointer; color: #a78bfa; border: 1px solid rgba(167,139,250,.34);
   background: rgba(167,139,250,.07); }
 .cmd-rev:disabled { opacity: .5; }
