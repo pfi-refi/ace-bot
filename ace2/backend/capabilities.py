@@ -1492,6 +1492,30 @@ def _deep_dive_schemas() -> list:
     return [dict(t) for t in _tools.TOOLS if t.get("name") in DEEP_DIVE_READS]
 
 
+def _recent_direct_updates(turns, max_chars=6000):
+    """Keep newest direct corrections, including the END of an oversized voice update."""
+    selected = []
+    remaining = max_chars
+    for turn in reversed(turns or []):
+        if turn.get("role") != "user":
+            continue
+        text = str(turn.get("content") or "").strip()
+        if not text:
+            continue
+        prefix = f"[{turn.get('ts') or 'undated'}] user: "
+        if len(prefix) + len(text) > remaining:
+            if selected:
+                break
+            marker = "[earlier part omitted; use recall for full context] "
+            text = marker + text[-max(1, remaining - len(prefix) - len(marker)):]
+        line = prefix + text
+        selected.append(line)
+        remaining -= len(line) + 1
+        if remaining <= 0:
+            break
+    return "\n".join(reversed(selected)) or "(no recent direct user updates available)"
+
+
 async def deep_dive(args: dict, call, progress=None, known=None,
                     checkpoint=None, should_stop=None) -> dict:
     """Answer a wide question about Brady's own world, in the background, read-only.
@@ -1514,7 +1538,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     client = args.get("_client")          # injected by tests; real client resolved below
     if client is None:
         from . import chat as _chat
-        client = _chat._anthropic()
+        client = _chat._anthropic().with_options(max_retries=0)
 
     async def say(msg):
         if progress:
@@ -1625,8 +1649,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
             context = (ctx_slow or "") + "\n" + (ctx_fast or "")
             try:
                 recent = await _asyncio.wait_for(_asyncio.to_thread(_chat._unified_thread, 40), timeout=6)
-                direct = [t for t in recent if t.get("role") == "user"]
-                recent_text = _chat._format_thread(_chat._budget_turns(direct, 6000), per_turn=2000)
+                recent_text = _recent_direct_updates(recent)
                 context += "\nRECENT DIRECT USER UPDATES (dated reports, not proof of tool writes):\n" + recent_text
             except Exception:
                 context += "\nRecent direct conversation updates unavailable; do not claim to have checked them."

@@ -50,6 +50,19 @@ class DeepDiveRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('NEVERPRINT',str(caught.exception.result))
 
 
+class DirectCorrectionWindow(unittest.TestCase):
+    def test_long_spoken_update_keeps_final_correction_and_full_date(self):
+        out=cp._recent_direct_updates([
+            {'role':'assistant','content':'Lincoln completed'},
+            {'role':'user','ts':'2026-09-20T09:00:00-04:00',
+             'content':'Earlier context. '*900+'Correction: Lincoln is the only call left.'}])
+        self.assertIn('Correction: Lincoln is the only call left.',out)
+        self.assertIn('2026-09-20T09:00:00-04:00',out)
+        self.assertIn('earlier part omitted',out)
+        self.assertNotIn('Lincoln completed',out)
+        self.assertLessEqual(len(out),6000)
+
+
 class VoiceIdentity(unittest.TestCase):
     def setUp(self):
         self.patch=patch.object(main,'_voice_identity',{'prefix':'','text':'','key':'','at':0.0})
