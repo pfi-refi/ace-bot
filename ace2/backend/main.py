@@ -69,7 +69,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.3"
+VERSION = "v2.0.4"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -169,6 +169,14 @@ def _next_filler() -> str:
     return pick
 
 
+def _waiting_ack(spoke):
+    """One brief acknowledgment across slow-start and tool-wait paths; never per tool."""
+    if spoke["any"]:
+        return ""
+    spoke["any"] = True
+    return "One moment… "
+
+
 # Soft continuers streamed if the voice SSE goes silent mid-turn (a slow tool await). The
 # lead-in covers the FIRST-token deadline; this covers a long silent phase AFTER Ace has
 # started, so a multi-second tool call (esp. an mcp_→Google round-trip on a screen handoff)
@@ -176,7 +184,7 @@ def _next_filler() -> str:
 # repeats the same word back-to-back.
 _CONTINUERS = ("still on it", "one sec", "almost there", "bear with me", "hang tight",
                "just a moment", "nearly there", "give me a beat", "working on it",
-               "with you shortly", "stay with me")
+               "with you shortly", "stay with me", "one moment")
 
 
 # How many 4s waits of silence before Ace gives up on a turn. Was 8 (~36s), chosen when every
@@ -2302,7 +2310,6 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # first move is a tool call (text hasn't started), which also keeps ElevenLabs'
         # first-token deadline fed exactly when it's actually at risk (silent tool phase).
         spoke = {"any": False}
-        status_said = set()   # tool names whose status word already played this turn
         # `tail` is the last character handed to ElevenLabs, from ANY source — the model, a
         # status word, a continuer. The seam is a property of the stream, not of the speaker.
         resumed = {"after_tool": False, "tail": ""}   # see _resume_break
@@ -2359,14 +2366,9 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # screen). The SPOKEN status below is still deduped so the audio isn't a chant.
                 await publish_stage_event("tool", payload)
                 resumed["after_tool"] = True     # whatever the model says next is a new thought
-                name = payload.get("name")
-                if name in status_said or len(status_said) >= 4:
-                    return
-                status_said.add(name)
-                label = (payload.get("label") or "working on it").lower()
-                spoken = _SPOKEN_STATUS.get(name, label)
-                spoke["any"] = True
-                await say(f"{spoken.capitalize()}… ")
+                acknowledgment = _waiting_ack(spoke)
+                if acknowledgment:
+                    await say(acknowledgment)
             elif event_type == "tool" and payload.get("status") == "done":
                 # Flip the HUD pill to done (non-ui only; ui tools have no pill).
                 if not payload.get("ui"):
@@ -2417,12 +2419,10 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         # word arrives fast, so a plain turn streams his ACTUAL words — no "Mm—" noise every
         # turn (Brady's "hu mhh"). A lead-in is emitted LAZILY below only when the first token
         # is genuinely slow, as a backstop against ElevenLabs' first-token deadline.
-        cont = _continuer_cycler()
         started = False   # has the turn produced ANY real output yet?
         sent_tool_call = False   # relayed an ElevenLabs system-tool call this turn?
         pre = 0           # 1.5s ticks waited BEFORE the first real token
         misses = 0        # consecutive 4s silences after start (resets on real output)
-        conts_spoken = 0  # continuers voiced this TURN (never resets — hard babble budget)
         try:
             while True:
                 try:
@@ -2432,27 +2432,14 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                         queue.get(), timeout=(1.5 if not started else 4.0))
                 except asyncio.TimeoutError:
                     if not started:
-                        # First token is slow (a cold boot or model/API spike). Speak like a
-                        # person waiting: ONE lead-in, a beat later ONE continuer, then another
-                        # — never a chant (an uncapped 1.5s filler drumbeat is the "stuck in a
-                        # loop" Brady heard). If it's STILL not started after ~13s, bail with
-                        # one honest line and end the turn instead of babbling forever.
+                        # A single human acknowledgment; silent SSE ticks keep transport
+                        # alive afterward. Existing first-token deadline remains unchanged.
                         pre += 1
-                        if pre == 1:
-                            spoke["any"] = True
-                            piece = _next_filler() + " "
-                        elif pre in (3, 6):
-                            piece = next(cont) + "… "
-                        elif pre >= 9:
-                            yield _sse_chunk(
-                                created, model,
+                        if pre >= 9:
+                            yield _sse_chunk(created, model,
                                 "Sorry — that took me a beat too long. Ask me again?")
                             break
-                        else:
-                            # In-between ticks: Ace stays quiet, the STREAM does not.
-                            yield _sse_chunk(created, model, "")
-                            continue
-                        yield _sse_chunk(created, model, piece)
+                        yield _sse_chunk(created, model, _waiting_ack(spoke))
                         continue
                     misses += 1
                     if misses > MAX_QUIET_MISSES:
@@ -2461,16 +2448,9 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                         yield _sse_chunk(created, model,
                                          "That one's hanging on me — try me again in a moment.")
                         break
-                    # Speak a continuer only every OTHER miss (≈8s apart) and at most 3 per
-                    # turn — a hung tool gets a few human beats, then quiet, never a rotating
-                    # chant that audibly wraps around. Past the budget Ace says nothing, but the
-                    # stream still ticks: silence on the LINE is what trips the cascade timeout,
-                    # and silence from ACE is what Brady actually wanted.
-                    if misses % 2 == 0 and conts_spoken < 3:
-                        conts_spoken += 1
-                        yield _sse_chunk(created, model, next(cont) + "… ")
-                    else:
-                        yield _sse_chunk(created, model, "")
+                    # Work has already been acknowledged. Keep the connection alive
+                    # without repeatedly speaking status updates.
+                    yield _sse_chunk(created, model, "")
                     continue
                 started = True
                 misses = 0

@@ -2183,7 +2183,7 @@ class VoiceSeamTests(unittest.TestCase):
 # ElevenLabs' llm cascade timeout is how long it waits for our endpoint before declaring the
 # LLM dead. It was 4 seconds and their field caps at 15, so the gaps have to fit under it.
 class VoiceKeepAliveTests(unittest.TestCase):
-    def _gaps(self, ticks, budget=3):
+    def _gaps(self, ticks, budget=0):
         """Replay the loop's quiet-tick rule and return (spoken, gap_in_ticks) per tick."""
         from ace2.backend.main import MAX_QUIET_MISSES
         spoken, out, misses = 0, [], 0
@@ -2212,9 +2212,9 @@ class VoiceKeepAliveTests(unittest.TestCase):
         steps = self._gaps(14)
         self.assertEqual(len(steps), 14, "a tick was skipped, which reopens a multi-tick gap")
 
-    def test_ace_still_only_speaks_three_times(self):
-        """The babble-spiral cap is unchanged — this fix is about the line, not the audio."""
-        self.assertEqual(self._gaps(14).count("speak"), 3)
+    def test_no_extra_speech_after_initial_acknowledgment(self):
+        """Waits after the initial acknowledgment keep transport alive without speech."""
+        self.assertEqual(self._gaps(14).count("speak"), 0)
 
     def test_a_hung_tool_still_ends_the_turn(self):
         """Keeping the stream alive must not keep a dead call alive forever."""

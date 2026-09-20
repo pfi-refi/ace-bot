@@ -3634,7 +3634,7 @@ def user_safe_reason(text: str, limit: int = 180) -> str:
     return (out[:limit].rstrip() + "…") if len(out) > limit else out
 
 
-def guarded_reply(turn_text: str, operations: list) -> str:
+def guarded_reply(turn_text: str, operations: list, spoken_mode=False) -> str:
     """Ace's answer with unproven success claims suppressed, then the receipt beneath it.
 
     A RECEIPT IS AN ADDITION, NOT A REPLACEMENT. This was `receipt or cleaned_text`, so any
@@ -3649,11 +3649,11 @@ def guarded_reply(turn_text: str, operations: list) -> str:
     mutations = [o for o in ops if o.get("state") not in (OP_READ, OP_UI, None)]
     all_verified = bool(mutations) and all(o.get("state") == OP_DONE for o in mutations)
     spoken = unsupported_action_reply(turn_text or "", warn=not all_verified)
-    receipt = action_receipt_reply(ops)
+    receipt = action_receipt_reply(ops, spoken_mode=spoken_mode)
     return "\n\n".join(x for x in (spoken.strip(), receipt) if x)
 
 
-def action_receipt_reply(operations: list) -> str:
+def action_receipt_reply(operations: list, spoken_mode=False) -> str:
     """Render ONLY recorded operation states; queued/read results never prove mutation.
 
     The record's own verifier/classifier is the trust boundary. This layer prevents the
@@ -3664,7 +3664,14 @@ def action_receipt_reply(operations: list) -> str:
               OP_REVIEW: "Waiting for your approval; not done",
               OP_UNKNOWN: "Outcome unconfirmed; check before retrying",
               OP_FAILED: "Failed or refused; no successful action confirmed"}
+    board_done = [o for o in operations if o.get("state") == OP_DONE
+                  and o.get("tool") in ("capture_item", "update_item", "capture")]
+    summarize_board = spoken_mode and len(board_done) >= 3
+    if summarize_board:
+        lines.append(f"Completed {len(board_done)} board updates; the detailed receipts are on screen.")
     for operation in operations:
+        if summarize_board and operation.get("state") == OP_DONE and operation.get("tool") in ("capture_item", "update_item", "capture"):
+            continue
         state = operation.get("state")
         if state not in labels:
             continue
@@ -3676,8 +3683,11 @@ def action_receipt_reply(operations: list) -> str:
         # result lands) and already passed through user_safe_reason there.
         detail = (str(operation.get("text") or "").strip() if state == OP_DONE
                   else str(operation.get("reason") or "").strip())
-        lines.append(f"{labels[state]} — {detail or name}.")
-    if lines:
+        if spoken_mode and state == OP_DONE:
+            lines.append((detail or name).rstrip(".") + ".")
+        else:
+            lines.append(f"{labels[state]} — {detail or name}.")
+    if lines and not spoken_mode:
         lines.append("These results cover only the actions listed here.")
     return "\n".join(lines)
 
@@ -3940,7 +3950,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                         # text unchanged unless it asserts a success, and swaps it for a
                         # warning when it does. So suppress the claim, keep the conversation,
                         # and append the receipt underneath it.
-                        guarded = guarded_reply("".join(turn_text), turn_ops)
+                        guarded = guarded_reply("".join(turn_text), turn_ops, spoken_mode=fast)
                         full_reply.append(guarded)
                         await emit("delta", {"text": guarded})
                 else:

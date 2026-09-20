@@ -11,6 +11,14 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-20 — Quieter while working
+
+Use one brief acknowledgment only when a wait needs it, then return with the outcome.
+Voice no longer reads each tool status or repeats waiting phrases. Silent connection
+keep-alives and clear failure/approval messages remain. Successful batches of board updates
+get a short spoken result; detailed receipts stay on screen. Explain the process when asked.
+
+
 ## 2026-09-20 — Today controls and more reliable follow-through
 
 Today checkboxes refresh from confirmed saves, with editing and guarded completion on the
