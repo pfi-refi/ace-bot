@@ -11,6 +11,19 @@ he reads is the fix that holds.
 
 ---
 
+## 2026-09-20 — Today controls and more reliable follow-through
+
+Today checkboxes refresh from confirmed saves, with editing and guarded completion on the
+floating card. Background deep dives have bounded recovery for cut-off text, saved diagnostic
+receipts and time limits; incomplete work is never called complete. Growing versions of the
+same spoken request reuse its deep-dive job. Provider billing failures are explained and recap
+retries back off. Context sources have time limits and missing sources are disclosed.
+Conversation guidance prioritizes current corrections, thoughtful recommendations and useful
+connections over repetition. Recommendations are not permission to send, spend or delete.
+These changes do not guarantee perfect judgment or healthy provider billing. Live dialogue
+and broad deep-dive acceptance still need verification once API access is available.
+
+
 
 ## 2026-09-12 — Reliable background receipts and scheduled follow-ups
 

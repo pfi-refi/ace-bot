@@ -81,6 +81,16 @@ class Claims(unittest.IsolatedAsyncioTestCase):
     def test_unknown_operation_uses_friendly_fallback(self):
         self.assertNotIn('mcp_secret_provider', chat.action_receipt_reply([{'state': chat.OP_UNKNOWN, 'tool': 'mcp_secret_provider'}]))
 
+    async def test_conversational_capture_cannot_vouch_for_unrelated_completions(self):
+        from backend import ops
+        block = types.SimpleNamespace(type='tool_use', name='capture_item', input={'text':'Fixture'}, id='call1')
+        reply, events, _ = await self.run_turn('I spoke with Cameron. Lincoln is still left.',
+            [Stream('', [block]), Stream('Cameron and Lincoln are all marked. Lincoln still needs a call.')],
+            {'state':ops.COMPLETED, 'text':'Captured fixture item'})
+        self.assertNotIn('are all marked',reply)
+        self.assertIn('Lincoln still needs a call',reply)
+        self.assertIn('Captured fixture item',reply)
+
     async def test_normal_conversation_preserved(self):
         text = 'Good morning!\nHow are you?'
         reply, events, _ = await self.run_turn('Hello Ace', [Stream(text)])

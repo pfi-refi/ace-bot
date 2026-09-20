@@ -69,7 +69,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.2"
+VERSION = "v2.0.3"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -350,6 +350,32 @@ _SPOKEN_STATUS = {
 # The single in-flight live-voice turn (one user, one call): a new /v1/chat/completions
 # request cancels the previous turn's task so a retry/barge-in can't double-execute tools.
 _active_voice_task = {"task": None}
+_voice_identity = {"prefix": "", "text": "", "key": "", "at": 0.0}
+
+
+def _voice_origin_key(prior):
+    """Reuse identity only for a recent prefix extension of the SAME spoken turn.
+
+    Never semantic-deduplicate distinct instructions; completed assistant turns change
+    the prefix. This key is server-generated and never supplied by the model.
+    """
+    import uuid
+    users = [i for i, m in enumerate(prior) if m.get("role") == "user"]
+    if not users:
+        return uuid.uuid4().hex
+    last = users[-1]
+    prefix = hashlib.sha256(json.dumps(prior[:last], sort_keys=True).encode()).hexdigest()
+    text = " ".join(re.findall(r"\w+", str(prior[last].get("content", "")).lower()))
+    now = time.monotonic()
+    old = _voice_identity
+    extends = (text == old["text"] or text.startswith(old["text"] + " ")
+               or old["text"].startswith(text + " "))
+    if not (old["key"] and old["text"] and old["prefix"] == prefix
+            and now - old["at"] < 30 and extends):
+        old["key"] = uuid.uuid4().hex
+    old.update(prefix=prefix, text=text, at=now)
+    return old["key"]
+
 # How long a finished stream waits for its turn to stop working before cancelling it. The
 # audio is already out, so this is not latency Brady feels — it is only how much of what he
 # asked for gets recorded properly.
@@ -2246,6 +2272,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
         el_tools.append({"name": name, "description": fn.get("description") or "",
                          "input_schema": params})
 
+    origin_key = _voice_origin_key(prior)
     created = int(time.time())
     # One line per voice request so a doubled/retried turn is provable in the logs
     # (there was no way to see ElevenLabs re-POSTs during the 8 AM incident).
@@ -2314,7 +2341,8 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
                 # transcript for the rest of the call. Log the real error; say one fixed
                 # human line (which the prior-scrubber also removes from history).
                 logger.warning("voice turn error (spoken as snag line): %s", payload.get("text", ""))
-                await say("Hit a snag on my end — give me a second and ask me again.")
+                await say(payload["text"] if payload.get("code") in ("billing", "authentication", "rate_limit", "unavailable")
+                          else "Hit a snag on my end — give me a second and ask me again.")
                 await queue.put(("done", None))
             elif event_type == "hold":
                 # A gated action was blocked pending Brady's yes — nothing to say yet; the
@@ -2371,7 +2399,7 @@ async def openai_compat(request: Request, authorization: str = Header(default=""
 
         async def run():
             try:
-                await chat.stream_turn(user_text, emit, prior=prior, fast=True, extra_tools=el_tools)
+                await chat.stream_turn(user_text, emit, prior=prior, fast=True, extra_tools=el_tools, origin_key=origin_key)
             finally:
                 await queue.put(("done", None))
 

@@ -142,7 +142,7 @@ _COLS = ("id, request_key, capability, args, origin, state, title, detail, resul
 
 
 def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
-           daily_cap: int = 0, day: str = "") -> tuple:
+           daily_cap: int = 0, day: str = "", origin_key: str = "") -> tuple:
     """(verdict, task) — 'created' | 'existing' | 'unavailable'.
 
     'existing' is the whole point: a repeated transcript, a second tab, or a retried
@@ -158,7 +158,9 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
     """
     if not enabled():
         return "unavailable", None
-    key = request_key(capability, args)
+    scoped_origin = origin_key if capability == "deep_dive" else ""
+    key = request_key(capability, {"origin_turn": scoped_origin,
+                                  "context_scope": args.get("context_scope", "personal")}) if scoped_origin else request_key(capability, args)
     try:
         ready()
         with db._conn() as c, c.cursor() as cur:
@@ -167,13 +169,6 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
             if daily_cap and daily_cap > 0:
                 cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                             (716296, f"{capability}:{day}"))
-                cur.execute("SELECT count(*) FROM ace_tasks WHERE capability = %s "
-                            "AND (state <> %s OR attempts > 0) AND created_at >= %s::date "
-                            "AND created_at < (%s::date + interval '1 day')",
-                            (capability, CANCELLED, day, day))
-                used = int(cur.fetchone()[0] or 0)
-                if used >= daily_cap:
-                    return "over_cap", {"used": used, "cap": daily_cap}
             cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (716295, key))
             cur.execute(f"SELECT {_COLS} FROM ace_tasks WHERE request_key = %s "
                         f"AND created_at > now() - %s::interval ORDER BY created_at DESC LIMIT 1",
@@ -196,7 +191,7 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
             carried = {}
             if prior:
                 got = _row(prior)
-                if got["state"] in LIVE or got["state"] == COMPLETED:
+                if scoped_origin or got["state"] in LIVE or got["state"] == COMPLETED:
                     return "existing", got
                 # A FAILED attempt may still have created something. Brady re-asking is a
                 # new task — he saw it fail — but it must not create a SECOND document, so
@@ -209,6 +204,14 @@ def accept(capability: str, args: dict, origin: str = "voice", title: str = "",
                     # got one, and the create marker/ambiguity if we did not.
                     if k in ("file_id", "url", "create_state", "create_marker"):
                         carried[k] = v
+            if daily_cap and daily_cap > 0:
+                cur.execute("SELECT count(*) FROM ace_tasks WHERE capability = %s "
+                            "AND (state <> %s OR attempts > 0) AND created_at >= %s::date "
+                            "AND created_at < (%s::date + interval '1 day')",
+                            (capability, CANCELLED, day, day))
+                used = int(cur.fetchone()[0] or 0)
+                if used >= daily_cap:
+                    return "over_cap", {"used": used, "cap": daily_cap}
             tid = uuid.uuid4().hex
             cur.execute(f"INSERT INTO ace_tasks(id, request_key, capability, args, origin, "
                         f"state, title, result) VALUES(%s,%s,%s,%s::jsonb,%s,%s,%s,%s::jsonb) "

@@ -56,6 +56,7 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             patch.object(chat, "_live_context", AsyncMock(return_value=("SLOW", "FAST"))),
             patch.object(chat, "build_system_prompt", lambda: "ACE"),
+            patch.object(chat, "_unified_thread", return_value=[]),
             patch.object(tools, "execute", fake_execute),
             patch.object(bills_sheet, "fetch_bills", AsyncMock(return_value=([], "Sheet unavailable"))),
         ]
@@ -98,11 +99,11 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("only ever reads" in w for w in out["limits"]))
 
     async def test_the_read_budget_is_enforced_by_the_server(self):
-        rounds = [[tool_block("recall", {"query": str(i)}, f"tu_{i}")]
-                  for i in range(cp.DEEP_DIVE_MAX_READS + 2)]
-        rounds.append([text_block("what I have so far")])
-        with patch.object(cp, "DEEP_DIVE_MAX_ROUNDS", len(rounds) + 1):
-            out = await self.run_dive(Model(*rounds))
+        # Exercise the read cap in a single tool batch, inside the independent call cap.
+        rounds = [[tool_block("recall", {"query": str(i)}, f"tu_{i}")
+                   for i in range(cp.DEEP_DIVE_MAX_READS + 2)],
+                  [text_block("what I have so far")]]
+        out = await self.run_dive(Model(*rounds))
         self.assertEqual(len(self.executed), cp.DEEP_DIVE_MAX_READS)
         self.assertEqual(out["reads_run"], cp.DEEP_DIVE_MAX_READS)
         self.assertTrue(any("ran out of the reads" in w for w in out["limits"]))
@@ -282,6 +283,16 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.executed, [])
         self.assertEqual(result["reads_run"], 0)
         self.assertTrue(all(offered == [] for offered in model.offered))
+
+    async def test_direct_user_correction_reaches_deep_dive_but_assistant_claim_does_not(self):
+        model = Model([text_block("Lincoln remains open.")])
+        with patch.object(chat, "_unified_thread", return_value=[
+            {"role":"assistant", "content":"Lincoln is completed.", "ts":"2026-09-20T10:00:00-04:00"},
+            {"role":"user", "content":"Lincoln is the only call left.", "ts":"2026-09-20T10:01:00-04:00"}]):
+            await self.run_dive(model)
+        direct = model.systems[0].split("RECENT DIRECT USER UPDATES")[1]
+        self.assertIn("Lincoln is the only call left", direct)
+        self.assertNotIn("Lincoln is completed", direct)
 
     async def test_personal_context_contains_exact_budget_source_once(self):
         from decimal import Decimal
