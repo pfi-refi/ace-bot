@@ -1,3 +1,7 @@
+# v2.0.5 — Board saves and status reliability
+
+Waiting and Ready edits persist; current status overrides old wording. Empty optional tool arguments preserve existing state. Board failures are visible, draft owner text is retained, and Today refreshes consistently. No board migration or redesign.
+
 # What changed in Ace
 
 Ace reads the top of this file every turn (it rides in the cached half of his context, so it

@@ -1378,7 +1378,7 @@
             ev.stopPropagation();
             fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
               body: JSON.stringify({ id: it.id, chosen_on: data.today }) })
-              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(boardJson)
               .then(function (d) {
                 if (!d) return;
                 if (d.ok === false) { boardNotice(d.error || 'Could not add that.'); return; }
@@ -1387,7 +1387,7 @@
                 boardNotice('Added to today. No due date was set.');
                 if (typeof cmdSync === 'function') cmdSync();
               })
-              .catch(function () { boardNotice('Could not reach the board.'); });
+              .catch(function (e) { boardNotice(boardWhy(e, 'Could not reach the board.')); });
           });
           meta.appendChild(yes);
         }
@@ -1398,15 +1398,18 @@
             ev.stopPropagation();
             fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
               body: JSON.stringify({ id: it.id, chosen_on: '' }) })
-              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(boardJson)
               .then(function (d) {
-                if (!d || d.ok === false) return;
+                // A refusal here used to return quietly and the empty .catch swallowed the
+                // rest, so "Not today" could do nothing and look like it worked.
+                if (!d) return;
+                if (d.ok === false) { boardNotice(d.error || 'Could not take it off today.'); return; }
                 materializeCard('daybank', { items: d.items, summary: d.summary || null,
                                              due_today: d.due_today, today: d.today });
                 boardNotice('Taken off today. Nothing else changed.');
                 if (typeof cmdSync === 'function') cmdSync();
               })
-              .catch(function () {});
+              .catch(function (e) { boardNotice(boardWhy(e, 'Could not take it off today.')); });
           });
           meta.appendChild(undo);
         }
@@ -1449,14 +1452,18 @@
           more.addEventListener('click', function () {
             more.textContent = '…'; more.disabled = true;
             fetch(API + '/daybank?suggest=' + (dt.suggested.length + 5), { headers: headers() })
-              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(boardJson)
               .then(function (d) {
                 if (!d) throw 0;
                 materializeCard('daybank', { items: d.items, summary: d.summary || null,
                                              due_today: d.due_today, today: d.today,
                                              reviews_pending: d.reviews_pending || 0 });
               })
-              .catch(function () { more.textContent = 'Could not load more'; more.disabled = false; });
+              // A read, not a write, so it asks him to sign in to LOAD — same cause, right words.
+              .catch(function (e) {
+                more.textContent = (e && e.signedOut) ? 'Sign in to load more' : 'Could not load more';
+                more.disabled = false;
+              });
           });
           body6.appendChild(more);
         }
@@ -1563,14 +1570,17 @@
   function setBankDue(id, due) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
                                      body: JSON.stringify({ id: id, due: due }) })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(boardJson)
       .then(function (d) {
         if (d && d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
                                                        due_today: d.due_today, today: d.today,
                                                        reviews_pending: d.reviews_pending || 0 });
+        // A rescheduled deadline that was refused looked exactly like one that saved: the
+        // empty .catch below meant this write had no visible failure at all.
+        if (d && d.ok === false) boardNotice(d.error || 'The deadline was not changed.');
         if (typeof cmdSync === 'function') cmdSync();
       })
-      .catch(function () {});
+      .catch(function (e) { boardNotice(boardWhy(e, 'Could not change the deadline. Nothing was saved.')); });
   }
   var _MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   function dueChoices() {
@@ -1601,6 +1611,25 @@
   }
   window.__notice = boardNotice;   // one notice surface, reachable from every board path
 
+  // A SIGNED-OUT SAVE HAS A NAME (2026-09-21). Only the Command checkbox recognised a 401;
+  // every other board write reported an expired session as a nameless failure — and the due
+  // date and "Not today" paths ate it in an empty .catch, which is the same silent-failure
+  // class the 2026-09-05 audit found. One helper, so every write ends the session the same
+  // way and each handler still says its own sentence for everything else.
+  function boardJson(r) {
+    if (r.status === 401) {
+      toLogin();
+      var e = new Error('Sign in to save.'); e.signedOut = true; throw e;
+    }
+    // HTTP failures may contain {detail: ...}, not the board's {ok:false} receipt.
+    // Reject them here so every caller shows its failure message.
+    if (r.ok === false) throw new Error('Board request failed (' + r.status + ').');
+    return r.json();
+  }
+  // The reason to show: our own sign-in sentence when we threw it, otherwise the caller's
+  // usual line — a raw 'Failed to fetch' is not something to put in front of Brady.
+  function boardWhy(e, fallback) { return (e && e.signedOut) ? e.message : fallback; }
+
   function confirmBoardCompletion(it) {
     return new Promise(function(resolve){
       if(document.querySelector('.board-confirm')) { resolve(false); return; }
@@ -1621,7 +1650,7 @@
 
   function toggleBankItem(id, status, forced) {
     return fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status, force_close: !!forced }) })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(boardJson)
       .then(function (d) {
         if (!d) throw new Error('No save receipt');
         // The SERVER decides completability now, so any caller — this panel, the older
@@ -1637,7 +1666,7 @@
         // Keep an open Command board in step — same store, one truth (2026-07-31).
         if (typeof cmdSync === 'function') cmdSync();
       })
-      .catch(function () { boardNotice('Could not confirm the save. Refresh the board before trying again.'); });
+      .catch(function (e) { boardNotice(boardWhy(e, 'Could not confirm the save. Refresh the board before trying again.')); });
   }
 
   function openLink(url, label) {
@@ -2098,6 +2127,16 @@
     if (!cmd.open) return;
     cmdFetch().then(function(){ if (cmd.open && !cmd.editing) cmdRender(); }).catch(function(){});
   }
+  // ONE PAYLOAD, BOTH SURFACES (2026-09-21). After a save the Command list was repainted
+  // from the refetched board while the DUE TODAY card was materialized from the older update
+  // response — two Today surfaces, two payloads. Worse, that response was built with the
+  // default suggest=3, so an expanded "Show more" list silently collapsed. Both now paint
+  // from exactly what cmd just took.
+  function cmdPaintBoard(){
+    cmdRender();
+    if (document.querySelector('.card[data-panel="DUE TODAY"]'))
+      materializeCard('daybank', { items: cmd.items, due_today: cmd.dueToday, today: cmd.today });
+  }
   function cmdParentChip(it){
     if (!it.parent_id) return '';
     var p = (cmd.items || []).filter(function(x){ return x.id === it.parent_id; })[0];
@@ -2128,7 +2167,14 @@
       // are the override, and they are also the only way to reach 'settled' — a record that
       // is finished but must STAY (Feliz's annuity is closed and paid, not deleted).
       var dEntry = (cmd.draft && cmd.draft.entry) || it.entry || 'action';
+      // A CLEARED ROW READS BACK AS 'active' (2026-09-21). The server stores that value
+      // explicitly so the clear survives the read-time derivation in db.py; this select's
+      // own word for the same thing is ''. Without the fold, 'active' matches no option and
+      // the row only LOOKS right because the browser falls back to the first one — reorder
+      // this list or add a state and every cleared row would quietly show the wrong status.
       var dState = (cmd.draft && cmd.draft.state != null) ? cmd.draft.state : (it.state || '');
+      if (dState === 'active') dState = '';
+      var dWait  = (cmd.draft && cmd.draft.wait  != null) ? cmd.draft.wait  : (it.waiting_on || '');
       var dBucket = (cmd.draft && cmd.draft.bucket) || it.bucket || 'Inbox';
       var dNext = (cmd.draft && cmd.draft.next != null) ? cmd.draft.next : (it.next_step || '');
       var dFup  = (cmd.draft && cmd.draft.fup  != null) ? cmd.draft.fup  : (it.followup || '');
@@ -2171,7 +2217,7 @@
         +'<div class="cmd-erow"><label class="cmd-el">Kind</label><select class="cmd-eentry">'+eOpts+'</select>'
         +'<label class="cmd-el">Status</label><select class="cmd-estate">'+sOpts+'</select></div>'
         +'<div class="cmd-erow"><input class="cmd-ewait" placeholder="waiting on who? (e.g. Tony, approval)" '
-        +'value="'+cmdEsc(it.waiting_on||'')+'"'+(dState==='waiting'?'':' disabled')+'></div>'
+        +'value="'+cmdEsc(dWait)+'"'+(dState==='waiting'?'':' disabled')+'></div>'
         // THREE DATES, THREE MEANINGS (Brady, 2026-09-09). The deadline belongs to the
         // obligation, the follow-up is when HE chases it, and "doing today" is a choice that
         // must never write either one. They get separate controls so they cannot be confused.
@@ -2257,6 +2303,9 @@
         due:   er.querySelector('.cmd-edue').value,
         entry: er.querySelector('.cmd-eentry').value,
         state: er.querySelector('.cmd-estate').value,
+        // The owner's name was the one field left out, so the 25s background cmdSync threw
+        // away a half-typed "waiting on who?" while every other field survived it.
+        wait:  (er.querySelector('.cmd-ewait')  || {}).value,
         bucket: (er.querySelector('.cmd-ebucket') || {}).value,
         fup:   (er.querySelector('.cmd-efup')  || {}).value,
         next:  (er.querySelector('.cmd-enext') || {}).value,
@@ -2515,11 +2564,12 @@
       b.textContent='…'; b.disabled=true;
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),
             body:JSON.stringify({id:id, reviewed:true})})
-        .then(function(r){ return r.json(); })
+        .then(boardJson)
         .then(function(d){ if(!d||!d.ok) throw ((d&&d.error)||0);
           return cmdFetch().then(function(){ cmdRender(); }); })
         .catch(function(why){ b.textContent=was; b.disabled=false;
-          if(typeof why==='string'&&why) boardNotice(why); });
+          var msg=boardWhy(why, (typeof why==='string'&&why) ? why : '');
+          if(msg) boardNotice(msg); });
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-fup'), function(b){ b.onclick=function(e){
       e.stopPropagation();
@@ -2527,14 +2577,15 @@
       var was=b.textContent; b.textContent='…'; b.disabled=true;
       fetch(API+'/board/followup',{method:'POST',headers:headers(),
             body:JSON.stringify({id:id,action:act,days:7})})
-        .then(function(r){ return r.json(); })
+        .then(boardJson)
         .then(function(d){
           if(!d||!d.ok){ throw ((d&&d.error)||0); }
           if(d.task_still_open===false){ boardNotice('That closed the task — reload and check it.'); }
           return cmdFetch().then(function(){ cmdRender(); });
         })
         .catch(function(why){ b.textContent=was; b.disabled=false;
-          if(typeof why==='string'&&why) boardNotice(why); });
+          var msg=boardWhy(why, (typeof why==='string'&&why) ? why : '');
+          if(msg) boardNotice(msg); });
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=async function(){
       var id=b.parentNode.getAttribute('data-id');
@@ -2576,9 +2627,10 @@
         var row = b.closest('.cmd-row'); var id = row && row.getAttribute('data-id'); if(!id) return;
         b.textContent='REMOVING…'; b.disabled=true;
         fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:'dropped'})})
-          .then(function(r){ return r.json(); })
+          .then(boardJson)
           .then(function(d){ if(!d||!d.ok) throw 0; cmd.editing=null; cmd.draft=null; return cmdFetch().then(cmdRender); })
-          .catch(function(){ b.textContent='RETRY REMOVE'; b.disabled=false; });
+          .catch(function(why){ b.textContent='RETRY REMOVE'; b.disabled=false;
+            var msg=boardWhy(why,''); if(msg) boardNotice(msg); });
         return;
       }
       cmd.editing = null; cmd.draft = null; cmdRender();
@@ -2621,10 +2673,11 @@
         tBtn.disabled = true;
         fetch(API+'/daybank/update',{method:'POST',headers:headers(),
               body:JSON.stringify({id:id, chosen_on: on ? '' : cmd.today})})
-          .then(function(r){ return r.json(); })
+          .then(boardJson)
           .then(function(d){ if(!d||!d.ok) throw 0;
             cmd.draft=null; return cmdFetch().then(function(){ cmdRender(); }); })
-          .catch(function(){ tBtn.disabled=false; boardNotice('Could not change the day.'); });
+          .catch(function(e){ tBtn.disabled=false;
+            boardNotice(boardWhy(e,'Could not change the day.')); });
       };
     });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
@@ -2639,9 +2692,12 @@
         category: row.querySelector('.cmd-ecat').value,
         entry: row.querySelector('.cmd-eentry').value,
         bucket: (isAction ? row.querySelector('.cmd-ebucket').value : ''),
-        // An ACTION can carry 'decide' — that is Brady marking an open question — but the
-        // record lifecycle (active/waiting/settled) still belongs to records only.
-        state: (isAction && stateVal !== 'decide' && stateVal !== 'waiting') ? '' : stateVal,
+        // SEND WHAT HE PICKED (2026-09-21). This rewrote every other action state to '' to
+        // dodge the old server rule, which meant the one value that matters — READY, i.e. ''
+        // — could never CLEAR a stored waiting/decide: the field read the same either way and
+        // the server left the state alone. The route now takes '' as "clear it" and refuses
+        // only 'settled' on an action, so the control says what it means.
+        state: stateVal,
         waiting_on: (stateVal === 'waiting'
                      ? (row.querySelector('.cmd-ewait').value || '').trim() : ''),
         due: (row.querySelector('.cmd-edue').value || '').trim(),
@@ -2661,15 +2717,15 @@
       // em dash and would overflow it.
       var serverWhy = '';
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify(body)})
-        .then(function(r){ return r.json(); })
+        .then(boardJson)
         .then(function(d){
           if (!d || !d.ok) { serverWhy = (d && d.error) || ''; throw 0; }
           cmd.editing = null; cmd.draft = null;
-          return cmdFetch().then(function(){cmdRender();if(document.querySelector('.card[data-panel="DUE TODAY"]'))materializeCard('daybank',d);});
+          return cmdFetch().then(cmdPaintBoard);
         })
-        .catch(function(){
+        .catch(function(e){
           // keep the editor open with the typed values — never eat an edit silently
-          var why = serverWhy.split(' — ')[0];
+          var why = boardWhy(e, serverWhy.split(' — ')[0]);
           b.textContent = why ? ('RETRY — ' + why) : 'RETRY SAVE';
           b.disabled = false;
         });
@@ -2688,12 +2744,12 @@
       function addFailed(msg){ inp.value = t; inp.placeholder = msg; inp.focus();
         setTimeout(function(){ inp.placeholder = addPH; }, 4000); }
       fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat,bucket:addArea})})
-        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(boardJson)
         .then(function(d){
           if (d && d.dup) { addFailed('Already on your board — nothing added'); return; }
           if (!d || !d.ok) { addFailed((d && d.error) || 'Could not save that — try again'); return; }
           return cmdFetch().then(cmdRender);
-        }).catch(function(){ addFailed('Could not save that — try again'); }); };
+        }).catch(function(e){ addFailed(boardWhy(e, 'Could not save that — try again')); }); };
   }
 
   /* ============================================================ KNOWLEDGE GRAPH

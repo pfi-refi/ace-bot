@@ -69,7 +69,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.4"
+VERSION = "v2.0.5"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -1071,7 +1071,14 @@ class DaybankUpdateReq(BaseModel):
     # the derivation, which also makes 'settled' reachable: it is never derived, only set.
     bucket: str = ""     # which lane an ACTION belongs to ("" = leave)
     entry: str = ""      # "action" | "record" ("" = leave / keep deriving)
-    state: str = ""      # "active" | "waiting" | "settled" (records only)
+    # STATE TAKES THE SAME CONTRACT AS due/waiting_on (2026-09-21). It was a plain `str = ""`,
+    # so "the client did not send one" and "READY — clear it" were the same value and the
+    # route dropped both: a waiting or undecided row could never be sent back to Ready from
+    # the editor, which still answered ok:true. None = leave alone, "" = back to READY for an
+    # action / ACTIVE for a record, otherwise the value is stored. (What "" writes is
+    # db.update_item's business — it stores 'active' rather than NULL so the clear survives
+    # the read-time derivation.)
+    state: str | None = None        # "" | "active" | "waiting" | "settled" | "decide"
     waiting_on: str | None = None   # who it is parked on ("" clears; None = leave)
     # THE NEXT MOVE, explicitly (2026-09-08). Columns were added and read but had no write
     # path at all, so an undated action could only leave "Needs a decision" by inventing a
@@ -1341,17 +1348,17 @@ async def daybank_update(req: DaybankUpdateReq):
     if req.bucket and req.bucket not in _areas:
         return {"ok": False, **(await board_payload()),
                 "error": "unknown area '%s' — use one of: %s" % (req.bucket, ", ".join(_areas))}
-    # "Needs a decision" is a state an ACTION carries — it is the one open question Brady has
-    # not answered yet. Only the record lifecycle (active/waiting/settled) needs entry=record.
-    if req.state and req.state != "decide" and req.entry == "action":
-        return {"ok": False, **(await board_payload()),
-                "error": "state applies to records, not actions — set entry='record' too"}
+    # ONE LOOKUP OF THE STORED ROW, reused by the kind check and the tag merge below. Reading
+    # the whole board twice per save buys nothing.
+    it = None
+    if cat or req.tags is not None:
+        it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
+                   if x.get("id") == req.id), None)
+    # State/kind validation lives in db.update_item for both the editor and Ace's tool.
     status = req.status or None
     text = req.text.strip() or None
     tags = None
     if cat or req.tags is not None:
-        it = next((x for x in await asyncio.to_thread(daybank.read_items, False)
-                   if x.get("id") == req.id), None)
         cur_tags = db.canon_tags((it.get("tags") if it else None) or [])
         primary = cat or (cur_tags[0] if cur_tags else "")
         if req.tags is None:
@@ -1376,7 +1383,9 @@ async def daybank_update(req: DaybankUpdateReq):
         tags = ([primary] if primary else []) + secondary
     ok, _msg = await asyncio.to_thread(
         daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
-        (req.entry or None), (req.state or None), req.waiting_on, (req.bucket or None),
+        # req.state, NOT (req.state or None): "" is the CLEAR instruction and has to survive
+        # the trip to db.update_item, which is where the three cases are told apart.
+        (req.entry or None), req.state, req.waiting_on, (req.bucket or None),
         req.next_step, req.followup, req.chosen_on, req.force_close, req.reviewed)
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
@@ -1402,11 +1411,19 @@ async def daybank_update(req: DaybankUpdateReq):
     # READ BACK the row that was just written and report ITS persisted state, so the answer
     # describes what is in the database rather than what was requested.
     _now = next((x for x in payload["items"] if x.get("id") == req.id), None) or {}
-    return {"ok": ok, "category": cat or None,
-            "entry": _now.get("entry"), "state": _now.get("state"),
-            "lane": _now.get("lane"), "next_step": _now.get("next_step"),
-            "followup": _now.get("followup"), "chosen_on": _now.get("chosen_on"),
-            "saved": _now, **payload}
+    out = {"ok": ok, "category": cat or None,
+           "entry": _now.get("entry"), "state": _now.get("state"),
+           "lane": _now.get("lane"), "next_step": _now.get("next_step"),
+           "followup": _now.get("followup"), "chosen_on": _now.get("chosen_on"),
+           "saved": _now, **payload}
+    if not ok:
+        # SAY WHY, ALWAYS (2026-09-21). Only a NOT COMPLETED refusal carried its reason; every
+        # other one the store writes — an unknown state, a settled action, "no item" — reached
+        # the panel as a bare ok:false and rendered as RETRY SAVE, throwing away the
+        # explanation the server had already written. Same rule as the checks above it:
+        # refuse out loud, never silently.
+        out["error"] = str(_msg)
+    return out
 
 
 # ── THE KNOWLEDGE GRAPH — Brady's book of business as a navigable map ───────────

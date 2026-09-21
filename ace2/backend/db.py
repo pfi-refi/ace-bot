@@ -1607,10 +1607,19 @@ def _completion_blocked(item_id: str) -> tuple:
             return False, ""
         if lane == classify.LANE_WAITING:
             who = (it.get("waiting_on") or "").strip() or "someone else"
+            # THE ADVICE FOLLOWS THE KIND (2026-09-21). An ACTION can be parked on someone
+            # else now, and 'settled' is still refused on one — so the record's way out sent
+            # Ace straight into a second refusal with nowhere to go. A record keeps its
+            # lifecycle; an action has only the deliberate override.
+            if (it.get("entry") or "") == "record":
+                return True, ("NOT COMPLETED — this is waiting on %s, who owns the next move. "
+                              "Nothing on Brady's side finishes it. If it really is finished, "
+                              "set state='settled'; only pass force_close if Brady says to close "
+                              "it anyway. Do NOT tell him it is done." % who)
             return True, ("NOT COMPLETED — this is waiting on %s, who owns the next move. "
-                          "Nothing on Brady's side finishes it. If it really is finished, "
-                          "set state='settled'; only pass force_close if Brady says to close "
-                          "it anyway. Do NOT tell him it is done." % who)
+                          "Nothing on Brady's side finishes it; it finishes when they act. "
+                          "Only pass force_close if Brady says to close it anyway. Do NOT "
+                          "tell him it is done." % who)
         if lane == classify.LANE_REFERENCE:
             return True, ("NOT COMPLETED — this is a RECORD Brady tracks, which has a state "
                           "rather than an ending. Update it, or set state='settled' when it "
@@ -1656,6 +1665,29 @@ def update_item(item_id: str, status: str = None, text: str = None,
         blocked, why = _completion_blocked(item_id)
         if blocked:
             return False, why
+    # STATE, WITH A WAY BACK (2026-09-21). None leaves it alone, "" puts the row back to
+    # READY/ACTIVE (stored, see below), and a known value sets it. Validated HERE and not
+    # only on the HTTP route, for the same reason the completion rule moved down: Ace's own
+    # update_item tool calls this function directly.
+    if state is not None:
+        state = str(state).strip()
+        if state and state not in ("active", "waiting", "settled", "decide"):
+            return False, f"unknown state '{state}' — use active, waiting, settled or decide"
+    # ONE RULE, ONE PLACE (2026-09-21). The refusal lived only on the HTTP route, so Ace's own
+    # update_item tool — which calls this function directly — could still settle an ACTION:
+    # the same two-tier split the completion rule was moved down here to end. The kind is what
+    # this call says, else what the row already is. The lookup is paid for ONLY here, on a
+    # settled write, never on the ordinary edit path.
+    # Missing lookup evidence is not permission to change a row's lifecycle.
+    # Return an honest retry reason instead of guessing the kind or suggesting conversion.
+    if state == "settled":
+        kind = entry if entry in ("action", "record") else next(
+            (x.get("entry") for x in read_items(active_only=False)
+             if x.get("id") == item_id), None)
+        if kind is None:
+            return False, "Unable to verify item kind; refresh the board and retry. Nothing changed."
+        if kind == "action":
+            return False, "Only a reference record can be settled. This action remains unchanged."
     try:
         import json
         with _conn() as c, c.cursor() as cur:
@@ -1683,8 +1715,20 @@ def update_item(item_id: str, status: str = None, text: str = None,
             # 'decide' joins the stored states (release one). It is set by Brady, never
             # derived — see classify.lane_of, where the old "undated and no next step"
             # inference was removed.
-            if state in ("active", "waiting", "settled", "decide"):
-                sets.append("state = %s"); args.append(state)
+            if state is not None:
+                # "" IS STORED AS 'active', NOT NULLED (2026-09-21). A NULL state is DERIVED
+                # on every read (read_items → _derive_state), so on a record worded like a
+                # parked row — "Thiami — everything submitted, waiting on approval" — clearing
+                # the column brought WAITING straight back with an owner re-read out of the
+                # prose, and Brady's "this is Ready" never stuck. A stored value always wins
+                # over the derivation, and his correction is exactly what this column is for.
+                sets.append("state = %s"); args.append(state or "active")
+                # LEAVING WAITING DROPS THE OWNER. waiting_on outlived the state otherwise,
+                # and classify.has_next_step() counts it as a recorded next move — so a row
+                # back in Ready would still claim its next step was "Tony". An explicit
+                # waiting_on in the same call wins; this only fills the silence.
+                if state != "waiting" and waiting_on is None:
+                    sets.append("waiting_on = NULL")
             if waiting_on is not None:
                 sets.append("waiting_on = %s"); args.append((waiting_on.strip() or None))
             # next_step / followup follow the SAME contract as waiting_on and due:

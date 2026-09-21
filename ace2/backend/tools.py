@@ -1105,6 +1105,17 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
 def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None,
                     entry=None, state=None, waiting_on=None, next_step=None, followup=None,
                     **_):
+    # AN EMPTY OPTIONAL IS NOISE HERE, NOT AN INSTRUCTION (2026-09-21). "" means CLEAR on the
+    # panel's route, where it is the editor's READY option. Neither field below has an empty
+    # member in this tool's schema, so an empty string is the model filling in a field it is
+    # not using — and reading it as a clear would un-park a WAITING row and drop the name of
+    # whoever owns the next move, while answering "◆ Updated". That is the 5 September
+    # failure class on the one surface the completion rule was moved down to protect.
+    # Unparking is still reachable, explicitly: state='active' clears the owner with it.
+    # next_step/followup/due are NOT normalised — their descriptions promise "" clears them.
+    # entry needs nothing: db.update_item only writes a recognised 'action'|'record'.
+    state = state or None
+    waiting_on = waiting_on or None
     tags = None
     if category:
         _CATS = {"Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
