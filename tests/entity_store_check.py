@@ -552,7 +552,7 @@ try:
         'a rejected alias still resolves'
     with db._conn() as c, c.cursor() as cur:
         cur.execute("INSERT INTO turns(source, role, content) VALUES('ace2','user',%s) "
-                    "RETURNING id", ('Marlow Bexley called about the new schedule.',))
+                    "RETURNING id", ('Marlow Bexley is my new accountant and called about the new schedule.',))
         fresh = cur.fetchone()[0]
     entity_index.note('turn', fresh)
     assert entity_index.drain(timeout=15) is True
