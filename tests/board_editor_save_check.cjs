@@ -41,7 +41,7 @@ function save(typed, reply) {
     '.cmd-edue': field(typed.due || ''), '.cmd-efup': field(typed.fup || ''),
     '.cmd-enext': field(typed.next || '')
   };
-  const row = { getAttribute: () => 'row-1', querySelector: s => nodes[s] || null,
+  const row = { getAttribute: name => ({'data-id':'row-1','data-version':'2026-09-22T12:00:00+00:00','data-base-due':typed.baseDue||''})[name], querySelector: s => nodes[s] || null,
                 querySelectorAll: () => [] };
   const button = { textContent: 'SAVE', disabled: false, closest: () => row };
   const out = { nodes, button, posted: null, painted: 0, refetched: 0, login: 0 };
@@ -88,7 +88,7 @@ const receipt = { body: { ok: true, items: [], due_today: null, today: '2026-09-
   r = await save({ text: 'Feliz annuity', entry: 'record', state: 'settled' }, receipt);
   assert.equal(r.posted.state, 'settled');
   assert.equal(r.posted.entry, 'record');
-  assert.equal(r.posted.bucket, '', 'a record has no lane');
+  assert.equal(r.posted.bucket, 'Inbox', 'records can be assigned to lists');
 
   // 4. A refusal is never eaten: the editor stays open, typed values intact, reason on the button.
   r = await save({ text: 'Chase the permit', entry: 'action', state: 'waiting', wait: 'Tony' },

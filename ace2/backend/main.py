@@ -70,7 +70,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.1.3"
+VERSION = "v2.1.4"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -730,7 +730,7 @@ async def board_payload(all_items: bool = True, suggest: int = 3) -> dict:
     items = await asyncio.to_thread(daybank.read_items, not all_items, settings=settings)
     renames = settings["renames"]
     today = chat.datetime.now(chat.EASTERN).strftime("%Y-%m-%d")
-    return {"items": [classify.decorate(i, renames=renames) for i in items],
+    return {"items": [classify.decorate(i, renames=renames) for i in classify.with_children(items)],
             "summary": classify.summarise(items, renames=renames),
             "today": today,
             # Computed here so Due Today and the Command Center cannot disagree about what
@@ -1127,6 +1127,12 @@ class DaybankUpdateReq(BaseModel):
     # Changing one deliberately is still allowed, but it has to SAY so, so an accidental tap
     # in some other view cannot do it. (One stray tap is how four records vanished on 5 Sept.)
     force_close: bool = False
+    # OPTIMISTIC LOCK (2026-09-22). The `updated_at` the editor LOADED — or "" when the row
+    # had never been edited (NULL). Omitted (None) means no check, which keeps Ace's tool,
+    # the sweeps and the checkbox exactly as they were. When it is sent and the row has been
+    # edited since, nothing is written and the answer is ok:false, conflict:true with the
+    # newer edit time, so a stale editor cannot overwrite a save made from another surface.
+    expected_updated_at: str | None = None
 
 
 class DaybankAddReq(BaseModel):
@@ -1135,6 +1141,7 @@ class DaybankAddReq(BaseModel):
     # The area he is looking at. "" means let the keyword rules file it, which sends anything
     # unrecognised to Inbox. An unknown name is refused, never silently ignored.
     bucket: str = ""
+    parent_id: str = ""
 
 
 @app.post("/daybank/add", dependencies=[Depends(require_auth)])
@@ -1150,12 +1157,68 @@ async def daybank_add(req: DaybankAddReq):
     if req.bucket and req.bucket not in await asyncio.to_thread(db.all_areas):
         return {"ok": False, "dup": False,
                 "error": "unknown area '%s'" % req.bucket, **(await board_payload())}
+    if not (req.text or "").strip():
+        return {"ok": False, "dup": False, "error": "Type what to add first.",
+                **(await board_payload())}
+    bucket = req.bucket
+    parent_id = (req.parent_id or "").strip()
+    if parent_id:
+        # The parent must be a real, OPEN row (db.add_item re-checks this at the shared
+        # boundary, so the tool path gets the same refusal). The subtask lands in the list
+        # the parent is SHOWN in unless Brady chose one — stored area first, else the same
+        # derivation the board displays, so a child never files itself away from its parent.
+        ok_p, why_p = await asyncio.to_thread(db.parent_open, parent_id)
+        if not ok_p:
+            return {"ok": False, "dup": False, "error": why_p, **(await board_payload())}
+        if not bucket:
+            from . import classify
+            parent = next((x for x in await asyncio.to_thread(db.read_items, False)
+                           if x.get("id") == parent_id), None)
+            shown = classify.area_of(parent) if parent else ""
+            bucket = shown if shown in await asyncio.to_thread(db.all_areas) else ""
     ok, res = await asyncio.to_thread(
-        daybank.add_item, "todo", req.text, None, [cat] if cat else None, None, req.bucket)
-    dup = bool(isinstance(res, dict) and res.get("dup"))
+        daybank.add_item, "todo", req.text, None, [cat] if cat else None,
+        parent_id or None, bucket)
+    dup = bool(ok and isinstance(res, dict) and res.get("dup"))
+    out = {"ok": ok, "dup": dup, "category": cat or None}
+    # SAY WHAT HAPPENED, WITH THE ROW IT HAPPENED TO (2026-09-22). A refused add used to come
+    # back as a bare ok:false — or ok:true, dup:true — with nothing naming the existing row,
+    # so the panel could only say "already exists" and Brady had to go hunting for it.
+    if isinstance(res, dict):
+        if dup:
+            out["existing"] = _existing_match(res)
+            out["message"] = ("Already on your board as [%s] (%s): %s"
+                              % (res.get("id"), res.get("status") or "open", res.get("text") or ""))
+        elif res.get("needs_review"):
+            # NOT saved: a near-twin with different details. The two ways out are the
+            # existing id (edit that row) or a reworded add that says what is different.
+            ex = {"id": res.get("existing_id"), "text": res.get("existing_text"),
+                  "status": res.get("existing_status") or "open", "due": res.get("existing_due")}
+            out["needs_review"] = True
+            out["existing"] = ex
+            out["requested"] = {"text": res.get("requested_text"), "due": res.get("requested_due")}
+            out["error"] = ("Not saved — the board already has [%s] (%s): %s%s. Edit that row "
+                            "if this is the same thing, or reword what makes this one different."
+                            % (ex["id"], ex["status"], ex["text"],
+                               " (due %s)" % ex["due"] if ex["due"] else ""))
+        elif ok:
+            out["id"] = res.get("id")
+            if res.get("similar"):
+                # Inserted, with a heads-up: a row elsewhere on the board reads alike.
+                out["similar"] = res["similar"]
+    elif not ok:
+        out["error"] = str(res)
     # Same shape and scope as GET /daybank — a successful add must not answer with rows the
     # panel cannot classify, or the lanes empty out and the counts read zero until reload.
-    return {"ok": ok, "dup": dup, "category": cat or None, **(await board_payload())}
+    return {**out, **(await board_payload())}
+
+
+def _existing_match(row: dict) -> dict:
+    """The part of an existing row a refusal needs to name it: enough to find and open it,
+    never the whole record."""
+    return {"id": row.get("id"), "text": row.get("text"), "status": row.get("status") or "open",
+            "due": row.get("due"), "due_on": row.get("due_on"), "parent_id": row.get("parent_id"),
+            "bucket": row.get("bucket"), "lane": row.get("lane")}
 
 
 class MigrateReq(BaseModel):
@@ -1407,12 +1470,29 @@ async def daybank_update(req: DaybankUpdateReq):
             legacy = [t for t in cur_tags if t not in _CATS]
             secondary = [t for t in asked if t != primary] + legacy
         tags = ([primary] if primary else []) + secondary
-    ok, _msg = await asyncio.to_thread(
-        daybank.update_item, req.id, status, text, tags, req.due, None, None, "brady",
-        # req.state, NOT (req.state or None): "" is the CLEAR instruction and has to survive
-        # the trip to db.update_item, which is where the three cases are told apart.
-        (req.entry or None), req.state, req.waiting_on, (req.bucket or None),
-        req.next_step, req.followup, req.chosen_on, req.force_close, req.reviewed)
+    edit = dict(status=status, text=text, tags=tags, due=req.due, closed_by="brady",
+                # req.state, NOT (req.state or None): "" is the CLEAR instruction and has to
+                # survive the trip to db.update_item, where the three cases are told apart.
+                entry=(req.entry or None), state=req.state, waiting_on=req.waiting_on,
+                bucket=(req.bucket or None), next_step=req.next_step, followup=req.followup,
+                chosen_on=req.chosen_on, force_close=req.force_close, reviewed=req.reviewed)
+    if db.enabled():
+        # The optimistic lock is checked inside the store's own transaction, so it goes to
+        # db directly; the daybank wrapper only exists to choose the Drive fallback.
+        ok, _msg = await asyncio.to_thread(
+            db.update_item, req.id, expected_updated_at=req.expected_updated_at, **edit)
+    elif req.expected_updated_at is not None:
+        ok, _msg = False, "the stale-edit check requires the Postgres store; nothing changed"
+    else:
+        ok, _msg = await asyncio.to_thread(daybank.update_item, req.id, **edit)
+    if not ok and str(_msg).startswith("CONFLICT"):
+        # Someone — another tab, the phone, Ace — saved this row after the editor loaded
+        # it. Nothing was written. Hand back the CURRENT row so the editor can show what
+        # changed and reload from it, never overwrite it.
+        payload = await board_payload()
+        current = next((x for x in payload["items"] if x.get("id") == req.id), None) or {}
+        return {"ok": False, "conflict": True, "error": str(_msg),
+                "current_updated_at": current.get("updated_at"), "saved": current, **payload}
     # REMEMBER THE WINS: completing a Deal or a Goal logs a durable memory note so Ace tracks
     # accomplishments over time — not every checkbox, only the meaningful categories.
     if ok and status == "done":

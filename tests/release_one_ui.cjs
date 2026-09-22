@@ -1,7 +1,7 @@
 /* Release one, driven through the REAL app in a real browser against disposable Postgres.
    Start tests/ui_server.py first. Synthetic rows only; no production URL, no model calls. */
 const { chromium } = require('/Users/brady/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
-const URL = 'http://127.0.0.1:8791/';
+const URL = process.env.ACE_UI_URL || 'http://127.0.0.1:8791/';
 const OUT = process.env.ACE_UI_OUT || '/tmp/ace-release1-shots';
 const results = [];
 const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? '  (' + d + ')' : ''));
@@ -23,7 +23,7 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   const openFilter = async () => {
     if (!(await p.locator('.cmd-sheet').count())) { await p.click('#cmd-filter'); await p.waitForSelector('.cmd-sheet'); }
   };
-  const area = async (a) => { await openFilter(); await p.click(`.cmd-area[data-area="${a}"]`); await p.waitForTimeout(300); };
+  const area = async (a) => { if(await p.locator('#cmd-list-select').isVisible()) await p.locator('#cmd-list-select').selectOption(a);else await p.click(`.cmd-area[data-area="${a}"]`); await p.waitForTimeout(300); };
   const showRecords = async () => { await openFilter(); await p.click('#cmd-recs'); await p.waitForTimeout(300); };
   const showDoneRows = async () => { await openFilter(); await p.click('#cmd-showdone'); await p.waitForTimeout(300); };
   const rowFor = (t) => p.locator('.cmd-row', { hasText: t }).first();
@@ -33,7 +33,7 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
 
   // ── 1. Areas are the navigation, and Inbox is permanently visible but not the default
   await openFilter();
-  const areas = await p.locator('.cmd-sheet .cmd-area[data-area]').allInnerTexts();
+  const areas = await p.locator('.cmd-area[data-area]').allInnerTexts();
   ok('Inbox is permanently visible', areas.some(a => /INBOX/i.test(a)), areas.join(' | '));
   ok('Inbox is not the default view',
      (await p.locator('.cmd-area.on').innerText()).trim().toUpperCase() === 'ALL');
@@ -68,7 +68,7 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   // hidden by default (2026-09-11). A record with a due date is an obligation and stays —
   // that is the whole point of the exemption, so the expectation states the same rule
   // rather than being loosened to make the number fit.
-  const shown = rows => (rows || []).filter(r => r.entry !== 'record' || r.due_days != null || !!r.followup);
+  const shown = rows => (rows || []).filter(r => r.entry !== 'record' || r.lane==='waiting' || r.due_days != null || !!r.followup);
   const count = f => f(dt.deadlines).length + f(dt.chosen).length + f(dt.suggested).length
                    + f(dt.decisions).length + f(dt.review).length + f(dt.waiting).length;
   const expected = count(shown);                 // the board honours the records preference
@@ -299,14 +299,14 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
 
   // ── 9b. One filter row, and records are out of the way by default
   await lens('all');
-  ok('the header is one row, not three',
+  ok('lists are primary navigation without category filters',
      await p.locator('#command-view .cmd-lens').count() === 1
-     && await p.locator('#command-view > .cmd-areas').count() === 0
+     && await p.locator('#command-view > .cmd-areas').count() === 1
      && await p.locator('#command-view > .cmd-chips').count() === 0);
-  ok('...offering exactly Today, Week, Waiting and Everything',
+  ok('...offering Today, Scheduled, Waiting and All tasks',
      (await p.locator('.cmd-lens button[data-lens]').allInnerTexts())
        .map(t => t.trim().split(' ')[0].toUpperCase()).join('|')
-       === 'TODAY|WEEK|WAITING|EVERYTHING');
+       === 'TODAY|SCHEDULED|WAITING|ALL');
   // A genuine entry='record' from the fixture. ('Unfiled thought from the truck' is an
   // ACTION — it reads like a note, which is exactly why the entry field exists.)
   const recordText = 'The Marlow deal';
@@ -316,9 +316,9 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   ok('...and the toggle brings them back',
      await p.locator('.cmd-row', { hasText: recordText }).count() === 1);
   await showRecords();
-  ok('areas and categories still work, from inside the sheet',
-     await p.locator('.cmd-sheet .cmd-area[data-area]').count() > 0
-     && await p.locator('.cmd-sheet .cmd-chip').count() > 0);
+  ok('lists stay outside Options and category filters are retired',
+     await p.locator('.cmd-area[data-area]').count() > 0
+     && await p.locator('.cmd-chip').count() === 0);
   await openFilter();
   await p.screenshot({ path: `${OUT}/09-one-row.png` });
 

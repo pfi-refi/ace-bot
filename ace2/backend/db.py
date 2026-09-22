@@ -24,7 +24,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 import re as _re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytz
 
@@ -158,10 +158,16 @@ def _init_schema():
         # writing a next step — the cleanup Brady had just finished — counted as no change at
         # all and the brief told him nothing had moved. Nullable with no backfill: an
         # un-migrated row simply reads as "not edited since this shipped", which is true.
+        # due_cleared (2026-09-22): the ISO date of a TEXT-DERIVED due that Brady explicitly
+        # cleared. `due` is only the stored field; when it is empty, read_items scans the
+        # wording ("pay by Sep 30") and derives a date — so clearing the field wrote NULL
+        # over NULL and the date came straight back on the next read. This remembers exactly
+        # the date he cleared and nothing else: a different date in the wording still shows.
+        # Nullable, no backfill; an un-migrated row derives exactly as it does today.
         for _col in ("entry TEXT", "state TEXT", "waiting_on TEXT", "closed_by TEXT",
                      "bucket TEXT", "next_step TEXT", "followup TEXT",
                      "chosen_on TEXT", "updated_at TIMESTAMPTZ",
-                     "reviewed_at TIMESTAMPTZ"):
+                     "reviewed_at TIMESTAMPTZ", "due_cleared TEXT"):
             cur.execute(f"ALTER TABLE daybank_items ADD COLUMN IF NOT EXISTS {_col}")
         # Durable facts — Ace's real memory bank. Replaces the capped (60), bot-shared Drive
         # ace_memory.json. UNCAPPED (the old cap silently dropped facts). `tier` = core |
@@ -659,6 +665,22 @@ def parse_due(text: str, due: str = None, today=None):
     return None
 
 
+def text_due(text: str, today=None):
+    """The date the WORDING alone would give this row — what an explicit clear has to beat."""
+    return parse_due(text, None, today)
+
+
+def effective_due(text: str, due: str, due_cleared: str, today=None):
+    """Honor an explicit clear even when relative wording rolls into another month.
+
+    The marker records the cleared date for provenance. A deliberate change to the
+    date in the wording, or a new stored due, resets it in update_item.
+    """
+    if not (due or "").strip() and due_cleared:
+        return None
+    return parse_due(text, due, today)
+
+
 def _done_et(ts) -> str:
     """A done_ts (stored UTC) as its EASTERN calendar date.
 
@@ -990,12 +1012,21 @@ def read_items(active_only: bool = True, *, settings=None) -> list:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, "
                         "parent_id, superseded_by, entry, state, waiting_on, closed_by, "
-                        "bucket, next_step, followup, chosen_on, updated_at, reviewed_at "
+                        "bucket, next_step, followup, chosen_on, updated_at, reviewed_at, "
+                        "due_cleared "
                         "FROM daybank_items")
             rows = cur.fetchall()
         _today = datetime.now(EASTERN).date()
         settings = board_settings() if settings is None else settings
         _boundary = settings["review_boundary"]
+        # OPEN SUBTASKS PER PARENT (2026-09-22). Counted over EVERY row before the active
+        # filter, so a parent's count is the truth and not a function of which view asked.
+        # A parent with open children is not completable by an ordinary tick (see
+        # classify.decorate and the guard in update_item); closing a child never touches it.
+        _open_children = {}
+        for r in rows:
+            if r[4] == "open" and r[8]:
+                _open_children[r[8]] = _open_children.get(r[8], 0) + 1
         items = []
         for r in rows:
             it = {
@@ -1039,10 +1070,15 @@ def read_items(active_only: bool = True, *, settings=None) -> list:
             # Did this row exist before release one shipped? A stored boundary answers it, so
             # a fresh capture can never inherit the old board's history.
             it["pre_release_one"] = _before_boundary(it.get("ts"), _boundary)
+            # The text-derived date Brady explicitly cleared, if any. Exposed so a surface
+            # can say "the date in the wording is ignored" instead of looking broken.
+            it["due_cleared"] = r[20]
             # Deterministic due date (computed once here so brief / watchdog / UI all agree).
-            _d = parse_due(it["text"], it["due"], _today)
+            # `due_on`/`due_days` keep their meaning: the ONE effective deadline, or none.
+            _d = effective_due(it["text"], it["due"], it["due_cleared"], _today)
             it["due_on"] = _d.isoformat() if _d else None
             it["due_days"] = (_d - _today).days if _d else None
+            it["open_children"] = _open_children.get(it["id"], 0)
             items.append(it)
         if active_only:
             # Active view = open items + anything CLOSED today (visible receipt, gone tomorrow).
@@ -1255,6 +1291,14 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
         kind = "note"
     ensure_ready()
     tags = canon_tags(tags)
+    # A PARENT HAS TO BE REAL AND OPEN (2026-09-22). Enforced here, at the shared boundary,
+    # because Ace's capture_item tool passes parent_id straight through: a typo'd or closed
+    # parent would silently file a subtask under nothing, or under a row already finished.
+    parent_id = (parent_id or "").strip() or None
+    if parent_id:
+        ok_p, why_p = parent_open(parent_id)
+        if not ok_p:
+            return False, why_p
     # Dedup against OPEN *and* DONE items so nothing duplicates or resurrects (the Google Tasks
     # bug in reverse): a near-match returns the existing item flagged {"dup": True} instead of
     # inserting a twin. Hardened 2026-07-31 (Kara×2 / PFI-Hub×3 / Donna×2 leaked through the old
@@ -1404,6 +1448,41 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
     except Exception as e:
         logger.error("db add_item failed: %s", e)
         return False, str(e)
+
+
+def parent_open(parent_id: str) -> tuple:
+    """(True, "") when `parent_id` names a row a subtask may hang under, else (False, why).
+
+    Open status only: a done, dropped or merged-away row is not something new work can be
+    filed beneath, and the word to Brady names the actual problem rather than "invalid".
+    """
+    parent_id = (parent_id or "").strip()
+    if not parent_id:
+        return False, "Choose an existing open parent task."
+    try:
+        with _conn() as c, c.cursor() as cur:
+            # One question first — is this a row a subtask may hang under? — and the
+            # diagnosis only when the answer is no.
+            cur.execute("SELECT id FROM daybank_items WHERE id = %s AND status = 'open' "
+                        "AND superseded_by IS NULL", (parent_id,))
+            if cur.fetchone():
+                return True, ""
+            cur.execute("SELECT status, superseded_by, text FROM daybank_items WHERE id = %s",
+                        (parent_id,))
+            row = cur.fetchone()
+    except Exception as e:
+        logger.warning("parent lookup failed for %s: %s", parent_id, type(e).__name__)
+        return False, "Unable to verify the parent task; refresh the board and retry. Nothing changed."
+    if not row:
+        return False, f"Choose an existing open parent task — there is no item {parent_id}."
+    status, superseded_by, text = row
+    if superseded_by:
+        return False, ("Choose an existing open parent task — [%s] was merged into [%s]."
+                       % (parent_id, superseded_by))
+    if status != "open":
+        return False, ("Choose an existing open parent task — [%s] is %s: %s"
+                       % (parent_id, status, (text or "")[:60]))
+    return True, ""
 
 
 def rollover_recurring_bills() -> int:
@@ -1709,8 +1788,9 @@ def _resolve_item_id(item_id: str, match: str = None) -> tuple:
 # NOT every column: done_ts, closed_by and updated_at are bookkeeping the store stamps on its
 # own, so listing them as "changed" would put words in Brady's mouth about fields he never
 # asked for. `status` is compared but is spoken as the VERB rather than as a field name.
-_ITEM_FIELDS = ("text", "status", "due", "state", "waiting_on", "next_step", "followup",
-                "entry", "area", "category", "tags", "chosen_on", "reviewed", "superseded_by")
+_ITEM_FIELDS = ("text", "status", "due", "due_cleared", "state", "waiting_on", "next_step",
+                "followup", "entry", "area", "category", "tags", "chosen_on", "reviewed",
+                "superseded_by")
 
 
 def get_item(item_id: str) -> dict:
@@ -1733,7 +1813,7 @@ def get_item(item_id: str) -> dict:
         with _conn() as c, c.cursor() as cur:
             cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, parent_id, "
                         "superseded_by, entry, state, waiting_on, closed_by, bucket, "
-                        "next_step, followup, chosen_on, updated_at, reviewed_at "
+                        "next_step, followup, chosen_on, updated_at, reviewed_at, due_cleared "
                         "FROM daybank_items WHERE id = %s", (item_id,))
             r = cur.fetchone()
         if not r:
@@ -1744,7 +1824,8 @@ def get_item(item_id: str) -> dict:
               "superseded_by": r[9], "entry": r[10], "state": r[11], "waiting_on": r[12],
               "closed_by": r[13], "bucket": r[14], "next_step": r[15], "followup": r[16],
               "chosen_on": r[17], "updated_at": r[18].isoformat() if r[18] else None,
-              "reviewed_at": r[19].isoformat() if r[19] else None}
+              "reviewed_at": r[19].isoformat() if r[19] else None,
+              "due_cleared": r[20]}
         # The two names a receipt uses for these, so the diff and the sentence agree.
         it["area"] = r[14]
         it["category"] = _item_cat(it)
@@ -1760,11 +1841,24 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 superseded_by: str = None, closed_by: str = None,
                 entry: str = None, state: str = None, waiting_on: str = None,
                 bucket: str = None, next_step: str = None, followup: str = None,
-                chosen_on: str = None, force_close: bool = False, reviewed: bool = None) -> tuple:
+                chosen_on: str = None, force_close: bool = False, reviewed: bool = None,
+                expected_updated_at: str = None) -> tuple:
     """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
     due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
     doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
-    so the model can ask instead of guessing (the 'said it's done → new twin' fix)."""
+    so the model can ask instead of guessing (the 'said it's done → new twin' fix).
+
+    `expected_updated_at` (2026-09-22) is the editor's optimistic lock: the `updated_at` the
+    caller LOADED, or "" when it loaded NULL. None means "no check", which is what every
+    existing caller — Ace's tool, the sweeps, the checkbox — sends by omitting it. When it
+    is given, the comparison is a condition of the UPDATE itself, evaluated under the row
+    lock; a mismatch writes nothing and answers with a CONFLICT reason naming the newer
+    edit time.
+
+    `due` keeps its contract (None = leave, "" = clear, text = set) with one more promise:
+    clearing a date that was only ever derived from the wording now STICKS (see
+    `effective_due`), and an omitted `due` never touches a derived date, let alone freezes it.
+    """
     ok, item_id = _resolve_item_id(item_id, match)
     if not ok:
         return False, item_id
@@ -1804,6 +1898,20 @@ def update_item(item_id: str, status: str = None, text: str = None,
             return False, "Unable to verify item kind; refresh the board and retry. Nothing changed."
         if kind == "action":
             return False, "Only a reference record can be settled. This action remains unchanged."
+    # The optimistic lock's value is validated up front, so a malformed one is refused as a
+    # client bug rather than reported to Brady as "someone else edited this".
+    expected_ts = None
+    if expected_updated_at is not None:
+        expected_updated_at = str(expected_updated_at).strip()
+        if expected_updated_at:
+            try:
+                expected_ts = datetime.fromisoformat(expected_updated_at.replace("Z", "+00:00"))
+            except ValueError:
+                return False, ("expected_updated_at %r is not a timestamp; send the row's "
+                               "updated_at exactly as loaded, or \"\" for none. Nothing changed."
+                               % expected_updated_at[:40])
+            if expected_ts.tzinfo is None:
+                expected_ts = expected_ts.replace(tzinfo=timezone.utc)
     try:
         import json
         with _conn() as c, c.cursor() as cur:
@@ -1818,6 +1926,8 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("text = %s"); args.append(text.strip())
             if tags is not None:
                 sets.append("tags = %s::jsonb"); args.append(json.dumps(canon_tags(tags)))
+            # `due` is finalised below, once the row is locked: a clear has to know what the
+            # wording derives in order to remember exactly which date was cleared.
             if due is not None:
                 sets.append("due = %s"); args.append(pin_due(due) or None)
             if (superseded_by or "").strip():
@@ -1877,13 +1987,90 @@ def update_item(item_id: str, status: str = None, text: str = None,
                 sets.append("bucket = %s"); args.append(str(bucket).strip())
             if not sets:
                 return False, "nothing to update"
+            # THE DUE-CLEAR MARKER (2026-09-22). Decided against the text this write leaves
+            # behind. Only a clear with no new text needs to read the row first — every
+            # other case is settled from the request itself or inside the UPDATE.
+            new_text = text.strip() if (text and text.strip()) else None
+            if due is not None:
+                if (pin_due(due) or None) is None:
+                    # An explicit CLEAR. Remember the date the wording would otherwise put
+                    # back, so the next read holds exactly that one back and nothing else.
+                    if new_text is None:
+                        cur.execute("SELECT text FROM daybank_items WHERE id = %s", (item_id,))
+                        _r0 = cur.fetchone()
+                        if not _r0:
+                            return False, f"no item {item_id}"
+                        new_text = _r0[0] or ""
+                    derived = text_due(new_text)
+                    sets.append("due_cleared = %s")
+                    args.append(derived.isoformat() if derived else None)
+                else:
+                    # A real date in the field wins outright; the marker has nothing to do.
+                    sets.append("due_cleared = NULL")
+            elif new_text is not None:
+                # Compare both versions at the SAME clock time. An unchanged relative
+                # date must not reappear just because a month passed before this edit.
+                cur.execute("SELECT text FROM daybank_items WHERE id = %s FOR UPDATE", (item_id,))
+                prior = cur.fetchone()
+                if prior and text_due(prior[0] or "") != text_due(new_text):
+                    sets.append("due_cleared = NULL")
             sets.append("updated_at = now()")   # a receipt for the edit, not a new field to set
-            args.append(item_id)
-            cur.execute(f"UPDATE daybank_items SET {', '.join(sets)} WHERE id = %s RETURNING text", args)
+            # ── THE GUARDS RIDE IN THE WRITE ITSELF (2026-09-22) ─────────────────────
+            # The stale-editor check and the open-subtask rule are conditions of the UPDATE,
+            # evaluated by Postgres against the row as it is at the instant the row lock is
+            # taken — so two editors racing on one stamp get exactly one winner, and a
+            # child added a moment earlier still holds its parent open. A miss writes
+            # nothing; the read that follows only exists to say WHY, never to decide.
+            where, wargs = ["id = %s"], [item_id]
+            if expected_updated_at is not None:
+                if expected_ts is None:
+                    where.append("updated_at IS NULL")     # "" = loaded a never-edited row
+                else:
+                    where.append("updated_at = %s"); wargs.append(expected_ts)
+            guard_children = status == "done" and not force_close
+            if guard_children:
+                # OPEN SUBTASKS HOLD THE PARENT OPEN. The lane guard above cannot see this —
+                # a parent is an ordinary actionable row — and a ticked parent with live
+                # children is how work disappears from the board without being done.
+                # force_close is the deliberate override, exactly as for a waiting row, and
+                # even then nothing cascades: the children stay assigned and open.
+                where.append("NOT EXISTS (SELECT 1 FROM daybank_items k WHERE k.parent_id = "
+                             "daybank_items.id AND k.status = 'open')")
+            cur.execute(f"UPDATE daybank_items SET {', '.join(sets)} WHERE {' AND '.join(where)} "
+                        f"RETURNING text", args + wargs)
             row = cur.fetchone()
-        if row:
-            _note_source("item", item_id)
-        return (True, row[0]) if row else (False, f"no item {item_id}")
+            if not row:
+                # Nothing was written. Name the reason from the row as it stands now.
+                cur.execute("SELECT updated_at, (SELECT count(*) FROM daybank_items k WHERE "
+                            "k.parent_id = d.id AND k.status = 'open') FROM daybank_items d "
+                            "WHERE d.id = %s", (item_id,))
+                diag = cur.fetchone()
+                if not diag:
+                    return False, f"no item {item_id}"
+                cur_updated, n_kids = diag[0], int(diag[1] or 0)
+                stale = expected_updated_at is not None and (
+                    (cur_updated is not None) if expected_ts is None
+                    else (cur_updated is None or cur_updated != expected_ts))
+                if stale:
+                    seen = cur_updated.isoformat() if cur_updated else "never"
+                    return False, ("CONFLICT — this row was changed since it was loaded "
+                                   "(last edit %s). Nothing was saved. Reload it and apply "
+                                   "the edit again." % seen)
+                if guard_children and n_kids:
+                    cur.execute("SELECT id, text FROM daybank_items WHERE parent_id = %s AND "
+                                "status = 'open' ORDER BY ts LIMIT 5", (item_id,))
+                    kids = cur.fetchall() or []
+                    listed = "; ".join("[%s] %s" % (k[0], (k[1] or "")[:50]) for k in kids[:4])
+                    more = " (+%d more)" % (n_kids - 4) if n_kids > 4 else ""
+                    return False, ("NOT COMPLETED — %d open subtask%s still under this row: "
+                                   "%s%s. Finish or move them first. Only pass force_close if "
+                                   "Brady says to close it anyway; the subtasks stay open and "
+                                   "attached either way. Do NOT tell him it is done."
+                                   % (n_kids, "" if n_kids == 1 else "s", listed, more))
+                # The row moved between the write and this read; say nothing was saved.
+                return False, f"no item {item_id}"
+        _note_source("item", item_id)
+        return True, row[0]
     except Exception as e:
         logger.error("db update_item failed: %s", e)
         return False, str(e)
@@ -1891,19 +2078,33 @@ def update_item(item_id: str, status: str = None, text: str = None,
 
 def _expected_item_values(before: dict, requested: dict) -> dict:
     """Persisted values required by this edit, including preservation of omitted fields."""
-    fields = ("text", "status", "tags", "due", "entry", "state", "waiting_on",
+    fields = ("text", "status", "tags", "due", "due_cleared", "entry", "state", "waiting_on",
               "next_step", "followup", "chosen_on", "superseded_by", "bucket", "reviewed")
     expected = {key: before.get(key) for key in fields}
     for key in ("status", "entry"):
         if requested.get(key) is not None:
             expected[key] = requested[key]
-    if requested.get("text") is not None:
+    if requested.get("text") is not None and requested["text"].strip():
         expected["text"] = requested["text"].strip()
     if requested.get("tags") is not None:
         expected["tags"] = canon_tags(requested["tags"])
     for key in ("due", "followup", "chosen_on"):
         if requested.get(key) is not None:
             expected[key] = pin_due(requested[key]) or None
+    # The due-clear marker, by the same three rules update_item applies (kept in step by
+    # tests/test_receipt_oracle_drift.py): a clear remembers what the wording derives, a set
+    # date drops the marker, and a text edit keeps it only while the same date is still there.
+    new_text = expected["text"] or ""
+    if requested.get("due") is not None:
+        if expected["due"] is None:
+            derived = text_due(new_text)
+            expected["due_cleared"] = derived.isoformat() if derived else None
+        else:
+            expected["due_cleared"] = None
+    elif requested.get("text") is not None and requested["text"].strip():
+        derived = text_due(new_text)
+        if text_due(before.get("text") or "") != derived:
+            expected["due_cleared"] = None
     if requested.get("state") is not None:
         expected["state"] = str(requested["state"]).strip() or "active"
         if expected["state"] != "waiting" and requested.get("waiting_on") is None:

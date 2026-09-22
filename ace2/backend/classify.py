@@ -169,9 +169,53 @@ def lane_of(item: dict) -> str:
     return LANE_ANYTIME
 
 
+def open_children_index(items: list) -> dict:
+    """{parent id: number of OPEN rows filed under it}, from the rows given."""
+    idx = {}
+    for it in (items or []):
+        pid = it.get("parent_id")
+        if pid and (it.get("status") or "open") == "open":
+            idx[pid] = idx.get(pid, 0) + 1
+    return idx
+
+
+def open_children_of(item: dict) -> int:
+    """How many open subtasks hang under this row. db.read_items counts it over the whole
+    table; a row built elsewhere carries 0 unless the caller filled it in."""
+    try:
+        return int(item.get("open_children") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def completion_hold(item: dict, lane: str = None) -> str:
+    """WHY an ordinary tick may not close this row, or "" when it may.
+
+    One word per reason, for a surface to name it and for the server-side guard
+    (db.update_item) to agree with: 'waiting' (someone else owns the next move),
+    'reference' (a record has a state, not an ending), 'children' (open subtasks are still
+    filed under it), 'settled'/'done' (already closed). A parent with open subtasks is an
+    ordinary actionable row in every other respect — same lane, same counts — it simply
+    cannot be finished while work is still hanging under it (2026-09-22).
+    """
+    lane = lane or lane_of(item)
+    if lane == LANE_WAITING:
+        return "waiting"
+    if lane == LANE_REFERENCE:
+        return "reference"
+    if lane == LANE_SETTLED:
+        return "settled"
+    if lane == LANE_DONE:
+        return "done"
+    if open_children_of(item) > 0:
+        return "children"
+    return ""
+
+
 def decorate(item: dict, *, renames=None) -> dict:
     """Attach the shared interpretation. Additive only — no stored field is altered."""
     lane = lane_of(item)
+    hold = completion_hold(item, lane)
     return {
         **item,
         "lane": lane,
@@ -181,13 +225,28 @@ def decorate(item: dict, *, renames=None) -> dict:
         "area": area_of(item, renames=renames),
         "shelves": shelves_of(item),
         "actionable": lane in ACTIONABLE,
-        "completable": lane in COMPLETABLE,
+        # A checkbox may be offered only when the lane allows it AND nothing open is
+        # filed under the row. `completion_hold` says which of those it was.
+        "completable": lane in COMPLETABLE and not hold,
+        "completion_hold": hold,
+        "open_children": open_children_of(item),
     }
+
+
+def with_children(items: list) -> list:
+    """The same rows, each carrying `open_children` — computed from this list when the
+    store did not already fill it in, so every caller decorates from the same count."""
+    rows = list(items or [])
+    if any("open_children" not in r for r in rows):
+        idx = open_children_index(rows)
+        rows = [r if "open_children" in r else {**r, "open_children": idx.get(r.get("id"), 0)}
+                for r in rows]
+    return rows
 
 
 def summarise(items: list, *, renames=None) -> dict:
     """Counts per lane plus the totals a view needs to prove nothing is hidden."""
-    rows = [decorate(i, renames=renames) for i in (items or [])]
+    rows = [decorate(i, renames=renames) for i in with_children(items)]
     counts = {lane: 0 for lane in LANE_ORDER}
     for r in rows:
         counts[r["lane"]] += 1
@@ -228,7 +287,7 @@ def due_today_sections(items: list, today: str, suggest: int = 3, *, renames=Non
     and desktop with a Show more option." `suggested_total` carries the real size so a
     surface can offer the rest without a second request, and so the count is never hidden.
     """
-    rows = [decorate(i, renames=renames) for i in (items or [])]
+    rows = [decorate(i, renames=renames) for i in with_children(items)]
     live = [r for r in rows if r["lane"] != LANE_DONE]
     deadlines = [r for r in live if r["lane"] in (LANE_OVERDUE, LANE_TODAY)]
     picked = [r for r in live if chosen_today(r, today)

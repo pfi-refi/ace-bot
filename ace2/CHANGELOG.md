@@ -1,3 +1,21 @@
+# v2.1.4 — Command Center lists and reliable task controls
+
+Life-area lists are visible in the Command Center, with a phone list picker. Category
+filters are removed from navigation; categories remain item metadata. Today and Scheduled
+span lists, and Scheduled includes dates beyond this week. Options shows reference,
+completed and archived records. Records can move lists. Add linked subtasks from an editor;
+completing a child leaves its parent open, and unfinished children hold ordinary parent
+completion. Explicit confirmation remains available without cascading to children.
+
+Edits reject stale drafts instead of overwriting newer changes. Failed saves keep typed
+values. Duplicate refusals identify the existing task. Archive asks for confirmation and
+can be reversed. Clearing a derived deadline persists across month changes; unrelated
+edits do not freeze inferred dates. Today card and board use the same saved completion.
+
+This is the first usability repair, not the full Reminders redesign. An editable profile
+screen, collapsible nested tasks and drag-and-drop are not included. No existing board,
+profile or memory records are reorganized by this release.
+
 # v2.1.3 — Accurate background read receipts
 
 A successful memory read stays successful when its source text mentions errors, permissions

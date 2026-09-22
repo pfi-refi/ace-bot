@@ -1857,13 +1857,14 @@
   // A refusal has to be VISIBLE. There was no notice surface at all in this app, so a
   // rejected save simply looked like nothing happened — the same silent-failure class the
   // 2026-09-05 audit found three of. Minimal on purpose: one line, in the card it concerns.
-  function boardNotice(msg) {
-    var host = document.querySelector('.bv-list') ||
+  function boardNotice(msg, action) {
+    var host = (cmd && cmd.open && document.querySelector('#command-view .cmd-list')) || document.querySelector('.bv-list') ||
                document.querySelector('#card-daybank .card-body');
-    if (!host) { console.warn('board notice:', msg); return; }
+    var globalNotice=!host; if(!host) host=document.body;
     var old = host.querySelector('.bv-notice'); if (old) old.remove();
     var n = document.createElement('div');
-    n.className = 'bv-notice'; n.setAttribute('role', 'status'); n.textContent = msg;
+    n.className = 'bv-notice'+(globalNotice?' bv-notice-global':''); n.setAttribute('role', 'status'); n.textContent = msg;
+    if(action){ var button=document.createElement('button');button.type='button';button.textContent=action.label;button.onclick=action.run;n.appendChild(button); }
     host.insertBefore(n, host.firstChild);
     setTimeout(function () { if (n.parentNode) n.remove(); }, 9000);
   }
@@ -1900,7 +1901,7 @@
       dialog.setAttribute('aria-labelledby','board-confirm-title');
       dialog.innerHTML='<h2 id="board-confirm-title">Complete this item?</h2><p class="board-confirm-item"></p><p class="board-confirm-why"></p><div><button type="button" class="board-confirm-cancel">Keep open</button><button type="button" class="board-confirm-yes">Yes, complete this item</button></div>';
       dialog.querySelector('.board-confirm-item').textContent=it.text||'';
-      dialog.querySelector('.board-confirm-why').textContent=(it.waiting_on?'This is waiting on '+it.waiting_on+'.':'This is a reference record.')+' Confirm that the underlying item is finished, not just the follow-up.';
+      dialog.querySelector('.board-confirm-why').textContent=((cmd.items||[]).some(function(x){return x.parent_id===it.id && x.status==='open';})?'This has unfinished subtasks.':(it.waiting_on?'This is waiting on '+it.waiting_on+'.':'This is a protected record.'))+' Confirm that the underlying item is finished, not just the follow-up.';
       var settled=false;
       function finish(value){ if(settled)return; settled=true; dialog.close(); dialog.remove(); resolve(value); }
       dialog.querySelector('.board-confirm-cancel').onclick=function(){finish(false);};
@@ -2335,17 +2336,9 @@
     var h = 0; for (var i=0;i<(name||'').length;i++) h = (h*31 + name.charCodeAt(i)) & 0xffff;
     return LANE_FALLBACK[h % LANE_FALLBACK.length];
   }
-  // ONE ROW, NOT THREE (2026-09-11, Brady: "it's still way too complicated to sift through").
-  // The header carried 27 controls across three rows — 7 lenses, 8 areas, 12 categories —
-  // above a list of 63 rows of which only 23 were things to DO. Measured on his live board:
-  // 40 of 63 were records, and 34 had no area at all, so the area row was sorting by a field
-  // most rows did not answer.
-  //
-  // Now: three lenses he named (Today · Waiting · Everything) and one Filter. Areas and
-  // categories still exist and still work — they live in the filter sheet instead of costing
-  // two permanent rows. Records default to hidden because they are the bulk of the noise;
-  // that is ONE flag, deliberately, because Brady has not decided yet whether they belong on
-  // their own surface, and a second view would prejudge it.
+  // Lists are primary navigation (2026-09-22). Categories remain item metadata.
+  // Today and Scheduled span lists; Options contains reference/completed/archived rows.
+  // Mobile uses a native list picker so every list remains reachable without swiping.
   var cmd = { open:false, min:false, lens:'today', cat:'All', items:[], editing:null, today:'',
               areas:CMD_LANES.slice(), custom:[], dueToday:null, area:'All', suggest:3,
               showRecords:false, showDone:false, filterOpen:false };
@@ -2405,18 +2398,18 @@
     if (!it.parent_id) return '';
     var p = (cmd.items || []).filter(function(x){ return x.id === it.parent_id; })[0];
     var label = p ? p.text.replace(/\s+/g,' ').slice(0, 34) : it.parent_id;
+    if(p && p.status!=='open') label += p.status==='dropped'?' (archived parent)':' (completed parent)';
     return '<span class="cmd-link" title="Spawned from this record — completing this leaves it standing">'
          + '\u21b3 ' + cmdEsc(label) + (p && p.text.length > 34 ? '\u2026' : '') + '</span>';
   }
   function cmdChildChip(it){
-    if (it.entry !== 'record') return '';
     var n = (cmd.items || []).filter(function(x){
       return x.parent_id === it.id && x.status === 'open'; }).length;
     if (!n) return '';
     return '<span class="cmd-link">' + n + ' open action' + (n>1?'s':'') + '</span>';
   }
   function cmdRow(it){
-    var c=cmdCatOf(it), col=CMD_CATS[c], done=it.status==='done';
+    var c=cmdCatOf(it), col=CMD_CATS[c], done=it.status!=='open';
     if (cmd.editing === it.id) {
       var dText = (cmd.draft && cmd.draft.text != null) ? cmd.draft.text : it.text;
       var dCat  = (cmd.draft && cmd.draft.cat) || c;
@@ -2439,7 +2432,7 @@
       var dState = (cmd.draft && cmd.draft.state != null) ? cmd.draft.state : (it.state || '');
       if (dState === 'active') dState = '';
       var dWait  = (cmd.draft && cmd.draft.wait  != null) ? cmd.draft.wait  : (it.waiting_on || '');
-      var dBucket = (cmd.draft && cmd.draft.bucket) || it.bucket || 'Inbox';
+      var dBucket = (cmd.draft && cmd.draft.bucket) || it.area || it.bucket || 'Inbox';
       var dNext = (cmd.draft && cmd.draft.next != null) ? cmd.draft.next : (it.next_step || '');
       var dFup  = (cmd.draft && cmd.draft.fup  != null) ? cmd.draft.fup  : (it.followup || '');
       var dTags = (cmd.draft && cmd.draft.tags) || (it.tags || []).slice(1);
@@ -2472,11 +2465,13 @@
              + t + '</button>';
       }).join('');
       var chosen = !!(it.chosen_on && cmd.today && it.chosen_on.slice(0,10) === cmd.today);
-      return '<div class="cmd-row cmd-editing" data-id="'+it.id+'" style="border-left-color:'+col+'">'
+      var baseDue=cmd.draft && cmd.draft.baseDue!=null ? cmd.draft.baseDue : (it.due_on || '');
+      var version=cmd.draft && cmd.draft.version!=null ? cmd.draft.version : (it.updated_at || '');
+      return '<div class="cmd-row cmd-editing" data-base-due="'+cmdEsc(baseDue)+'" data-version="'+cmdEsc(version)+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
         +'<div class="cmd-eform">'
         +'<textarea class="cmd-etext" rows="2">'+cmdEsc(dText)+'</textarea>'
         +'<div class="cmd-erow"><label class="cmd-el">Area</label>'
-        +'<select class="cmd-ebucket"'+(dEntry==='record'?' disabled':'')+'>'+bOpts+'</select>'
+        +'<select class="cmd-ebucket">'+bOpts+'</select>'
         +'<label class="cmd-el">Category</label><select class="cmd-ecat">'+opts+'</select></div>'
         +'<div class="cmd-erow"><label class="cmd-el">Kind</label><select class="cmd-eentry">'+eOpts+'</select>'
         +'<label class="cmd-el">Status</label><select class="cmd-estate">'+sOpts+'</select></div>'
@@ -2498,6 +2493,7 @@
         +'<span class="cmd-ehint">Chooses the day. Never sets a deadline.</span></div>'
         +'<div class="cmd-erow cmd-etags">'+tagChips+'</div>'
         +'<div class="cmd-erow"><button class="cmd-esave">SAVE</button><button class="cmd-ecancel">CANCEL</button>'
+        +(!done?'<button type="button" class="cmd-addchild">ADD SUBTASK</button>':'')
         +'<button class="cmd-ecancel cmd-edrop" style="margin-left:auto;color:#ff8080;border-color:#ff808055" title="Archive this item (kept in history, never deleted)">REMOVE</button></div>'
         +'</div></div>';
     }
@@ -2562,6 +2558,8 @@
     if (cmd.editing) {
       var er = v.querySelector('.cmd-row.cmd-editing');
       if (er) cmd.draft = {
+        version: er.getAttribute('data-version'),
+        baseDue: er.getAttribute('data-base-due'),
         text:  er.querySelector('.cmd-etext').value,
         cat:   er.querySelector('.cmd-ecat').value,
         due:   er.querySelector('.cmd-edue').value,
@@ -2585,10 +2583,8 @@
       var o=v.querySelector('#cmd-orb-big'); if(o) o.onclick=function(){ cmd.min=false; cmdRender(); };
       return;
     }
-    var chips=['All'].concat(CMD_ORDER).map(function(c){
-      var dot=c==='All'?'':'<span class="cmd-d" style="background:'+CMD_CATS[c]+'"></span>';
-      return '<button class="cmd-chip '+(c===cmd.cat?'on':'')+'" data-cat="'+c+'">'+dot+c+'</button>';
-    }).join('');
+    // Lists are primary; legacy category filters must never silently hide work.
+    cmd.cat = 'All';
     // SIMPLER LENSES (2026-09-08). 'Pipeline' grouped by CATEGORY — exactly what the chips
     // row below already does — and Brady reads the word as "deals going in", not "all my
     // work". It is gone, and the two states that had nowhere to live here (waiting on
@@ -2597,7 +2593,7 @@
     // TODAY IS THE SAME TODAY (2026-09-09, Brady). The Command Center and the Due Today card
     // must show the same work; this lens renders the server's `due_today` grouping directly
     // rather than filtering the list again with its own idea of what counts.
-    var LN={today:'Today',week:'Week',waiting:'Waiting',all:'Everything'};
+    var LN={today:'Today',week:'Scheduled',waiting:'Waiting',all:'All tasks'};
     var LENS_ORDER=['today','week','waiting','all'];
     // Retired lenses map onto what replaced them rather than silently resetting to Today:
     // Scheduled and Areas are Everything, Decide is pinned to the top of Today, Done is a
@@ -2609,7 +2605,7 @@
     }
     var nWait=cmd.items.filter(function(x){return lensOk(x) && x.status==='open' && x.lane==='waiting';}).length;
     var nWeek=cmd.items.filter(function(x){
-      return lensOk(x) && x.status==='open' && ((x.due_days!=null && x.due_days<=7) || x.followup); }).length;
+      return lensOk(x) && x.status==='open' && (x.due_days!=null || x.followup); }).length;
     var nDec=cmd.items.filter(function(x){return x.needs_decision;}).length;
     var LC={waiting:nWait,decide:nDec,week:nWeek};
     var lenses=LENS_ORDER.map(function(l){
@@ -2617,31 +2613,30 @@
         +LN[l]+(n?' <b>'+n+'</b>':'')+'</button>'; }).join('');
     // How many filters are doing something right now, so a narrowed board never looks empty
     // for no visible reason.
-    var nFilters=(cmd.area!=='All'?1:0)+(cmd.cat!=='All'?1:0)
-                +(cmd.showRecords?1:0)+(cmd.showDone?1:0);
+    var nFilters=(cmd.showRecords?1:0)+(cmd.showDone?1:0)+(cmd.showArchived?1:0);
     var filterBtn='<button class="cmd-filt'+(cmd.filterOpen?' on':'')+'" id="cmd-filter">'
-      +'Filter'+(nFilters?' <b>'+nFilters+'</b>':'')+'</button>';
+      +'Options'+(nFilters?' <b>'+nFilters+'</b>':'')+'</button>';
     // AREAS ARE THE PRIMARY NAVIGATION (brief, 2026-09-09), with the categories demoted to
     // secondary filters inside one. Inbox is permanently visible but is never the default.
     var areaList = ['All'].concat(cmd.areas || CMD_LANES);
     if (areaList.indexOf(cmd.area) < 0) cmd.area = 'All';
     var areaCounts = {};
     cmd.items.forEach(function(x){ if(x.status==='open'){
-      areaCounts[x.bucket||'Inbox'] = (areaCounts[x.bucket||'Inbox']||0)+1; } });
+      areaCounts[x.area||x.bucket||'Inbox'] = (areaCounts[x.area||x.bucket||'Inbox']||0)+1; } });
     var areaTabs = areaList.map(function(a){
       var n = a==='All' ? null : (areaCounts[a]||0);
       var dot = a==='All' ? '' : '<span class="cmd-sq" style="background:'+laneColor(a)+'"></span>';
       return '<button class="cmd-area'+(a===cmd.area?' on':'')+'" data-area="'+cmdEsc(a)+'">'
            + dot + cmdEsc(a) + (n!=null?' <b>'+n+'</b>':'') + '</button>';
     }).join('') + '<button class="cmd-area cmd-arealist" id="cmd-lists" title="Add or rename a list">⋯</button>';
+    var mobileLists='<div class="cmd-mobile-lists"><label for="cmd-list-select">List</label><select id="cmd-list-select">'+areaList.map(function(a){return '<option value="'+cmdEsc(a)+'"'+(a===cmd.area?' selected':'')+'>'+cmdEsc(a)+(a==='All'?'':' ('+(areaCounts[a]||0)+')')+'</option>';}).join('')+'</select><button type="button" id="cmd-lists-mobile" aria-label="Add or rename a list">＋</button></div>';
     var sheet = !cmd.filterOpen ? '' :
       '<div class="cmd-sheet">'
-      + '<div class="cmd-sh-h">AREA</div><div class="cmd-areas">'+areaTabs+'</div>'
-      + '<div class="cmd-sh-h">CATEGORY</div><div class="cmd-chips">'+chips+'</div>'
       + '<div class="cmd-sh-h">SHOW</div><div class="cmd-toggles">'
       + '<button class="cmd-tog'+(cmd.showRecords?' on':'')+'" id="cmd-recs">'
       + 'Records &amp; reference</button>'
       + '<button class="cmd-tog'+(cmd.showDone?' on':'')+'" id="cmd-showdone">Completed</button>'
+      + '<button class="cmd-tog'+(cmd.showArchived?' on':'')+'" id="cmd-archived">Archived</button>'
       + '</div></div>';
     // RECORDS STAY IN WAITING. 40 of 63 rows are records and hiding them is most of the
     // relief — but 8 of Brady's 9 waiting rows ARE records ("Josh — reached out, waiting to
@@ -2652,12 +2647,12 @@
     // puts it in DEADLINES — so hiding records by entry type alone made a permit fee due
     // today disappear from Today AND Everything at once. Undated reference stays hidden;
     // anything with a real date does not.
-    function recordOk(x){ return cmd.showRecords || cmd.lens==='waiting'
+    function recordOk(x){ return cmd.showRecords || (x.status==='dropped' && cmd.showArchived) || x.lane==='waiting' || cmd.lens==='waiting'
                               || x.entry!=='record' || x.due_days!=null || !!x.followup; }
     // The filter sheet narrows the WHOLE board, Today included — a Filter badge that says
     // two while Today quietly ignores both of them is a lie about what is on screen.
     function lensOk(x){ return (cmd.cat==='All'||cmdCatOf(x)===cmd.cat)
-                            && (cmd.area==='All'||(x.bucket||'Inbox')===cmd.area); }
+                            && (cmd.area==='All'||(x.area||x.bucket||'Inbox')===cmd.area); }
     function todayOk(x){ return recordOk(x) && lensOk(x); }
     function doneOk(x){ return cmd.showDone || x.status!=='done'; }
     var items=cmd.items.filter(function(x){ return lensOk(x) && recordOk(x) && doneOk(x); });
@@ -2728,14 +2723,14 @@
       //
       // One function, so a row can never appear in one and not the other.
       var open=items.filter(function(x){ return x.status==='open'; });
-      var dated=open.filter(function(x){ return x.due_days!=null && x.due_days<=7; })
+      var dated=open.filter(function(x){ return x.due_days!=null; })
                     .sort(function(a,b){ return a.due_days-b.due_days; });
-      var fups=open.filter(function(x){ return x.followup; })
+      var fups=open.filter(function(x){ return x.followup && x.due_days==null; })
                    .sort(function(a,b){ return (a.followup||'')<(b.followup||'')?-1:1; });
       function datedBody(){
         var out='';
         [['⚠ OVERDUE',function(d){return d<0;}],['TODAY',function(d){return d===0;}],
-         ['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}]
+         ['TOMORROW',function(d){return d===1;}],['THIS WEEK',function(d){return d>=2&&d<=7;}],['LATER',function(d){return d>7;}]
         ].forEach(function(bk){
           var g=dated.filter(function(x){ return bk[1](x.due_days); });
           if(g.length) out+='<div class="cmd-grp">'+bk[0]+' · '+g.length+' — deadlines</div>'
@@ -2750,7 +2745,7 @@
       }
       body += datedBody();
       if(cmd.lens==='week'){
-        if(!body) body='<div class="cmd-empty">Nothing dated in the next seven days. '
+        if(!body) body='<div class="cmd-empty">Nothing scheduled. '
                       +'Open a row and set a deadline or a follow-up to put it here.</div>';
       } else {
         var shown={};
@@ -2763,15 +2758,19 @@
           if(fin.length) body+='<div class="cmd-grp">COMPLETED · '+fin.length+'</div>'
                               +fin.map(cmdRow).join('');
         }
+        if(cmd.showArchived){ var archived=items.filter(function(x){return x.status==='dropped' && !x.superseded_by;});
+          if(archived.length) body+='<div class="cmd-grp">ARCHIVED · '+archived.length+'</div>'+archived.map(cmdRow).join(''); }
         if(!body) body='<div class="cmd-empty">Nothing open.</div>';
       }
     }
     if(!body) body='<div class="cmd-empty">— clear —</div>';
-    var addCat=cmd.cat==='All'?'Money':cmd.cat;
+    var addCat=({'Personal':'Personal','Ace':'Tech','Groundworks':'Business','Side Work':'Business','GFI/PFI':'Deals'})[cmd.area] || 'Admin';
     var addArea=cmd.area==='All'?'':cmd.area;   // '' lets the server file it (Inbox if unsure)
     v.innerHTML='<div class="cmd-hd"><div class="cmd-orb"></div><div class="cmd-ttl">COMMAND</div>'
       +'<div class="cmd-n" style="margin-left:8px;font-size:11px;letter-spacing:.08em;opacity:.65">'+nOpen+' open · '+nDone+' done</div>'
       +'<button class="cmd-ic" id="cmd-min" title="Clean view">⌄</button><button class="cmd-ic" id="cmd-x" title="Close">✕</button></div>'
+      +'<div class="cmd-areas" aria-label="Your lists">'+areaTabs+'</div>'
+      +mobileLists
       +'<div class="cmd-lens">'+lenses+filterBtn+'</div>'
       +sheet
       +'<div class="cmd-list">'+body+'</div>'
@@ -2779,16 +2778,22 @@
     var _nl=v.querySelector('.cmd-list'); if(_nl&&_keep) _nl.scrollTop=_keep;
     v.querySelector('#cmd-x').onclick=cmdClose;
     v.querySelector('#cmd-min').onclick=function(){ cmd.min=true; cmdRender(); };
-    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button[data-lens]'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); cmdRender(true); }; });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-lens button[data-lens]'), function(b){ b.onclick=function(){ cmd.lens=b.getAttribute('data-lens'); if(cmd.lens==='today'||cmd.lens==='week') cmd.area='All'; cmdRender(true); }; });
+    var listSelect=v.querySelector('#cmd-list-select');
+    if(listSelect) listSelect.onchange=function(){cmd.area=listSelect.value;cmd.lens='all';cmdRender(true);};
+    var mobileAdd=v.querySelector('#cmd-lists-mobile');
+    if(mobileAdd) mobileAdd.onclick=function(){v.querySelector('#cmd-lists').click();};
     var fb=v.querySelector('#cmd-filter');
     if(fb) fb.onclick=function(){ cmd.filterOpen=!cmd.filterOpen; cmdRender(); };
     var rb=v.querySelector('#cmd-recs');
     if(rb) rb.onclick=function(){ cmd.showRecords=!cmd.showRecords; cmdRender(true); };
+    var ab=v.querySelector('#cmd-archived');
+    if(ab) ab.onclick=function(){cmd.showArchived=!cmd.showArchived;cmdRender(true);};
     var db=v.querySelector('#cmd-showdone');
     if(db) db.onclick=function(){ cmd.showDone=!cmd.showDone; cmdRender(true); };
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-chip'), function(b){ b.onclick=function(){ cmd.cat=b.getAttribute('data-cat'); cmdRender(true); }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-area[data-area]'), function(b){
-      b.onclick=function(){ cmd.area=b.getAttribute('data-area'); cmdRender(true); }; });
+      b.onclick=function(){ cmd.area=b.getAttribute('data-area'); cmd.lens='all'; cmdRender(true); }; });
 
     // ADD / RENAME A LIST. Renaming moves nothing: the rows are updated in place, so ids,
     // history, dates, waiting information and parent links all stay attached.
@@ -2855,7 +2860,7 @@
       var id=b.parentNode.getAttribute('data-id');
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
       // Confirm the save before changing the displayed status.
-      var ns=it.status==='done'?'open':'done';
+      var ns=it.status!=='open'?'open':'done';
       var forced=false;
       if(ns==='done' && it.completable===false){
         if(!await confirmBoardCompletion(it)) return;
@@ -2869,11 +2874,9 @@
         .then(function(r){ if(r.status===401){ toLogin(); throw new Error('Sign in to save.'); } return r.json(); })
         .then(function(d){
           if(!d||!d.ok) throw new Error((d&&d.error)||'Could not confirm the save.');
+          if(cmd.suggest>3) return cmdFetch().then(function(){cmdPaintBoard(); boardNotice(ns==='done'?'Marked complete.':'Reopened.');});
           cmd.items=d.items; cmd.dueToday=d.due_today; cmd.today=d.today;
-          cmdRender();
-          var card=document.querySelector('.card[data-panel="DUE TODAY"]');
-          if(card) materializeCard('daybank',d);
-          boardNotice(ns==='done'?'Marked complete.':'Reopened.');
+          cmdPaintBoard(); boardNotice(ns==='done'?'Marked complete.':'Reopened.');
         })
         .catch(function(why){
           b.disabled=false; b.removeAttribute('aria-busy');
@@ -2889,7 +2892,8 @@
       if (b.classList.contains('cmd-edrop')) {
         // REMOVE = archive (status 'dropped') — Brady can finally prune Ace's twins himself.
         var row = b.closest('.cmd-row'); var id = row && row.getAttribute('data-id'); if(!id) return;
-        b.textContent='REMOVING…'; b.disabled=true;
+        if(!confirm('Archive this item? It stays in history and can be restored from Options → Archived.')) return;
+        b.textContent='ARCHIVING…'; b.disabled=true;
         fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:'dropped'})})
           .then(boardJson)
           .then(function(d){ if(!d||!d.ok) throw 0; cmd.editing=null; cmd.draft=null; return cmdFetch().then(cmdRender); })
@@ -2908,7 +2912,7 @@
       if (!eSel || !sSel || !wIn) return;
       var bSel = row.querySelector('.cmd-ebucket');
       function sync(){
-        if (bSel) bSel.disabled = (eSel.value !== 'action');   // a record has no lane
+        if (bSel) bSel.disabled = false;   // a record has no lane
         // Status is no longer records-only: "Needs a decision" is a question about an
         // ACTION, and disabling it here is what forced the derived lane in the first place.
         sSel.disabled = false;
@@ -2944,6 +2948,19 @@
             boardNotice(boardWhy(e,'Could not change the day.')); });
       };
     });
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-addchild'), function(b){ b.onclick=function(){
+      var row=b.closest('.cmd-row'), id=row.getAttribute('data-id');
+      var text=prompt('New subtask (the parent stays open):', '');
+      if(!text || !text.trim()) return;
+      b.disabled=true;
+      fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({
+        text:text.trim(), category:row.querySelector('.cmd-ecat').value, parent_id:id
+      })}).then(boardJson).then(function(d){
+        if(!d || !d.ok) throw new Error((d&&d.error)||'Could not save the subtask.');
+        if(d.dup){ boardNotice('That subtask already exists.'); b.disabled=false; return; }
+        return cmdFetch().then(function(){ cmdRender(); boardNotice('Subtask added. Parent stays open.'); });
+      }).catch(function(e){ b.disabled=false; boardNotice(boardWhy(e,'Could not save the subtask.')); });
+    }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
       var row = b.closest('.cmd-row'); if (!row) return;
       var id = row.getAttribute('data-id');
@@ -2955,7 +2972,8 @@
         text: (ta.value || '').trim(),
         category: row.querySelector('.cmd-ecat').value,
         entry: row.querySelector('.cmd-eentry').value,
-        bucket: (isAction ? row.querySelector('.cmd-ebucket').value : ''),
+        bucket: row.querySelector('.cmd-ebucket').value,
+        expected_updated_at: row.getAttribute('data-version') || '',
         // SEND WHAT HE PICKED (2026-09-21). This rewrote every other action state to '' to
         // dodge the old server rule, which meant the one value that matters — READY, i.e. ''
         // — could never CLEAR a stored waiting/decide: the field read the same either way and
@@ -2964,7 +2982,7 @@
         state: stateVal,
         waiting_on: (stateVal === 'waiting'
                      ? (row.querySelector('.cmd-ewait').value || '').trim() : ''),
-        due: (row.querySelector('.cmd-edue').value || '').trim(),
+
         followup: (row.querySelector('.cmd-efup').value || '').trim(),
         next_step: (row.querySelector('.cmd-enext').value || '').trim(),
         tags: Array.prototype.map.call(row.querySelectorAll('.cmd-etag.on'),
@@ -2973,6 +2991,8 @@
         // "Ready" enough to retire the review flag without inventing a date for the row.
         reviewed: true
       };
+      var editedDue=(row.querySelector('.cmd-edue').value||'').trim();
+      if(editedDue !== (row.getAttribute('data-base-due')||'')) body.due=editedDue;
       if (!body.text) { ta.style.borderColor = '#ff6b6b'; ta.focus(); return; }   // blank = no-op server-side
       b.textContent = 'SAVING…'; b.disabled = true;
       // SAY WHY (2026-09-05). The server now REFUSES a status or category it can't apply
@@ -2983,7 +3003,14 @@
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify(body)})
         .then(boardJson)
         .then(function(d){
-          if (!d || !d.ok) { serverWhy = (d && d.error) || ''; throw 0; }
+          if (!d || !d.ok) {
+            serverWhy = (d && d.error) || '';
+            if(d && d.conflict) boardNotice(serverWhy, {label:'Load latest (discard this draft)',run:function(){
+              cmd.editing=null;cmd.draft=null;cmdRender();
+              cmdFetch().then(function(){cmd.editing=id;cmdRender();}).catch(function(){boardNotice('Could not reload the item.');});
+            }});
+            throw 0;
+          }
           cmd.editing = null; cmd.draft = null;
           return cmdFetch().then(cmdPaintBoard);
         })
@@ -3005,13 +3032,14 @@
       // input cleared, the board refetched, nothing appeared. Same idiom as the editor's
       // RETRY SAVE: hand the text back rather than eat it.
       var addPH = inp.placeholder;   // 'Add to <area>…' — restore the real one, not a guess
-      function addFailed(msg){ inp.value = t; inp.placeholder = msg; inp.focus();
+      function addFailed(msg, existing){ inp.value = t; inp.placeholder = msg; inp.focus();
+        boardNotice(msg, existing&&existing.id ? {label:'Open existing item',run:function(){cmdOpenItem(existing.id);}} : null);
         setTimeout(function(){ inp.placeholder = addPH; }, 4000); }
       fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat,bucket:addArea})})
         .then(boardJson)
         .then(function(d){
-          if (d && d.dup) { addFailed('Already on your board — nothing added'); return; }
-          if (!d || !d.ok) { addFailed((d && d.error) || 'Could not save that — try again'); return; }
+          if (d && d.dup) { addFailed(d.message||'Already on your board — nothing added',d.existing); return; }
+          if (!d || !d.ok) { addFailed((d && d.error) || 'Could not save that — try again', d&&d.existing); return; }
           return cmdFetch().then(cmdRender);
         }).catch(function(e){ addFailed(boardWhy(e, 'Could not save that — try again')); }); };
   }

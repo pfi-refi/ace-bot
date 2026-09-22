@@ -88,6 +88,8 @@ try:
 
     from fastapi import Body          # noqa: E402
     from ace2.backend.main import app as _app
+    # This fixture must not warm real integrations or start recurring model work.
+    _app.router.on_startup.clear()
 
     _demo_n = [0]
 

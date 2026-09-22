@@ -10,7 +10,7 @@ async function run({ok=true,reject=false,guard=false,confirm=true}={}) {
  const cmd={items:[original],dueToday:{deadlines:[{...original}]},today:'2026-09-13'};
  const next={items:[{...original,status:'done'}],due_today:{deadlines:[]},today:'2026-09-13',ok,error:ok?undefined:'Refused by server'};
  let posts=0,renders=0,notices=[];
- const ctx={cmd,v:{querySelectorAll:()=>[button]},API:'',headers:()=>({}),confirmBoardCompletion:async()=>confirm,document:{querySelector:()=>null},cmdRender(){renders++},boardNotice(t){notices.push(t)},toLogin(){},fetch:async(url,opts)=>{posts++;assert.equal(JSON.parse(opts.body).force_close,guard?true:undefined);if(reject)throw Error('Network unavailable');return {status:200,json:async()=>next}}};
+ const ctx={cmd,v:{querySelectorAll:()=>[button]},API:'',headers:()=>({}),confirmBoardCompletion:async()=>confirm,document:{querySelector:()=>null},cmdRender(){renders++},cmdPaintBoard(){renders++},boardNotice(t){notices.push(t)},toLogin(){},fetch:async(url,opts)=>{posts++;assert.equal(JSON.parse(opts.body).force_close,guard?true:undefined);if(reject)throw Error('Network unavailable');return {status:200,json:async()=>next}}};
  vm.runInNewContext(source.slice(start,end),ctx); button.onclick();
  assert.equal(original.status,'open','No unverified optimistic completion');
  await new Promise(r=>setImmediate(r));

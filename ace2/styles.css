@@ -1482,3 +1482,18 @@ body.panel-open #task-layer { z-index: 58; }
 .cmd-box[aria-busy=true]{opacity:.5;cursor:wait;}
 
 .board-confirm{width:min(440px,calc(100vw - 32px));max-height:80dvh;overflow:auto;background:#081713;color:#eafff5;border:1px solid #345648;border-radius:14px;padding:24px;font-family:var(--sans);}.board-confirm::backdrop{background:#000b}.board-confirm h2{font-size:19px;margin:0 0 16px}.board-confirm p{line-height:1.5;overflow-wrap:anywhere}.board-confirm-item{font-weight:600}.board-confirm-why{color:#aabfb5}.board-confirm>div{display:flex;gap:10px;flex-wrap:wrap}.board-confirm button{min-height:44px;padding:10px;border:1px solid #4a7861;border-radius:6px;background:#122b21;color:#eafff5;cursor:pointer}.board-confirm button:focus-visible{outline:2px solid #45ffa6;outline-offset:3px}
+
+/* Lists stay reachable on phones without a long, hidden horizontal filter strip. */
+.cmd-mobile-lists { display:none; }
+@media(max-width:560px) {
+  #command-view .cmd-areas { display:none; }
+  .cmd-mobile-lists { display:flex; align-items:center; gap:10px; padding:8px 14px 0; }
+  .cmd-mobile-lists label { font:12px var(--mono); color:#8fa4a0; }
+  .cmd-mobile-lists select { flex:1; min-width:0; padding:11px; border:1px solid #314c45; border-radius:8px; color:#e4f3ef; background:#101d19; font:14px var(--mono); }
+  .cmd-mobile-lists button { min-height:44px; min-width:44px; color:#45ffa6; background:#101d19; border:1px solid #314c45; border-radius:8px; }
+  #command-view .cmd-lens { flex-wrap:wrap; overflow:visible; -webkit-mask-image:none; mask-image:none; }
+  #command-view .cmd-lens button { flex:1 1 28%; padding:10px 7px; min-height:44px; }
+}
+
+.bv-notice-global { position:fixed; bottom:90px; left:50%; transform:translateX(-50%); width:min(90vw,560px); z-index:200; }
+.bv-notice button { display:block; margin-top:8px; padding:8px 12px; min-height:44px; color:#45ffa6; background:#101d19; border:1px solid #314c45; border-radius:8px; cursor:pointer; }
