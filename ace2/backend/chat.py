@@ -651,9 +651,51 @@ async def _context_read(name, awaitable, timeout=6.0):
                     (time.monotonic() - started) * 1000)
 
 
+# ── The entity registry: an INDEX of who exists, not their facts (2026-09-21) ──
+# Ace could recall SENTENCES about people but had no register OF people, so "what do I
+# know about Sienna" returned whichever prose shared words with the question. This line
+# tells him who exists and what each one's id is; `lookup_entity` fetches the actual
+# record, sourced and dated, only when a turn needs it. Deliberately no private facts
+# here: this string rides in every typed and every spoken turn, so anything in it is in
+# the prompt for every subject, including the ones the conversation has nothing to do
+# with.
+_REGISTRY_HEADER = (
+    "PEOPLE / ORGS / PROJECTS Ace has on file (ids for lookup_entity — this is an INDEX, "
+    "not the facts; call lookup_entity for dated records and provenance. Supplement "
+    "partial records with recent conversation and recall):")
+
+
+def _registry_lines(block: str) -> list:
+    """[] when there is nothing, so the block is OMITTED rather than rendered empty."""
+    block = (block or "").strip()
+    return ["", _REGISTRY_HEADER, block] if block else []
+
+
+async def _entity_registry_block(timeout: float = 1.5) -> str:
+    """The registry — bounded in characters by entity_context, in WALL CLOCK here.
+
+    Guarded end to end: a missing module, a cold pool, a slow query — every one of them
+    yields "" and the block is simply left out. THE EXISTING RECALL PATH REMAINS THE
+    FALLBACK and is not weakened by this: `memory_db._build_corpus` still reads the old
+    Drive monthly history, the shared Telegram window and the recovered pre-wipe archive,
+    and none of those are in the Postgres index this block summarises. An absent registry
+    costs a shortcut, never a memory.
+    """
+    try:
+        from . import entity_context
+        return await _context_read("entity_registry",
+                                   asyncio.to_thread(entity_context.registry_block),
+                                   timeout=timeout) or ""
+    except Exception:
+        return ""
+
+
 async def _live_context() -> tuple:
     """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
     + data bank concurrently."""
+    # Started here and awaited after the gather, so its 1.5s budget OVERLAPS the heavy
+    # fetches rather than being added to the turn.
+    _reg_task = asyncio.ensure_future(_entity_registry_block())
     memory, cal_all, bank, inbox, personal, wx, meta = await asyncio.gather(
         _context_read("memory", asyncio.to_thread(brain.read_memory)),
         _context_read("calendar", asyncio.to_thread(get_events_structured, 21, 7)),  # last week → next 3 weeks
@@ -695,6 +737,7 @@ async def _live_context() -> tuple:
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
+        *_registry_lines(await _reg_task),
         "",
         "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
         _recap_block(),
@@ -1262,6 +1305,17 @@ async def _refresh_ctx_inner() -> None:
         )
     except Exception as e:
         logger.warning("voice ctx refresh failed: %s", e)
+    # THE REGISTRY IS WARMED HERE, NOT ON THE CALL (2026-09-21). Voice reads _CTX, and the
+    # whole reason it does is that a per-turn fan-out is what makes ElevenLabs cut a live
+    # call. So the index of who exists is fetched on this background pass, bounded, and a
+    # failure keeps the last good value — never an exception, and never a wait on the
+    # turn's critical path.
+    try:
+        from . import entity_context
+        _CTX["registry"] = await asyncio.wait_for(
+            asyncio.to_thread(entity_context.registry_block), timeout=1.5) or ""
+    except Exception:
+        pass
     # Keep the "where we left off" recap warm + regenerate if stale — background, never blocking.
     try:
         asyncio.create_task(_refresh_recap())
@@ -3046,6 +3100,9 @@ async def _fast_context() -> str:
         "",
         "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
+        # Pre-warmed in _refresh_ctx_inner — read from cache here, never fetched on the
+        # turn. Absent or empty ⇒ the block is omitted entirely.
+        *_registry_lines(_CTX.get("registry") or ""),
         "",
         "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
         _recap_block(),

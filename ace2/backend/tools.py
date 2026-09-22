@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import brain, daybank, memory_db
+from . import db
 from . import ops
 from .integrations.calendar_api import (
     create_calendar_event,
@@ -763,9 +764,31 @@ TOOLS.append({
         "capture_id":{"type":"string"}, "question":{"type":"string"}}, "additionalProperties":False}
 })
 
+TOOLS.append({
+    "name": "lookup_entity",
+    "description": (
+        "Look up one person, organization or project Ace has on file, by name or by the "
+        "id shown in the registry (per_…, org_…, prj_…). Returns dated saved statements with "
+        "their sources and coverage limits, then history, then related people "
+        "and projects, then any board items linked to them — board status is read live from "
+        "the board, which is the only authority on task state. Disagreements between two "
+        "sources are shown as disagreements, not resolved. Use this before saying anything "
+        "specific about someone; supplement an incomplete record with recent conversation "
+        "and recall. Newer direct corrections outrank older saved claims. The registry "
+        "is an index of records, not proof that their contents are complete or current."),
+    "input_schema": {"type": "object", "properties": {
+        "name_or_id": {"type": "string"}}, "required": ["name_or_id"],
+        "additionalProperties": False}
+})
+
 NATIVE_READS = frozenset({
     "get_calendar_range", "read_gmail", "read_personal_gmail", "search_gmail",
     "search_personal_gmail", "search_drive", "recall", "read_own_code", "read_attachment",
+    # A READ, and it stays one. It is deliberately absent from ops.JOURNALLED: the journal
+    # exists to stop a WRITE happening twice, and giving a lookup a durable identity would
+    # mean the second identical question inside the retry window answered from a cached
+    # receipt instead of from the record.
+    "lookup_entity",
 })
 NATIVE_MUTATIONS = frozenset({
     "delete_calendar_event", "send_email", "set_privacy",
@@ -794,6 +817,7 @@ TOOL_LABELS = {
     "read_personal_gmail": "READING PERSONAL EMAIL",
     "read_gmail": "READING EMAIL",
     "recall": "SEARCHING MEMORY",
+    "lookup_entity": "LOOKING SOMEONE UP",
     "search_drive": "SEARCHING DRIVE",
     "save_memory": "SAVING TO MEMORY",
     "set_privacy": "PRIVACY",
@@ -1102,6 +1126,27 @@ def _do_capture_item(kind="note", text="", due=None, category=None, parent_id=No
     return ops.Outcome(ops.FAILED_BEFORE_DISPATCH, f"⚠️ Could not capture: {res}")
 
 
+def _update_verb(before_status: str, after_status: str) -> str:
+    """The word for what actually happened to this row, read off the transition.
+
+    "REOPENED" WAS A LIE ABOUT A NOUN (2026-09-21, live test). The verb used to come from the
+    `status` ARGUMENT, so every edit that passed status='open' — which is what an edit to an
+    already-open row does, harmlessly, to say "leave it open" — answered "◆ Reopened". Brady
+    renamed a task and was told it had been brought back from the dead. A transition is the
+    only thing that can name a change, because it is the only thing that knows there was one.
+    """
+    if (before_status or "") == (after_status or ""):
+        return "Updated"
+    if after_status == "done":
+        return "Completed"
+    if after_status == "dropped":
+        return "Archived"
+    if after_status == "open":
+        # done → open, and dropped → open: both bring a closed row back into play.
+        return "Reopened"
+    return "Updated"
+
+
 def _do_update_item(id="", match=None, status=None, text=None, category=None, due=None,
                     entry=None, state=None, waiting_on=None, next_step=None, followup=None,
                     **_):
@@ -1116,36 +1161,112 @@ def _do_update_item(id="", match=None, status=None, text=None, category=None, du
     # entry needs nothing: db.update_item only writes a recognised 'action'|'record'.
     state = state or None
     waiting_on = waiting_on or None
+    if not db.enabled():
+        # THE DRIVE FALLBACK CANNOT BE VERIFIED, SO IT DOES NOT CLAIM TO BE. There is no
+        # read-back there, only a read-modify-write of one JSON blob, and REPORTED is exactly
+        # what ops.py means by "the executor claimed it; nothing checked". Saying COMPLETED
+        # here to keep the two paths looking alike would put the false receipt back, on the
+        # degraded path, where it would be hardest to notice.
+        ok, res = daybank.update_item(id, status=status, text=text,
+                                      tags=([category] if category else None), due=due,
+                                      match=match, next_step=next_step, followup=followup,
+                                      closed_by="ace", entry=entry, state=state,
+                                      waiting_on=waiting_on)
+        if not ok:
+            return ops.Outcome(ops.FAILED_BEFORE_DISPATCH, f"⚠️ Could not update item: {res}")
+        return ops.Outcome(ops.REPORTED, f"◆ Saved to the offline store: {res} — Postgres is "
+                                         f"not available, so the saved row was not read back.")
+    ok, target = db._resolve_item_id(id, match)
+    if not ok:
+        # AMBIGUOUS / not-found comes back as guidance, not a dead end — the model can ask Brady
+        # or pick from the candidates and call again with the id.
+        return ops.Outcome(ops.FAILED_BEFORE_DISPATCH, f"⚠️ Could not update item: {target}")
     tags = None
     if category:
+        # Re-categorizing replaces the whole tag list, so everything that is NOT a column name
+        # has to be carried across or it is silently dropped (audit #7). Read off the resolved
+        # id — the resolver has already turned a `match` into one row, so there is no second,
+        # looser lookup here to disagree with the row the write lands on.
         _CATS = {"Money", "Bills", "Opportunities", "Goals", "Personal", "Deals", "Agents", "Admin", "Networking", "Business", "Tech"}
-        it = None
-        if id:
-            it = next((x for x in daybank.read_items(False) if x.get("id") == id), None)
-        elif match:   # resolve by match too, else re-categorizing wipes non-category tags (audit #7)
-            from . import db
-            cands = db.find_items(match, status="open")
-            if len(cands) == 1:
-                it = cands[0]
+        it = db.get_item(target)
         keep = [t for t in ((it.get("tags") if it else None) or []) if t not in _CATS]
         tags = [category] + keep
     # Ace's own hand. The Command panel stamps 'brady'; the split is what makes "who closed
     # this?" answerable at all (2026-09-05).
-    ok, res = daybank.update_item(id, status=status, text=text, tags=tags, due=due, match=match,
-                                  next_step=next_step, followup=followup,
-                                  closed_by="ace", entry=entry, state=state,
-                                  waiting_on=waiting_on)
-    if ok:
-        verb = {"done": "Completed", "open": "Reopened", "dropped": "Archived"}.get(status, "Updated")
-        moved = f" → [{category}]" if category else ""
-        return f"◆ {verb}{moved}: {res}"
-    # AMBIGUOUS / not-found comes back as guidance, not a dead end — the model can ask Brady
-    # or pick from the candidates and call again with the id.
-    return f"⚠️ Could not update item: {res}"
+    ok, detail = db.update_item_verified(target, status=status, text=text, tags=tags, due=due,
+                                         next_step=next_step, followup=followup,
+                                         closed_by="ace", entry=entry, state=state,
+                                         waiting_on=waiting_on)
+    rid = detail.get("id") or target
+    # The resolution happened up here, because preserving a row's other tags needs the id
+    # before the write. So `update_item_verified` only ever saw an id, and whether a `match`
+    # is what produced it is this function's own knowledge — worth recording, because "you
+    # described a row and I picked this one" is exactly the step a reader wants to audit.
+    if match and not (id or "").strip():
+        detail["match_used"] = True
+    if not detail.get("accepted"):
+        # The store's refusal, word for word. The completion guard, the AMBIGUOUS candidates,
+        # the unknown-state and unknown-area reasons are all written for the MODEL to act on,
+        # and paraphrasing any of them here would break the advice they carry.
+        return ops.Outcome(ops.FAILED_BEFORE_DISPATCH,
+                           f"⚠️ Could not update item: {detail.get('reason')}",
+                           detail=detail)
+    if not detail.get("read_back"):
+        # The write was accepted and then the row could not be read. That is genuinely not
+        # knowable from here, and REPORTED is the state that says so — never COMPLETED, and
+        # never FAILED either, because the change may well be sitting in the table.
+        return ops.Outcome(ops.REPORTED, (
+            f"◆ The board accepted a change to [{rid}], but the saved row could not be read "
+            f"back, so what it now says is not established. Check the board before repeating "
+            f"this."), record_id=rid, detail=detail)
+    if not detail.get("verified"):
+        return ops.Outcome(ops.REPORTED,
+                           f"The board accepted a write to [{rid}], but verification found "
+                           f"a mismatch. {detail.get('reason')}. Check the saved item before retrying.",
+                           record_id=rid, detail=detail)
+    changed = detail.get("changed") or {}
+    if not changed:
+        # The request is already satisfied, verified from storage; no new task change occurred.
+        return ops.Outcome(ops.COMPLETED, (
+            f"Already satisfied [{rid}]: the saved item has those values. Verified by reading "
+            f"it back; no task fields changed."), record_id=rid, detail=detail)
+    before, after = detail.get("before") or {}, detail.get("after") or {}
+    verb = _update_verb(before.get("status"), after.get("status"))
+    # status is spoken by the verb; naming it again as a field would say the same thing twice.
+    fields = [f for f in changed if f != "status"]
+    moved = f" ({', '.join(fields)})" if fields else ""
+    return ops.Outcome(ops.COMPLETED, f"◆ {verb} [{rid}]{moved}: {after.get('text')}",
+                       record_id=rid, detail=detail)
 
 
 def _do_recall(query, max_results=8, **_):
     return memory_db.recall(query, max_results)
+
+
+def _do_lookup_entity(name_or_id="", **_):
+    """Read one entity's dossier as text. Never a write, never a model call.
+
+    The renderer lives in entity_context (a different agent's file) and may not be present in
+    every checkout, so the import is lazy and its absence is answered honestly rather than
+    crashing the turn. An empty answer is also said out loud: "nothing on file" is a real,
+    useful reply, and the failure this whole release is about is a surface that reports
+    something it did not establish.
+    """
+    name_or_id = (name_or_id or "").strip()
+    if not name_or_id:
+        return "⚠️ Pass name_or_id — a person's name, or an id like per_ab12cd34ef56."
+    try:
+        from . import entity_context
+    except Exception:
+        return ("⚠️ The entity index is not available in this build, so there is nothing to "
+                "look up. Use recall instead, and do not guess.")
+    try:
+        out = (entity_context.lookup(name_or_id) or "").strip()
+    except Exception as e:
+        logger.warning("lookup_entity failed for %r: %s", name_or_id[:40], type(e).__name__)
+        return f"⚠️ Could not read the record for {name_or_id!r} ({type(e).__name__})."
+    return out or (f"Nothing on file under {name_or_id!r}. Say so rather than filling it in "
+                   f"from the conversation.")
 
 
 def _do_search_gmail(query, max_results=8, **_):
@@ -1185,6 +1306,7 @@ _DISPATCH = {
     "read_personal_gmail": _do_read_personal_gmail,
     "read_gmail": _do_read_gmail,
     "recall": _do_recall,
+    "lookup_entity": _do_lookup_entity,
     "search_drive": _do_search_drive,
     "save_memory": _do_save_memory,
     "capture_item": _do_capture_item,

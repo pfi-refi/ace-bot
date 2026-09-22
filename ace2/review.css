@@ -6,4 +6,59 @@
 #ace-review button:disabled { opacity:.55; cursor:wait; }
 #ace-review textarea { box-sizing:border-box; width:100%; color:#edfafa; background:#071013; padding:12px; font:inherit; }
 #ace-review strong,#ace-review label { display:block; }
-#ace-review small { color:#b0c9cd; }
+#ace-review small { color:#b0c9cd; display:block; margin:2px 0; }
+#ace-review { overflow:auto; overscroll-behavior:contain; }
+
+/* ══════════════════════ MEMORY REVIEW + SOURCE SEARCH (2026-09-21)
+   A PROPOSAL MUST NOT LOOK LIKE A RECORD. Everything in the queue is a suggestion that has
+   been deliberately NOT applied — graph seeds create no entity at all until someone here
+   presses Confirm — so proposals carry the amber edge and say so in words, and a decided
+   row changes colour the moment it is answered. Accepted links live in the graph's detail
+   panel and never look like this. */
+#ace-review .rv-head { font-weight:600; margin:4px 0 12px; }
+#ace-review .rv-jump { margin:0 0 4px; }
+#ace-review .rv-filters { display:flex; flex-wrap:wrap; gap:0; margin:4px 0 8px; }
+#ace-review .rv-filters button { margin:4px 8px 4px 0; font-size:14px; min-height:40px; }
+#ace-review .rv-filters button.on { color:#04120b; background:#45ffa6; border-color:#45ffa6;
+  font-weight:700; }
+
+#ace-review .rv-prop { border-left:4px solid #ffb020; background:#15120a; }
+#ace-review .rv-prop > small:first-child { color:#ffb020; letter-spacing:.06em; }
+#ace-review .rv-prop h3 { margin:6px 0; font-size:17px; overflow-wrap:anywhere; }
+#ace-review .rv-consequence { color:#d7c39a; font-size:14px; }
+#ace-review .rv-done { border-left:4px solid #45ffa6; background:#0a1712; }
+#ace-review .rv-closed { border-left:4px solid #5b6f72; background:#0b1214; opacity:.8; }
+#ace-review .rv-say:empty { display:none; }
+#ace-review .rv-say { margin:8px 0 0; font-size:14px; color:#cfe6e8; overflow-wrap:anywhere; }
+#ace-review .rv-picked { color:#b0c9cd; }
+#ace-review .rv-picked.on { color:#45ffa6; }
+#ace-review .rv-ctl select,#ace-review .rv-srcform select,
+#ace-review input[type=search] { box-sizing:border-box; margin-top:6px; min-height:44px;
+  padding:8px 10px; color:#edfafa; background:#071013; border:1px solid #668b8e;
+  border-radius:8px; font:inherit; max-width:100%; }
+#ace-review input[type=search] { width:100%; }
+#ace-review .rv-hits button,#ace-review .rv-ctl > div > button { font-size:14px;
+  min-height:40px; }
+#ace-review .rv-bar { display:flex; flex-wrap:wrap; }
+
+/* Source search: an excluded row is LISTED and counted, with its body deliberately
+   withheld — that is where a credential would be if one ever reached the corpus. It reads
+   as a stated reason, never as an empty box that looks broken. */
+#ace-review .rv-srcform { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;
+  margin:8px 0 12px; }
+#ace-review .rv-srcform label { flex:1 1 150px; font-size:13px; color:#b0c9cd; }
+#ace-review .rv-src { padding:12px 14px; }
+#ace-review .rv-src pre { margin:6px 0 0; font-size:14px; }
+#ace-review .rv-excluded { border-style:dashed; border-color:#7b6a3f; background:#14120c; }
+#ace-review .rv-withheld { margin:6px 0 0; font-size:14px; color:#d7c39a; font-style:italic; }
+#ace-review .rv-absent { border-left:4px solid #8f7bff; padding:10px 12px; margin:0 0 12px;
+  background:#0f0f1a; }
+#ace-review .rv-down { border-left:4px solid #ff6b6b; padding:10px 12px; margin:0 0 12px;
+  background:#1a0d0d; }
+
+@media (max-width: 560px) {
+  #ace-review { padding:16px; width:min(760px,94vw); max-height:88dvh; }
+  #ace-review article { padding:12px; }
+  #ace-review .rv-bar button { flex:1 1 100%; margin:6px 0 0; }
+  #ace-review .rv-srcform label { flex:1 1 100%; }
+}

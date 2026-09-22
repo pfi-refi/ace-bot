@@ -1,3 +1,19 @@
+# v2.1.0 — Organized, sourced memory and verified board receipts
+
+Memory now has stable people, organization and project records linked to original dated
+conversations, saved facts, profiles and board items. Use lookup_entity for a sourced record
+and recall to supplement it: coverage is partial, names may be ambiguous, and older saved
+claims are not proof of current state. New conversations are indexed in the background;
+periodic recovery catches missed updates. Existing originals and board status are preserved.
+The graph reads stored records without a paid redraw. Memory review and Find a source are
+available under More; uncertain proposals require review and do not silently merge people.
+Money still comes from the budget spreadsheet, and a plan is never a completed task.
+
+Board edits report success only after requested values and preserved fields match read-back;
+already-satisfied edits say so. Pop-up preferences are per device: All, Results, or Off.
+Required approvals stay visible. Dismissed old cards stay dismissed; history stays in Activity.
+These changes improve organization and verification, not perfect recall or human awareness.
+
 # v2.0.5 — Board saves and status reliability
 
 Waiting and Ready edits persist; current status overrides old wording. Empty optional tool arguments preserve existing state. Board failures are visible, draft owner text is retained, and Today refreshes consistently. No board migration or redesign.

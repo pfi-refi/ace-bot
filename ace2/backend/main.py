@@ -43,11 +43,12 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
+    Query,
     Request,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from .public_assets import PublicAssets
 from pydantic import BaseModel, StrictBool
 
@@ -69,7 +70,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.0.5"
+VERSION = "v2.1.0"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -404,6 +405,30 @@ async def publish_stage_event(event_type: str, payload: dict) -> int:
     for ws in dead:
         _stage_clients.discard(ws)
     return sent
+
+
+# Missed queue notifications need an actual scheduled recovery path.
+_entity_maintenance_task = None
+
+
+@app.on_event("startup")
+async def start_entity_maintenance():
+    global _entity_maintenance_task
+    from . import entity_maintenance
+    if _entity_maintenance_task is None or _entity_maintenance_task.done():
+        _entity_maintenance_task = asyncio.create_task(entity_maintenance.run())
+
+
+@app.on_event("shutdown")
+async def stop_entity_maintenance():
+    global _entity_maintenance_task
+    if _entity_maintenance_task is not None:
+        _entity_maintenance_task.cancel()
+        try:
+            await _entity_maintenance_task
+        except asyncio.CancelledError:
+            pass
+        _entity_maintenance_task = None
 
 
 @app.on_event("startup")
@@ -1533,9 +1558,30 @@ def _graph_shape(raw: dict) -> dict:
 
 
 @app.get("/graph", dependencies=[Depends(require_auth)])
-async def graph(refresh: int = 0):
-    """The knowledge graph: every person, deal and category Ace knows about, and how
-    they connect. Cached ~6h — pass ?refresh=1 to force a fresh extraction."""
+async def graph(source: str = "entities", refresh: int = 0, limit: int = 55):
+    """The knowledge graph.
+
+    DEFAULT `source=entities`: built from the STORED entity layer, with real `entity_id`s
+    as node ids, and ZERO model calls — ever, on any branch of that path. The old map was
+    a picture re-imagined by a paid run every day, so nothing in it could be corrected and
+    nothing in it was stable between redraws. This one is the record itself: the node you
+    tap is the row you can fix.
+
+    It starts SPARSE, because graph seeds import as review rows rather than entities (the
+    real cache types two organizations as people). An empty entity layer answers honestly
+    with its seed and review counts. It does NOT quietly fall back to a paid rebuild —
+    spending money to hide a thin answer is how the old map got trusted in the first
+    place.
+
+    `source=legacy` serves the OLD cached model-built graph verbatim, and rebuilds — a
+    paid call — ONLY on `source=legacy&refresh=1`. That path is preserved below, not
+    deleted.
+    """
+    if (source or "").strip().lower() != "legacy":
+        from . import entity_context
+        await _entity_layer_ok()
+        return await asyncio.to_thread(entity_context.graph_payload, limit)
+    # ── legacy: the model-built cache, preserved ────────────────────────────────
     # Always read the cache, even on ?refresh=1 — a failed rebuild falls back to it below.
     cached = await asyncio.to_thread(db.latest_summary, "graph_cache") if db.enabled() else {}
     if cached.get("text") and not refresh:
@@ -1546,7 +1592,20 @@ async def graph(refresh: int = 0):
         if age < GRAPH_TTL:
             out = _graph_json(cached["text"])
             if out.get("nodes"):
-                return {**out, "cached": True, "age_seconds": int(age)}
+                return {**out, "source": "legacy", "cached": True,
+                        "age_seconds": int(age)}
+
+    if not refresh:
+        # A STALE CACHE NO LONGER LICENSES A PAID REBUILD (2026-09-21). The rebuild below
+        # is a model call, and money must not be spent because a timestamp aged out while
+        # nobody was looking. `?source=legacy&refresh=1` is the only thing that buys one.
+        stale = _graph_json(cached.get("text") or "")
+        if stale.get("nodes"):
+            return {**stale, "source": "legacy", "cached": True, "stale": True}
+        return {"nodes": [], "edges": [], "source": "legacy", "cached": False,
+                "empty": True,
+                "hint": "no legacy map is cached; /graph?source=legacy&refresh=1 rebuilds "
+                        "it, which is a paid model call"}
 
     facts = await asyncio.to_thread(db.read_facts_full) if db.enabled() else []
     live = [f["text"] for f in facts if not f.get("invalid_at")][:220]
@@ -1555,7 +1614,8 @@ async def graph(refresh: int = 0):
     items = await asyncio.to_thread(daybank.read_items, True)
     board = [it for it in items if it.get("status") != "done"][:120]
     if not live and not board:
-        return {"nodes": [], "edges": [], "cached": False, "empty": True}
+        return {"nodes": [], "edges": [], "source": "legacy", "cached": False,
+                "empty": True}
 
     lines = "\n".join(f"- {t}" for t in live)
     tasks = "\n".join(
@@ -1603,14 +1663,14 @@ async def graph(refresh: int = 0):
         # serve the stale cache (flagged) instead of nothing.
         stale = _graph_json(cached.get("text") or "")
         if stale.get("nodes"):
-            return {**stale, "cached": True, "stale": True}
-        return {"nodes": [], "edges": [], "cached": False,
+            return {**stale, "source": "legacy", "cached": True, "stale": True}
+        return {"nodes": [], "edges": [], "source": "legacy", "cached": False,
                 "error": out.get("_err") or "extraction produced no usable nodes"}
     out["generated_at"] = datetime.now(db.EASTERN).isoformat()
     if db.enabled():
         await asyncio.to_thread(db.add_summary, json.dumps(out), "graph_cache")
     logger.info("graph: %d nodes / %d edges built", len(out["nodes"]), len(out["edges"]))
-    return {**out, "cached": False}
+    return {**out, "source": "legacy", "cached": False}
 
 
 @app.get("/bootstrap", dependencies=[Depends(require_auth)])
@@ -2880,6 +2940,208 @@ async def save_plan_draft(req: PlanDraftReq):
         raise HTTPException(400, "Enter a draft between 1 and 40,000 characters.")
     await asyncio.to_thread(review_store.append_plan, "user", req.text.strip())
     return {"ok": True, "state": "draft", "message": "Draft saved. No calendar events created."}
+
+# ── Entity memory: the durable, correctable record (2026-09-21) ────────────────
+#
+# WHY THESE EXIST. Ace's memory was four flat corpora plus a knowledge graph redrawn by a
+# paid model call every day. Nothing in that picture had an id, so nothing in it could be
+# corrected — yesterday's Sienna was not the same object as today's. These routes serve the
+# durable layer instead: every record has a stable id, every claim points at the original
+# row that said it, and every correction is audited and reversible.
+#
+# EVERY ROUTE HERE CARRIES `require_auth`, read-only ones included (Codex acceptance note
+# 11). There is no "it only reads" exception: a dossier is the most personal thing this
+# server can render, and an unauthenticated read of it is the same leak as an
+# unauthenticated write.
+#
+# SAFETY AT THE BOUNDARY (amendment F). `entity_id` and `source_id` are validated HERE as
+# well as in the store. A source identifier must never be able to carry a filesystem path
+# or a SQL identifier, and nothing a caller sends is ever interpolated into a statement —
+# table names included. The store's own validators are the single definition of the
+# shapes; this is the second gate in front of them.
+class EntityCorrectReq(BaseModel):
+    op: str = ""
+    args: dict = {}
+    reason: str = ""
+
+
+class ReviewActionReq(BaseModel):
+    action: str = ""
+    args: dict = {}
+    reason: str = ""
+
+
+async def _entity_layer_ok():
+    """503 when the index could not be READ. An outage is not an empty memory.
+
+    Every store function under these routes is best-effort by design — it logs and returns
+    a safe default rather than raising into a turn, which is right for a prompt and wrong
+    for an answer. Without this probe a database that never replied would render as "0
+    records", "0 unresolved", "nothing on the map": four confident statements about
+    something nobody managed to look at. Silence has to read as silence.
+    """
+    from . import entity_context
+    state = await asyncio.to_thread(entity_context.layer_state)
+    if state == entity_context.STATE_UNAVAILABLE:
+        raise HTTPException(503, "The memory index could not be reached. This is NOT an "
+                                 "empty result — nothing is being claimed about what is "
+                                 "or is not on file.")
+    return state
+
+
+_ABSENT_NOTE = ("The entity index has not been built yet (run ops.entity_backfill "
+                "--apply). An empty answer here means NOT INDEXED, not 'nothing exists' "
+                "— recall still searches the original records.")
+
+
+def _entity_card(r: dict) -> dict:
+    """The list shape. Deliberately narrow: names, ids, counts and one QUOTED current
+    statement — never a synthesis, and never the whole record."""
+    return {"entity_id": r.get("entity_id"), "type": r.get("type"),
+            "display_name": r.get("display_name"), "aliases": r.get("aliases") or [],
+            "review_status": r.get("review_status"),
+            "confidence": r.get("confidence", 0), "source_count": r.get("source_count", 0),
+            "last_seen": r.get("last_seen"), "summary": r.get("summary") or ""}
+
+
+@app.get("/entities", dependencies=[Depends(require_auth)])
+async def entities_search(q: str = "", type: str = "", limit: int = 50, offset: int = 0):
+    """Search the register. This is what makes the graph's 55-node cap acceptable: what
+    the picture leaves out is one query away, and `total` tells the truth about how much
+    the page is not showing."""
+    from . import entities as _ent, entity_context
+    state = await _entity_layer_ok()
+    limit = max(1, min(int(limit or 50), 200))
+    offset = max(0, int(offset or 0))
+    kind = type if type in _ent.TYPES else None
+    rows, total = await asyncio.to_thread(_ent.find_entities, q, kind, limit, offset)
+    out = [_entity_card(r) for r in rows]
+    res = {"entities": out, "total": int(total), "returned": len(out),
+           "truncated": bool(total > offset + len(out)), "index_state": state}
+    if state == entity_context.STATE_ABSENT:
+        res["notes"] = [_ABSENT_NOTE]
+    return res
+
+
+@app.get("/entities/counts", dependencies=[Depends(require_auth)])
+async def entities_counts():
+    """The honest headline, unresolved included. "Fully organized" is a claim this layer
+    is structurally unable to make, so the number that matters is what is NOT settled."""
+    from . import entities as _ent, entity_context
+    state = await _entity_layer_ok()
+    c = await asyncio.to_thread(_ent.counts)
+    c["index_state"] = state
+    reviews = await asyncio.to_thread(entity_context.review_summary, "open")
+    c["unresolved"] = _ent.unresolved_total(c)
+    c["review_by_kind"] = reviews.get("by_kind") or {}
+    c["seeds_pending"] = (reviews.get("by_kind") or {}).get("graph_seed", 0)
+    c["notes"] = [_ent.INDEX_NOTE,
+                  "%d source(s) remain unresolved and are in the review queue."
+                  % c["unresolved"]]
+    if state == entity_context.STATE_ABSENT:
+        c["notes"].append(_ABSENT_NOTE)
+    return c
+
+
+@app.get("/entities/review", dependencies=[Depends(require_auth)])
+async def entities_review(limit: int = 50, kind: str = "", state: str = "open"):
+    """The review queue, openable.
+
+    A count on a header that says "118 unresolved" with no way to reach the rows is not an
+    answer — it is a number shaped like one. Graph seeds in particular create NO entity by
+    design, so before this route their review rows had no entrypoint at all.
+    """
+    from . import entities as _ent, entity_context
+    index_state = await _entity_layer_ok()      # `state` here is the REVIEW state
+    limit = max(1, min(int(limit or 50), 500))
+    k = kind if kind in _ent.REVIEW_KINDS else None
+    rows = await asyncio.to_thread(_ent.review_queue, limit, k, (state or "open"))
+    summary = await asyncio.to_thread(entity_context.review_summary, (state or "open"))
+    total = (summary.get("by_kind") or {}).get(k) if k else summary.get("total", 0)
+    return {"reviews": rows, "returned": len(rows), "total": int(total or 0),
+            "counts": summary, "state": state or "open", "kind": k,
+            "index_state": index_state,
+            "notes": [_ent.INDEX_NOTE,
+                      "These are PROPOSALS. Nothing here has been accepted, and "
+                      "confirming one is the only way a graph seed becomes a record."]
+            + ([_ABSENT_NOTE] if index_state == entity_context.STATE_ABSENT else [])}
+
+
+@app.post("/entities/review/{review_id}", dependencies=[Depends(require_auth)])
+async def entities_review_decide(review_id: str, req: ReviewActionReq):
+    """Confirm / reject / dismiss one proposal, audited, in one transaction.
+
+    Confirming a `graph_seed` is the ONLY way a seed becomes an entity or a relation, and
+    the audit row records the actor and the reason. Rejecting writes a permanent
+    tombstone: the row stays, closed, and a backfill replay re-inserts with ON CONFLICT DO
+    NOTHING, so a decision Brady made cannot be undone by re-running the migration.
+    """
+    from . import entity_context
+    res = await asyncio.to_thread(entity_context.apply_review_action, review_id,
+                                  req.action, req.args, req.reason, "user")
+    if not res.get("ok"):
+        return JSONResponse(status_code=int(res.pop("status", 400) or 400), content=res)
+    res.pop("status", None)
+    return res
+
+
+@app.get("/entities/{entity_id}", dependencies=[Depends(require_auth)])
+async def entity_detail(entity_id: str):
+    """One record, exactly as `entities.dossier()` builds it.
+
+    `items[].status` and `items[].text` are read LIVE from the board on every call and are
+    never stored in this layer: a cached status is a status that will eventually be wrong,
+    and being confidently wrong about whether something is done is the failure this whole
+    release is about.
+    """
+    from . import entities as _ent
+    if not _ent.valid_entity_id(entity_id):
+        raise HTTPException(400, "Not an entity id (expected per_/org_/prj_ + 12 hex).")
+    await _entity_layer_ok()
+    dos = await asyncio.to_thread(_ent.dossier, entity_id)
+    if not dos or not dos.get("entity"):
+        raise HTTPException(404, "No record with that id.")
+    return dos
+
+
+@app.post("/entities/{entity_id}/correct", dependencies=[Depends(require_auth)])
+async def entity_correct(entity_id: str, req: EntityCorrectReq):
+    """A governed, audited, NON-DESTRUCTIVE correction.
+
+    `remove_alias`, `unlink` and `reject` set a status or a `retracted_at`; they never
+    DELETE, and nothing here writes to `facts`, `turns`, `daybank_items`, `summaries` or
+    the profile. `merge` flags the loser and keeps every row. Every op writes
+    `ace_entity_audit`; an unknown op is a 400 with an accurate reason and nothing
+    written; and a refusal rolls its transaction back, so a failed call leaves no trace
+    beyond the log.
+    """
+    from . import entity_context
+    res = await asyncio.to_thread(entity_context.apply_correction, entity_id, req.op,
+                                  req.args, req.reason, "user")
+    if not res.get("ok"):
+        return JSONResponse(status_code=int(res.pop("status", 400) or 400), content=res)
+    res.pop("status", None)
+    return res
+
+
+@app.get("/sources/search", dependencies=[Depends(require_auth)])
+async def sources_search(q: str = "", status: str = "", corpus: str = "",
+                         source_class: str = Query("", alias="class"),
+                         limit: int = 50, offset: int = 0):
+    """Search every indexed source — unassigned and ambiguous and excluded ones included.
+
+    `/entities?q=` searches ENTITIES, and a source that matched nothing has none. This is
+    the route that makes "no source disappears" checkable rather than merely stated.
+    Excerpts are read LIVE from the original table, wrapped as quoted data and redacted;
+    an `internal_metadata` (settings / telemetry) source is listed and counted but its
+    body is never rendered — that is where a credential would live if one ever leaked
+    into the corpus.
+    """
+    from . import entity_context
+    await _entity_layer_ok()
+    return await asyncio.to_thread(entity_context.search_sources, q, status, corpus,
+                                   source_class, limit, offset)
+
 
 # ── Static frontend (mounted last so API routes win) ────────────────────────────
 @app.get("/")

@@ -11,7 +11,17 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   const p = await b.newPage({ viewport: { width: 1440, height: 1000 } });
   const errs = []; p.on('pageerror', e => errs.push(e.message));
   await p.goto(URL, { waitUntil: 'domcontentloaded' });
-  await p.evaluate(() => localStorage.setItem('ace2_token', 'dev'));
+  await p.evaluate(() => {
+    localStorage.setItem('ace2_token', 'dev');
+    // OPT IN TO PROGRESS POPUPS (2026-09-21). The notification preference shipped with
+    // "Results only" as its default, so a queued/working card deliberately no longer pops —
+    // only a real completed/failed/needs-approval result does. Every assertion in this file
+    // is about the PROGRESS card itself (its state word, its Stop button, its live
+    // transitions), so the file has to ask for the mode that shows them. Without this line
+    // the suite would be testing the default's silence and calling it a broken card.
+    // tests/notification_cards_check.cjs is what covers the default and Off.
+    localStorage.setItem('ace.notify.mode', 'all');
+  });
   await p.reload({ waitUntil: 'networkidle' });
 
   const raise = (kind) => p.evaluate(k => fetch('/demo/task', {
