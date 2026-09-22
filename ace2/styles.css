@@ -907,6 +907,10 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
   color: var(--text-dim); font-size: 14px; cursor: pointer;
   transition: color .16s, border-color .16s, transform .12s; }
 .gr-ic:hover { color: var(--aurora); border-color: var(--aurora-40); }
+/* The review flag wears its count, so the number and the way into it are one control. */
+.gr-ic-w { width: auto; min-width: 32px; padding: 0 9px; font-family: var(--mono);
+  font-size: 11px; letter-spacing: .04em; color: #ffb020; border-color: rgba(255,176,32,.3); }
+.gr-ic-w:hover { color: #ffb020; border-color: rgba(255,176,32,.6); }
 .gr-ic:active { transform: scale(.92); }
 
 .gr-legend { position: absolute; left: 16px; bottom: calc(14px + env(safe-area-inset-bottom));
@@ -951,12 +955,83 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
   text-transform: uppercase; color: var(--text-faint); }
 .gr-none { padding: 16px 14px; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
 
+/* ENTITY DETAIL (2026-09-21). The same panel, extended downward: what the record says now,
+   what it used to say, who it is wired to, what is on the board, and what is only PROPOSED.
+   The last of those carries its own colour on purpose — a suggestion from the review queue
+   must never look like an accepted link. One scroller for the whole body so a long dossier
+   cannot push the close button off a phone screen. */
+/* flex:1 1 auto with min-height:0 is what actually makes this scroll: without the zero
+   minimum a flex item refuses to shrink below its content, so a long dossier was simply
+   clipped by the panel and the rest of it could not be reached. */
+.gr-dbody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 2px 0 8px; }
+.gr-dbody::-webkit-scrollbar { width: 5px; }
+.gr-dbody::-webkit-scrollbar-thumb { background: var(--aurora-25); border-radius: 6px; }
+.gr-dbody .gr-dl { overflow-y: visible; }
+.gr-sh { padding: 10px 12px 4px; font-family: var(--mono); font-size: 9px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--text-faint); }
+.gr-sh-prop { color: #ffb020; }
+.gr-fact { padding: 6px 12px 8px; border-bottom: 1px solid rgba(120,200,170,.08); }
+.gr-fact.old { opacity: .72; }
+.gr-fact.clash { border-left: 2px solid #ffb020; }
+.gr-fv { font-size: 12.5px; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
+.gr-fv b { font-weight: 600; color: var(--aurora); text-transform: capitalize; }
+.gr-fm { margin-top: 3px; font-family: var(--mono); font-size: 9px; letter-spacing: .05em;
+  color: var(--text-faint); overflow-wrap: anywhere; }
+.gr-fp { opacity: .8; }
+.gr-clash { margin-top: 4px; font-size: 11px; color: #ffb020; }
+.gr-prop { color: #ffb020; text-transform: uppercase; font-size: 9px; letter-spacing: .1em; }
+.gr-li.gr-proposed { border-color: rgba(255,176,32,.35); }
+.gr-hist { padding: 2px 12px 6px; }
+.gr-hist > summary { cursor: pointer; font-family: var(--mono); font-size: 9px;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); padding: 8px 0; }
+.gr-hist .gr-fact { padding-left: 0; padding-right: 0; }
+.gr-item { padding: 6px 12px; font-size: 12.5px; color: var(--text-dim); overflow-wrap: anywhere; }
+.gr-st { font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; background: rgba(120,200,170,.12); color: var(--text-faint); }
+.gr-st-done { color: #45ffa6; background: rgba(69,255,166,.14); }
+.gr-sug { padding: 8px 12px; border-left: 2px solid rgba(255,176,32,.5);
+  background: rgba(255,176,32,.05); }
+.gr-sugt { font-size: 12px; line-height: 1.45; color: var(--text-dim); overflow-wrap: anywhere; }
+.gr-sugb { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.gr-ok, .gr-nope { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 7px 10px; min-height: 32px; border-radius: 7px;
+  cursor: pointer; border: 1px solid rgba(120,200,170,.24); background: transparent;
+  color: var(--text-dim); }
+.gr-ok { color: #04120b; background: #45ffa6; border-color: #45ffa6; font-weight: 700; }
+.gr-ok:disabled, .gr-nope:disabled { opacity: .5; }
+.gr-sugm { font-size: 11px; color: var(--text-faint); }
+.gr-dnote { padding: 6px 12px; font-size: 11px; line-height: 1.45; color: var(--text-faint); }
+
+/* SEARCH — what makes the 55-node drawing cap acceptable: every record stays one keystroke
+   away even when the picture leaves it out. */
+.gr-q { flex: 0 1 200px; min-width: 0; pointer-events: auto; font-family: var(--sans);
+  font-size: 12.5px; padding: 7px 10px; border-radius: 9px; color: var(--text);
+  border: 1px solid rgba(120,200,170,.18); background: rgba(255,255,255,.03); }
+.gr-q::placeholder { color: var(--text-faint); }
+.gr-q:focus { outline: none; border-color: var(--aurora-40); }
+.gr-res { position: absolute; right: 14px; top: 62px; width: min(320px, 60vw); display: none;
+  z-index: 2; max-height: 44vh; overflow-y: auto; border-radius: 13px;
+  border: 1px solid transparent; padding: 5px;
+  background: var(--panel-fill) padding-box, var(--panel-edge) border-box;
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--panel-shadow); }
+.gr-res.on { display: block; }
+
 @media (max-width: 760px) {
   .gr-ttl { font-size: 10px; letter-spacing: .16em; }
-  .gr-meta { display: none; }
+  /* THE COUNTS STAY ON THE PHONE (2026-09-21). They used to be hidden here, which left the
+     one screen Brady actually uses with no idea how much of the map it was showing. The
+     header wraps instead: title and buttons on the first line, search and the honest counts
+     underneath. */
+  .gr-hd { flex-wrap: wrap; row-gap: 7px; }
+  .gr-meta { order: 3; flex: 1 0 100%; white-space: normal; line-height: 1.45; }
+  .gr-q { order: 2; flex: 1 0 100%; min-height: 40px; }
+  .gr-res { left: 10px; right: 10px; width: auto; top: 118px; }
   .gr-legend { gap: 10px; font-size: 8.5px; bottom: calc(10px + env(safe-area-inset-bottom)); }
   .gr-detail { right: 10px; left: 10px; width: auto; top: auto;
     bottom: calc(38px + env(safe-area-inset-bottom)); max-height: 46vh; }
+  .gr-ok, .gr-nope { min-height: 44px; }
 }
 
 /* Discreet-mode toggle active state (2026-08-11) */
@@ -965,7 +1040,11 @@ body::after { animation: auroraBreath 9s ease-in-out infinite alternate,
 body.mode-chat #discreet-btn { display: none; }
 
 /* Grouped tools float above the dock without adding eleven dashboard buttons. */
-#quick-more { position: fixed; z-index: 65; width: min(420px, calc(100vw - 24px));
+/* ABOVE THE CARD LAYER (2026-09-21). At 65 against #task-layer's 70 a task card sat on top
+   of this drawer and ate the taps — the same fault as the phone board, found by the
+   notification check while trying to reach the new Notifications setting. A menu Brady has
+   deliberately summoned outranks a card that arrived on its own. */
+#quick-more { position: fixed; z-index: 75; width: min(420px, calc(100vw - 24px));
   overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box;
   border: 1px solid rgba(69,255,166,.25); border-radius: 14px;
   background: #091318; box-shadow: 0 18px 60px rgba(0,0,0,.6); padding: 12px;
@@ -984,6 +1063,15 @@ body.mode-chat #discreet-btn { display: none; }
 #quick-more button:focus-visible { outline: 2px solid var(--aurora); outline-offset: 2px; }
 .qa.qa-more.active { color: var(--aurora); border-color: rgba(69,255,166,.4); }
 @media (max-width: 360px) { .more-groups { grid-template-columns: 1fr; } }
+
+/* NOTIFICATIONS (2026-09-21) — three segments in the tools drawer, borrowing the board's
+   existing .cmd-tog pill so this is a setting in the app's own language, not a new design. */
+.notify-ctl { display: flex; flex-direction: column; gap: 6px; }
+.notify-lbl { font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-faint); }
+.notify-segs { display: flex; flex-wrap: wrap; gap: 6px; }
+.notify-segs .cmd-tog { flex: 1 1 auto; min-height: 44px; }
+.notify-hint { font-size: 11px; line-height: 1.4; color: var(--text-faint); }
 
 /* ================================================================== COOL MODE (2026-09-01)
    Brady: "my laptop gets sooooo hot in like 2 minutes."
@@ -1251,8 +1339,31 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
    on a phone. It must never cover the mic, the composer, or the board's own controls —
    which is why the phone layout sits ABOVE the input bar rather than over it. */
 #task-layer { position: fixed; z-index: 70; display: flex; flex-direction: column; gap: 8px;
-  top: 64px; right: 16px; width: min(340px, calc(100vw - 32px)); pointer-events: none; }
+  top: 64px; right: 16px; width: min(340px, calc(100vw - 32px)); pointer-events: none;
+  /* BOUNDED, SO THE STACK CANNOT WALK OFF THE SCREEN (2026-09-21). Three results plus any
+     number of approvals is taller than a phone's free band, and the layer is anchored at one
+     edge — so the overflow left the far end, pill included, at a negative coordinate: drawn,
+     "visible" to the DOM, and impossible to touch. It scrolls now instead of escaping. */
+  max-height: calc(100dvh - 88px); overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; }
 #task-layer > * { pointer-events: auto; }
+
+/* NEVER OVER THE BOARD'S OWN CONTROLS (2026-09-21). A live phone-sized run could not press
+   the Command Center's Edit pencil: #task-layer sat at 70 against #command-view's 60, and on
+   a phone it is bottom-anchored right across the rows, so the card swallowed the tap. While a
+   full-screen panel is open the layer drops BELOW it rather than being hidden — a running
+   task is still there the moment the panel closes, and nothing it draws can take a press
+   meant for the board. app.js sets body.panel-open from the real display state of the two
+   panels, so this cannot drift out of step with them. */
+body.panel-open #task-layer { z-index: 58; }
+
+/* The overflow pill: three cards is the cap, the rest collapse into one tap that opens the
+   Activity list they were always kept in. */
+.task-more { border-radius: 999px; padding: 8px 14px; cursor: pointer; align-self: flex-end;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: #a9bcb7; background: rgba(6,14,18,.92); border: 1px solid rgba(140,160,175,.24); }
+.task-more:hover { color: #eef7f3; border-color: rgba(69,255,166,.4); }
+@media (max-width: 560px) { .task-more { min-height: 44px; align-self: stretch; } }
 
 .task-card { border-radius: 12px; padding: 10px 12px; backdrop-filter: blur(10px);
   background: rgba(6,14,18,.92); border: 1px solid rgba(140,160,175,.24);
@@ -1314,7 +1425,16 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
      The fallback only applies before the first measurement. */
   #task-layer { top: auto;
     bottom: calc(env(safe-area-inset-bottom, 0px) + var(--task-safe-bottom, 348px));
-    left: 12px; right: 12px; width: auto; flex-direction: column-reverse; }
+    left: 12px; right: 12px; width: auto; flex-direction: column-reverse;
+    /* The band between the top of the screen and the controls this layer parks above. Taller
+       than that and the older cards scroll; nothing is drawn above the viewport. */
+    max-height: calc(100dvh - env(safe-area-inset-bottom, 0px)
+                     - var(--task-safe-bottom, 348px) - 12px); }
+  /* AT THE ANCHORED EDGE, ALWAYS. column-reverse fills upward from the bottom, so the last
+     child is the highest one — and the overflow pill, being last, was the first thing pushed
+     off the top of a 390x844 screen. Ordering it first pins it to the bottom of the stack,
+     where the layer is anchored and something is always on screen. */
+  .task-more { order: -1; }
   .task-card { font-size: 13.5px; padding: 12px 13px; }
   .tc-go, .tc-no { min-height: 44px; padding: 10px 14px; }
   .tc-x { min-width: 44px; min-height: 44px; }
@@ -1354,3 +1474,11 @@ body.tab-hidden *::after { animation-play-state: paused !important; }
   .card, .card-body, .card-head, .db-item, .db-meta, .cmd-row {
     overflow-wrap: anywhere; word-break: break-word; }
 }
+
+/* Consistent, keyboard-accessible task controls on the board and pushed Today cards. */
+.cmd-box,.db-box{width:44px;height:44px;min-width:44px;min-height:44px;padding:0;background:transparent;}
+.cmd-pencil,.db-edit{width:44px;height:44px;min-width:44px;min-height:44px;flex:none;border-radius:var(--r-ctl);border:1px solid rgba(120,200,170,.3);background:transparent;color:#9fb3aa;cursor:pointer;}
+.cmd-box:focus-visible,.db-box:focus-visible,.cmd-pencil:focus-visible,.db-edit:focus-visible{outline:2px solid var(--aurora);outline-offset:2px;}
+.cmd-box[aria-busy=true]{opacity:.5;cursor:wait;}
+
+.board-confirm{width:min(440px,calc(100vw - 32px));max-height:80dvh;overflow:auto;background:#081713;color:#eafff5;border:1px solid #345648;border-radius:14px;padding:24px;font-family:var(--sans);}.board-confirm::backdrop{background:#000b}.board-confirm h2{font-size:19px;margin:0 0 16px}.board-confirm p{line-height:1.5;overflow-wrap:anywhere}.board-confirm-item{font-weight:600}.board-confirm-why{color:#aabfb5}.board-confirm>div{display:flex;gap:10px;flex-wrap:wrap}.board-confirm button{min-height:44px;padding:10px;border:1px solid #4a7861;border-radius:6px;background:#122b21;color:#eafff5;cursor:pointer}.board-confirm button:focus-visible{outline:2px solid #45ffa6;outline-offset:3px}

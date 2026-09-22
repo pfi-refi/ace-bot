@@ -657,13 +657,143 @@
      Replaces the old build_on_screen behaviour, which opened the chat panel and ran the
      work as a typed turn — and which dropped the request entirely if the page was hidden.
      (2026-09-09) */
-  var taskCards = {};        // task_id → { el, timer, state }
+  var taskCards = {};        // task_id → { el, timer, state, key, at }
   var TASK_LABELS = { queued: 'Queued', working: 'Working', needs_approval: 'Needs approval',
                       completed: 'Done', failed: "Didn't work", cancelled: 'Cancelled' };
 
+  /* ═══════════════════════════════════════════ WHICH CARDS POP, AND WHEN (2026-09-21)
+     A phone-sized live run opened the Command Center and could not press Edit: months-old
+     FAILED deep-dive cards were sitting on top of the board, and they came BACK every time
+     the socket reconnected or the tab was restored. Two separate faults, repaired together.
+
+     THE FIRST IS MEMORY. Dismissal lived only in the in-memory taskCards map, so a reconnect
+     re-read /actions and re-rendered every failed row it found there. Dismissal is now
+     recorded per task_id@version on THIS DEVICE. A popup is a property of the screen you are
+     looking at, not of the account: the phone and the laptop want different answers, and a
+     per-device key needs no server state, no migration and no new auth surface. The server's
+     Activity list is untouched and remains the record of what happened.
+
+     THE SECOND IS AGE. A card that settled weeks ago is history, not news, so a settled card
+     may only surface from a reconnect or a visibility restore while it is unseen, undismissed
+     AND less than RECENT_MS old.
+
+     Nothing in this section ever starts, retries or restarts work. Dismissing a card and
+     changing the preference are both decisions about a screen; neither issues a write. */
+  var NOTIFY_MODE_KEY = 'ace.notify.mode';          // 'all' | 'results' (default) | 'off'
+  var NOTIFY_SEEN_KEY = 'ace.notify.seen';          // { 'task_id@version': epoch_ms }
+  var NOTIFY_DISMISSED_KEY = 'ace.notify.dismissed';
+  var NOTIFY_RECENT_MS = 30 * 60 * 1000;            // older than this and it is history
+  var NOTIFY_KEEP = 200, NOTIFY_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+  var NOTIFY_MAX = 3;                               // visible non-approval cards
+  var TERMINAL_STATES = { completed: 1, failed: 1, cancelled: 1 };
+  // Private browsing and a full quota both THROW on write. A device that cannot remember is
+  // still allowed to use the app, so every access falls back to this in-memory twin rather
+  // than letting a storage error reach a render.
+  var notifyMem = {};
+
+  function notifyMap(key) {
+    var raw = null;
+    try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
+    if (raw) { try { var m = JSON.parse(raw); if (m && typeof m === 'object') return m; } catch (e) {} }
+    return notifyMem[key] || (notifyMem[key] = {});
+  }
+  function notifySave(key, map) {
+    // Pruned on every write, so a year of task ids cannot grow without bound on a phone.
+    var now = Date.now();
+    Object.keys(map).forEach(function (k) { if (now - (map[k] || 0) > NOTIFY_KEEP_MS) delete map[k]; });
+    Object.keys(map).sort(function (a, b) { return (map[b] || 0) - (map[a] || 0); })
+      .slice(NOTIFY_KEEP).forEach(function (k) { delete map[k]; });
+    notifyMem[key] = map;
+    try { localStorage.setItem(key, JSON.stringify(map)); } catch (e) {}
+  }
+  function notifyRemember(key, id) { var m = notifyMap(key); m[id] = Date.now(); notifySave(key, m); }
+  function notifyKnows(key, id) { return !!notifyMap(key)[id]; }
+
+  function notifyMode() {
+    var m = null;
+    try { m = localStorage.getItem(NOTIFY_MODE_KEY); } catch (e) {}
+    if (!m) m = notifyMem[NOTIFY_MODE_KEY];
+    return (m === 'all' || m === 'off') ? m : 'results';
+  }
+  function setNotifyMode(m) {
+    if (m !== 'all' && m !== 'off') m = 'results';
+    notifyMem[NOTIFY_MODE_KEY] = m;
+    try { localStorage.setItem(NOTIFY_MODE_KEY, m); } catch (e) {}
+    paintNotifyMode();
+    Object.keys(taskCards).forEach(function (id) {
+      var s = taskCards[id].state;
+      if (s !== 'needs_approval' && (m === 'off' || (m === 'results' && !TERMINAL_STATES[s]))) {
+        dropTaskCard(id);
+      }
+    });
+    if (m === 'off') { taskOverflow = 0; paintTaskOverflow(); }
+    // DELIBERATELY NO FETCH AND NO RE-RENDER OF PAST WORK. Changing what you want to SEE must
+    // never touch what is RUNNING, and must never re-offer a result that has already gone by.
+  }
+  function paintNotifyMode() {
+    var m = notifyMode();
+    Array.prototype.forEach.call(document.querySelectorAll('[data-notify]'), function (b) {
+      var on = b.getAttribute('data-notify') === m;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+  }
+  (function () {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-notify]'), function (b) {
+      b.addEventListener('click', function () { setNotifyMode(b.getAttribute('data-notify')); });
+    });
+    paintNotifyMode();
+  })();
+
+  // The VERSION is what makes "I have already seen this" specific. A genuinely new failure
+  // settles at a new time, so it is a new key and is allowed to surface once; the old one
+  // never returns. A card with no timestamp at all has no version we can trust.
+  function taskVersion(card) {
+    return String((card && (card.settled_at || card.updated_at || card.created_at)) || '');
+  }
+  function taskKey(card) { return (card && card.task_id) + '@' + taskVersion(card); }
+  function taskFresh(card) {
+    var t = Date.parse(taskVersion(card));
+    if (isNaN(t)) return false;        // undated: treat as history, never as news
+    return (Date.now() - t) < NOTIFY_RECENT_MS;
+  }
+
+  /* THE ONE PLACE that decides whether a card may appear. `fromSync` marks the reconnect and
+     visibility-restore path — the only one that can offer work that finished long ago. */
+  function taskCardMuted(card, fromSync) {
+    if (!card || !card.task_id) return true;
+    // AN APPROVAL IS NOT A NOTIFICATION. It is a gate on work that has NOT run, so it renders
+    // in every mode, seen or not, dismissed or not. "Off" silences popups, never this, and
+    // never the Activity history.
+    if (card.state === 'needs_approval') return false;
+    var key = taskKey(card), mode = notifyMode();
+    if (notifyKnows(NOTIFY_DISMISSED_KEY, key)) return true;   // honoured in every mode
+    var terminal = !!TERMINAL_STATES[card.state];
+    if (mode === 'off') return true;
+    if (mode === 'results' && !terminal) return true;          // a RESULT, not every tick
+    // Update an existing card only when the current preference permits its new state.
+    if (taskCards[card.task_id]) return false;
+    if (fromSync && terminal) {
+      if (notifyKnows(NOTIFY_SEEN_KEY, key)) return true;
+      if (!taskFresh(card)) return true;                       // the 2026-09-21 phone defect
+    }
+    return false;
+  }
+
+  /* WHICH STACK THE CARDS LIVE IN (2026-09-21). This layer used to hang off <body>, and
+     #app is `position:relative; z-index:2`, which makes it a STACKING CONTEXT — so every
+     panel inside it (#command-view at 60, #graph-view at 62, the tools drawer at 75) was
+     painted at body-level 2 while the card layer sat at body-level 70. No z-index inside
+     #app could ever beat it, whatever the numbers said, and that is why an old failed card
+     took the tap meant for the board's Edit button on a phone. Putting the layer INSIDE #app
+     puts the cards and the panels in one stack, where the numbers mean what they read like.
+     The layer is position:fixed and #app has no transform, so it is still viewport-anchored
+     and looks exactly as it did. */
   function taskLayer() {
     var l = document.getElementById('task-layer');
-    if (!l) { l = document.createElement('div'); l.id = 'task-layer'; document.body.appendChild(l); }
+    var host = document.getElementById('app') || document.body;
+    if (!l) { l = document.createElement('div'); l.id = 'task-layer'; host.appendChild(l); }
+    else if (l.parentNode !== host) host.appendChild(l);
     return l;
   }
 
@@ -685,8 +815,25 @@
   }
   window.addEventListener('resize', taskSafeBottom);
 
-  function renderTaskCard(card) {
+  /* A CARD MUST NEVER SIT ON A CONTROL (2026-09-21). #task-layer is above the stage on
+     purpose, but on a phone it is bottom-anchored right over where the Command Center keeps
+     its rows — and at z-index 70 against the board's 60 it swallowed the taps meant for the
+     Edit pencil. While a full-screen panel is open the layer drops BELOW it (58) instead of
+     being hidden: a running task is still visible the moment the panel closes, and nothing
+     it renders can intercept a press on the board. */
+  function syncPanelOpen() {
+    var c = document.getElementById('command-view'), g = document.getElementById('graph-view');
+    var open = !!(c && c.style.display && c.style.display !== 'none')
+            || !!(g && g.style.display && g.style.display !== 'none');
+    document.body.classList.toggle('panel-open', open);
+  }
+
+  function renderTaskCard(card, fromSync) {
     if (!card || !card.task_id) return;
+    if (taskCardMuted(card, fromSync === true)) {
+      if (card.state !== 'needs_approval') dropTaskCard(card.task_id);
+      return;
+    }
     var id = card.task_id, prev = taskCards[id];
     taskSafeBottom();
     // TERMINAL IS TERMINAL. A retried delivery or a second tab's echo of an earlier state
@@ -716,7 +863,7 @@
     if (card.state !== 'needs_approval') {
       var x = document.createElement('button'); x.className = 'tc-x'; x.type = 'button';
       x.setAttribute('aria-label', 'Dismiss'); x.textContent = '✕';
-      x.onclick = function () { dropTaskCard(id); };
+      x.onclick = function () { dropTaskCard(id, true); };
       head.appendChild(x);
     }
     el.appendChild(head);
@@ -757,7 +904,7 @@
       var a = document.createElement('a'); a.className = 'tc-go';
       a.href = card.action.url; a.target = '_blank'; a.rel = 'noopener';
       a.textContent = card.action.label || 'Open';
-      a.onclick = function () { dropTaskCard(id); };
+      a.onclick = function () { dropTaskCard(id, true); };
       row.appendChild(a);
     }
     if (card.state === 'needs_approval') {
@@ -794,17 +941,59 @@
     }
     if (row.childNodes.length) el.appendChild(row);
 
-    taskCards[id] = { el: el, state: card.state, timer: null };
+    taskCards[id] = { el: el, state: card.state, timer: null, key: taskKey(card),
+                      at: (prev && prev.at) || Date.now() };
+    // SEEN THE MOMENT IT IS DRAWN. This is what stops a reconnect two minutes later offering
+    // the same result a second time, whether or not Brady got round to closing it.
+    notifyRemember(NOTIFY_SEEN_KEY, taskCards[id].key);
     // Success clears itself; the result stays reachable under More → Recent activity.
     // Approvals and failures wait for Brady, and a pending approval is never auto-dismissed.
     if (card.auto_dismiss_ms && !card.sticky) {
       taskCards[id].timer = setTimeout(function () { dropTaskCard(id); }, card.auto_dismiss_ms);
     }
+    trimTaskCards();
   }
 
-  function dropTaskCard(id) {
+  /* THREE AT A TIME. Past that the stack becomes the wall the phone run hit, so the oldest
+     collapse into one pill that opens Activity — where the whole list has always lived. An
+     approval never collapses: it is a gate, not a notification. */
+  var taskOverflow = 0;
+  function trimTaskCards() {
+    var ids = Object.keys(taskCards).filter(function (k) {
+      return taskCards[k].state !== 'needs_approval'; });
+    ids.sort(function (a, b) { return (taskCards[a].at || 0) - (taskCards[b].at || 0); });
+    while (ids.length > NOTIFY_MAX) {
+      var id = ids.shift(), c = taskCards[id];
+      if (c.timer) clearTimeout(c.timer);
+      if (c.el && c.el.parentNode) c.el.parentNode.removeChild(c.el);
+      delete taskCards[id];
+      taskOverflow++;
+    }
+    paintTaskOverflow();
+  }
+  function paintTaskOverflow() {
+    var pill = document.getElementById('task-more');
+    if (!taskOverflow) { if (pill && pill.parentNode) pill.parentNode.removeChild(pill); return; }
+    if (!pill) {
+      pill = document.createElement('button'); pill.id = 'task-more'; pill.type = 'button';
+      pill.className = 'task-more';
+      pill.onclick = function () {
+        taskOverflow = 0; paintTaskOverflow();
+        var b = document.getElementById('activity-open'); if (b) b.click();
+      };
+    }
+    pill.textContent = taskOverflow + ' more in Activity';
+    taskLayer().appendChild(pill);   // appendChild MOVES it, so it stays at the end of the stack
+  }
+
+  /* DISMISSAL IS A DISPLAY DECISION AND NOTHING ELSE: no fetch, no cancel, no retry. The work
+     belongs to the server and closing the window onto it cannot change whether it runs.
+     `remember` is true only when Brady dismissed it himself — an auto-dismissed success is
+     already recorded as seen, and does not need a second record. */
+  function dropTaskCard(id, remember) {
     var c = taskCards[id]; if (!c) return;
     if (c.timer) clearTimeout(c.timer);
+    if (remember && c.key) notifyRemember(NOTIFY_DISMISSED_KEY, c.key);
     if (c.el && c.el.parentNode) { c.el.classList.add('tc-out');
       setTimeout(function () { if (c.el.parentNode) c.el.parentNode.removeChild(c.el); }, 180); }
     delete taskCards[id];
@@ -818,15 +1007,84 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         if (!d) return;
-        (d.live || []).forEach(renderTaskCard);
-        // A card that finished while this tab was away is shown briefly, then behaves
-        // exactly like any other success.
-        (d.cards || []).filter(function (c) {
-          return (c.state === 'needs_approval' || c.state === 'failed') && !taskCards[c.task_id];
-        }).forEach(renderTaskCard);
+        (d.live || []).forEach(function (c) { renderTaskCard(c, true); });
+        // WHAT MAY COME BACK FROM A RECONNECT (2026-09-21). This used to re-render EVERY
+        // failed row /actions returned, and dismissal only lived in memory — so a deep dive
+        // that failed weeks ago reappeared over the board every time the socket blinked or
+        // the tab came back. taskCardMuted now holds the rule: a settled card is news only
+        // while it is fresh, unseen and undismissed. Everything else is history, and history
+        // lives in More → Recent activity, which this never touches.
+        (d.cards || []).forEach(function (c) {
+          if (c.state === 'needs_approval' || TERMINAL_STATES[c.state]) renderTaskCard(c, true);
+        });
       })
       .catch(function () {});
   }
+
+  /* STOP STAYS REACHABLE (2026-09-21). The default preference hides in-progress popups, and
+     Stop only ever lived on that popup — so "results only" would have quietly removed the
+     only way to halt a running job. More → Recent activity already lists the live rows, so
+     the same control goes there, posting to the same /actions/{id}/cancel endpoint.
+
+     That tray is built by review.js, which this file does not own, so the row is AUGMENTED
+     after it renders rather than by editing that renderer. The pairing is by position AND by
+     title against the same /actions payload the tray drew from: if the two disagree by so
+     much as a heading, nothing is added — a Stop wired to the wrong task is far worse than
+     no Stop at all. */
+  (function () {
+    var actBtn = document.getElementById('activity-open');
+    if (!actBtn) return;
+    var pending = 0, observer = null;
+    function augment(dlg) {
+      var heading = dlg.querySelector('h2');
+      if (!heading || heading.textContent !== 'Recent activity') return;
+      var arts = dlg.querySelectorAll('article');
+      if (!arts.length) return;
+      var need = false;
+      Array.prototype.forEach.call(arts, function (a) { if (!a.querySelector('.tc-no')) need = true; });
+      if (!need) return;
+      fetch(API + '/actions?limit=25', { headers: headers() })
+        .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d) return;
+          var cards = d.cards || [];
+          Array.prototype.forEach.call(dlg.querySelectorAll('article'), function (art, i) {
+            var c = cards[i];
+            if (!c || art.querySelector('.tc-no')) return;
+            if (c.state !== 'queued' && c.state !== 'working') return;
+            var h = art.querySelector('h3');
+            if (!h || h.textContent !== (c.title || 'Task')) return;   // the two lists disagree
+            var b = document.createElement('button');
+            b.type = 'button'; b.className = 'tc-no'; b.textContent = 'Stop';
+            b.setAttribute('data-stop', c.task_id);
+            b.onclick = function () {
+              b.disabled = true; b.textContent = 'Stopping…';
+              fetch(API + '/actions/' + c.task_id + '/cancel', { method: 'POST', headers: headers() })
+                .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
+                .then(function (d2) {
+                  var card = d2 && d2.card;
+                  // Refusing to stop finished work is not an error — say what actually is.
+                  b.textContent = (card && card.cancel_refused)
+                    ? (card.cancel_reason || 'Already finished') : 'Stopping…';
+                })
+                .catch(function () { b.disabled = false; b.textContent = 'Stop'; });
+            };
+            art.appendChild(b);
+          });
+        })
+        .catch(function () {});
+    }
+    actBtn.addEventListener('click', function () {
+      var dlg = document.getElementById('ace-review'); if (!dlg) return;
+      if (!observer) observer = new MutationObserver(function () {
+        // The tray renders one element at a time; one pass per burst, not one per node.
+        if (pending) return;
+        pending = setTimeout(function () { pending = 0; augment(dlg); }, 120);
+      });
+      observer.observe(dlg, { childList: true, subtree: true });
+      dlg.addEventListener('close', function () { observer.disconnect(); }, { once: true });
+    });
+  })();
 
   var streamMsg = null, activeTool = null;
   function handleWSEvent(msg) {
@@ -1348,15 +1606,14 @@
         opts = opts || {};
         var r = document.createElement('div'); r.className = 'db-item ' + cls;
         var box = document.createElement('button'); box.className = 'db-box';
-        // completable comes from the server; a waiting row or a record has no checkbox here
-        // OR anywhere else, and the API refuses it too.
-        if (!it.completable) {
-          box.className = 'db-box parked-box'; box.disabled = true;
-          box.title = it.waiting_on ? ('Waiting on ' + it.waiting_on) : 'Not yours to close';
-        } else {
-          box.title = 'Mark done';
-          box.addEventListener('click', function () { toggleBankItem(it.id, 'done'); });
-        }
+        box.title = it.completable ? 'Mark done' : 'Review completion';
+        box.setAttribute('aria-label', 'Complete ' + (it.text || 'item'));
+        box.addEventListener('click', async function () {
+          var forced = it.completable === false;
+          if (forced && !await confirmBoardCompletion(it)) return;
+          box.disabled = true;
+          toggleBankItem(it.id, 'done', forced).finally(function(){ box.disabled = false; });
+        });
         var mid = document.createElement('div'); mid.className = 'db-mid';
         var txt = document.createElement('div'); txt.className = 'db-text'; txt.textContent = it.text || '';
         var meta = document.createElement('div'); meta.className = 'db-meta';
@@ -1379,7 +1636,7 @@
             ev.stopPropagation();
             fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
               body: JSON.stringify({ id: it.id, chosen_on: data.today }) })
-              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(boardJson)
               .then(function (d) {
                 if (!d) return;
                 if (d.ok === false) { boardNotice(d.error || 'Could not add that.'); return; }
@@ -1388,7 +1645,7 @@
                 boardNotice('Added to today. No due date was set.');
                 if (typeof cmdSync === 'function') cmdSync();
               })
-              .catch(function () { boardNotice('Could not reach the board.'); });
+              .catch(function (e) { boardNotice(boardWhy(e, 'Could not reach the board.')); });
           });
           meta.appendChild(yes);
         }
@@ -1399,20 +1656,28 @@
             ev.stopPropagation();
             fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
               body: JSON.stringify({ id: it.id, chosen_on: '' }) })
-              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(boardJson)
               .then(function (d) {
-                if (!d || d.ok === false) return;
+                // A refusal here used to return quietly and the empty .catch swallowed the
+                // rest, so "Not today" could do nothing and look like it worked.
+                if (!d) return;
+                if (d.ok === false) { boardNotice(d.error || 'Could not take it off today.'); return; }
                 materializeCard('daybank', { items: d.items, summary: d.summary || null,
                                              due_today: d.due_today, today: d.today });
                 boardNotice('Taken off today. Nothing else changed.');
                 if (typeof cmdSync === 'function') cmdSync();
               })
-              .catch(function () {});
+              .catch(function (e) { boardNotice(boardWhy(e, 'Could not take it off today.')); });
           });
           meta.appendChild(undo);
         }
         mid.appendChild(txt); mid.appendChild(meta);
         r.appendChild(box); r.appendChild(mid);
+        var edit = document.createElement('button'); edit.className = 'db-edit';
+        edit.textContent = '✎'; edit.title = 'Edit in Command Center';
+        edit.setAttribute('aria-label', 'Edit ' + (it.text || 'item'));
+        edit.addEventListener('click', function(){ cmdOpenItem(it.id); });
+        r.appendChild(edit);
         body6.appendChild(r);
       }
 
@@ -1445,14 +1710,18 @@
           more.addEventListener('click', function () {
             more.textContent = '…'; more.disabled = true;
             fetch(API + '/daybank?suggest=' + (dt.suggested.length + 5), { headers: headers() })
-              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(boardJson)
               .then(function (d) {
                 if (!d) throw 0;
                 materializeCard('daybank', { items: d.items, summary: d.summary || null,
                                              due_today: d.due_today, today: d.today,
                                              reviews_pending: d.reviews_pending || 0 });
               })
-              .catch(function () { more.textContent = 'Could not load more'; more.disabled = false; });
+              // A read, not a write, so it asks him to sign in to LOAD — same cause, right words.
+              .catch(function (e) {
+                more.textContent = (e && e.signedOut) ? 'Sign in to load more' : 'Could not load more';
+                more.disabled = false;
+              });
           });
           body6.appendChild(more);
         }
@@ -1559,14 +1828,17 @@
   function setBankDue(id, due) {
     fetch(API + '/daybank/update', { method: 'POST', headers: headers(),
                                      body: JSON.stringify({ id: id, due: due }) })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(boardJson)
       .then(function (d) {
         if (d && d.items) materializeCard('daybank', { items: d.items, summary: d.summary || null,
                                                        due_today: d.due_today, today: d.today,
                                                        reviews_pending: d.reviews_pending || 0 });
+        // A rescheduled deadline that was refused looked exactly like one that saved: the
+        // empty .catch below meant this write had no visible failure at all.
+        if (d && d.ok === false) boardNotice(d.error || 'The deadline was not changed.');
         if (typeof cmdSync === 'function') cmdSync();
       })
-      .catch(function () {});
+      .catch(function (e) { boardNotice(boardWhy(e, 'Could not change the deadline. Nothing was saved.')); });
   }
   var _MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   function dueChoices() {
@@ -1596,12 +1868,54 @@
     setTimeout(function () { if (n.parentNode) n.remove(); }, 9000);
   }
   window.__notice = boardNotice;   // one notice surface, reachable from every board path
+  /* ONE SIGN-OUT, ONE REDACTOR (2026-09-21). review.js hosts the memory review and the
+     source search, and both have to end a dead session the same way every board write does
+     and scrub the same key-shaped text the graph panel scrubs. Two copies of either rule
+     would eventually disagree, and the one that matters here is the redactor. */
+  window.__toLogin = toLogin;
 
-  function toggleBankItem(id, status) {
-    fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status }) })
-      .then(function (r) { return r.ok ? r.json() : null; })
+  // A SIGNED-OUT SAVE HAS A NAME (2026-09-21). Only the Command checkbox recognised a 401;
+  // every other board write reported an expired session as a nameless failure — and the due
+  // date and "Not today" paths ate it in an empty .catch, which is the same silent-failure
+  // class the 2026-09-05 audit found. One helper, so every write ends the session the same
+  // way and each handler still says its own sentence for everything else.
+  function boardJson(r) {
+    if (r.status === 401) {
+      toLogin();
+      var e = new Error('Sign in to save.'); e.signedOut = true; throw e;
+    }
+    // HTTP failures may contain {detail: ...}, not the board's {ok:false} receipt.
+    // Reject them here so every caller shows its failure message.
+    if (r.ok === false) throw new Error('Board request failed (' + r.status + ').');
+    return r.json();
+  }
+  // The reason to show: our own sign-in sentence when we threw it, otherwise the caller's
+  // usual line — a raw 'Failed to fetch' is not something to put in front of Brady.
+  function boardWhy(e, fallback) { return (e && e.signedOut) ? e.message : fallback; }
+
+  function confirmBoardCompletion(it) {
+    return new Promise(function(resolve){
+      if(document.querySelector('.board-confirm')) { resolve(false); return; }
+      var dialog=document.createElement('dialog'); dialog.className='board-confirm';
+      dialog.setAttribute('aria-labelledby','board-confirm-title');
+      dialog.innerHTML='<h2 id="board-confirm-title">Complete this item?</h2><p class="board-confirm-item"></p><p class="board-confirm-why"></p><div><button type="button" class="board-confirm-cancel">Keep open</button><button type="button" class="board-confirm-yes">Yes, complete this item</button></div>';
+      dialog.querySelector('.board-confirm-item').textContent=it.text||'';
+      dialog.querySelector('.board-confirm-why').textContent=(it.waiting_on?'This is waiting on '+it.waiting_on+'.':'This is a reference record.')+' Confirm that the underlying item is finished, not just the follow-up.';
+      var settled=false;
+      function finish(value){ if(settled)return; settled=true; dialog.close(); dialog.remove(); resolve(value); }
+      dialog.querySelector('.board-confirm-cancel').onclick=function(){finish(false);};
+      dialog.querySelector('.board-confirm-yes').onclick=function(){finish(true);};
+      dialog.addEventListener('cancel',function(e){e.preventDefault();finish(false);});
+      dialog.addEventListener('click',function(e){if(e.target===dialog){var r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)finish(false);}});
+      document.body.appendChild(dialog);dialog.showModal();dialog.querySelector('.board-confirm-cancel').focus();
+    });
+  }
+
+  function toggleBankItem(id, status, forced) {
+    return fetch(API + '/daybank/update', { method: 'POST', headers: headers(), body: JSON.stringify({ id: id, status: status, force_close: !!forced }) })
+      .then(boardJson)
       .then(function (d) {
-        if (!d) return;
+        if (!d) throw new Error('No save receipt');
         // The SERVER decides completability now, so any caller — this panel, the older
         // overlay, a stale tab — gets the same answer. A refusal must be SEEN: silently
         // doing nothing is how the old disabled checkbox failed everywhere it wasn't.
@@ -1615,7 +1929,7 @@
         // Keep an open Command board in step — same store, one truth (2026-07-31).
         if (typeof cmdSync === 'function') cmdSync();
       })
-      .catch(function () {});
+      .catch(function (e) { boardNotice(boardWhy(e, 'Could not confirm the save. Refresh the board before trying again.')); });
   }
 
   function openLink(url, label) {
@@ -2053,12 +2367,17 @@
           .catch(function(){});   // an unreachable list endpoint must not blank the board
       });
   }
+  function cmdOpenItem(id){
+    cmd.lens='all'; cmd.area='All'; cmd.cat='All'; cmd.showRecords=true;
+    cmd.editing=id; cmd.draft=null; cmdOpen();
+  }
   function cmdOpen(){
     cmd.open=true; cmd.min=false;
     var v=document.getElementById('command-view');
     if(!v){ v=document.createElement('div'); v.id='command-view'; $('app').appendChild(v); }
     v.style.display='flex'; v.innerHTML='<div class="cmd-empty">loading…</div>';
-    cmdFetch().then(cmdRender).catch(function(){});
+    syncPanelOpen();
+    cmdFetch().then(function(){ cmdRender(); var edit=v.querySelector('.cmd-editing'); if(edit) edit.scrollIntoView({block:'center'}); }).catch(function(){ boardNotice('Could not load the board. Try opening it again.'); });
     // LIVE BOARD (2026-07-31): an open Command view used to be a stale snapshot — Ace could
     // complete items by voice/chat and Brady would watch them stay open. Refresh on a slow
     // pulse (skipping while he's mid-edit) so the board is always telling the truth.
@@ -2067,10 +2386,20 @@
       if (cmd.open && !cmd.min && !cmd.editing) cmdSync();
     }, 25000);
   }
-  function cmdClose(){ cmd.open=false; if(cmd.timer){ clearInterval(cmd.timer); cmd.timer=null; } var v=document.getElementById('command-view'); if(v) v.style.display='none'; }
+  function cmdClose(){ cmd.open=false; if(cmd.timer){ clearInterval(cmd.timer); cmd.timer=null; } var v=document.getElementById('command-view'); if(v) v.style.display='none'; syncPanelOpen(); }
   function cmdSync(){   // refetch + rerender an open board; safe no-op otherwise
     if (!cmd.open) return;
     cmdFetch().then(function(){ if (cmd.open && !cmd.editing) cmdRender(); }).catch(function(){});
+  }
+  // ONE PAYLOAD, BOTH SURFACES (2026-09-21). After a save the Command list was repainted
+  // from the refetched board while the DUE TODAY card was materialized from the older update
+  // response — two Today surfaces, two payloads. Worse, that response was built with the
+  // default suggest=3, so an expanded "Show more" list silently collapsed. Both now paint
+  // from exactly what cmd just took.
+  function cmdPaintBoard(){
+    cmdRender();
+    if (document.querySelector('.card[data-panel="DUE TODAY"]'))
+      materializeCard('daybank', { items: cmd.items, due_today: cmd.dueToday, today: cmd.today });
   }
   function cmdParentChip(it){
     if (!it.parent_id) return '';
@@ -2102,7 +2431,14 @@
       // are the override, and they are also the only way to reach 'settled' — a record that
       // is finished but must STAY (Feliz's annuity is closed and paid, not deleted).
       var dEntry = (cmd.draft && cmd.draft.entry) || it.entry || 'action';
+      // A CLEARED ROW READS BACK AS 'active' (2026-09-21). The server stores that value
+      // explicitly so the clear survives the read-time derivation in db.py; this select's
+      // own word for the same thing is ''. Without the fold, 'active' matches no option and
+      // the row only LOOKS right because the browser falls back to the first one — reorder
+      // this list or add a state and every cleared row would quietly show the wrong status.
       var dState = (cmd.draft && cmd.draft.state != null) ? cmd.draft.state : (it.state || '');
+      if (dState === 'active') dState = '';
+      var dWait  = (cmd.draft && cmd.draft.wait  != null) ? cmd.draft.wait  : (it.waiting_on || '');
       var dBucket = (cmd.draft && cmd.draft.bucket) || it.bucket || 'Inbox';
       var dNext = (cmd.draft && cmd.draft.next != null) ? cmd.draft.next : (it.next_step || '');
       var dFup  = (cmd.draft && cmd.draft.fup  != null) ? cmd.draft.fup  : (it.followup || '');
@@ -2145,7 +2481,7 @@
         +'<div class="cmd-erow"><label class="cmd-el">Kind</label><select class="cmd-eentry">'+eOpts+'</select>'
         +'<label class="cmd-el">Status</label><select class="cmd-estate">'+sOpts+'</select></div>'
         +'<div class="cmd-erow"><input class="cmd-ewait" placeholder="waiting on who? (e.g. Tony, approval)" '
-        +'value="'+cmdEsc(it.waiting_on||'')+'"'+(dState==='waiting'?'':' disabled')+'></div>'
+        +'value="'+cmdEsc(dWait)+'"'+(dState==='waiting'?'':' disabled')+'></div>'
         // THREE DATES, THREE MEANINGS (Brady, 2026-09-09). The deadline belongs to the
         // obligation, the follow-up is when HE chases it, and "doing today" is a choice that
         // must never write either one. They get separate controls so they cannot be confused.
@@ -2169,7 +2505,7 @@
     // register is always complete, and rolls over on the 1st (2026-08-26).
     var paid = !!it.paid_this_period;
     return '<div class="cmd-row '+(paid?'paid':(done?'done':''))+'" data-id="'+it.id+'" style="border-left-color:'+col+'">'
-      +'<div class="cmd-box"></div>'
+      +'<button type="button" class="cmd-box" aria-label="'+(done?'Reopen ':'Complete ')+cmdEsc(it.text)+'" aria-pressed="'+done+'"></button>'
       +'<div class="cmd-b"><div class="cmd-t">'+cmdEsc(it.text)+'</div><div class="cmd-m">'
       +'<span class="cmd-tag" style="color:'+col+';border-color:'+col+'55;background:'+col+'14">'
       +'<span class="cmd-d" style="background:'+col+'"></span>'+c+'</span>'
@@ -2213,7 +2549,7 @@
           + 'Push a week</button><span class="cmd-fuphint">the task stays open</span></div>'
         : '')
       +'</div></div>'
-      +'<button class="cmd-pencil" title="Edit">✎</button></div>';
+      +'<button class="cmd-pencil" title="Edit" aria-label="Edit '+cmdEsc(it.text)+'">✎</button></div>';
   }
   function cmdRender(resetScroll){
     var v=document.getElementById('command-view'); if(!v) return;
@@ -2231,6 +2567,9 @@
         due:   er.querySelector('.cmd-edue').value,
         entry: er.querySelector('.cmd-eentry').value,
         state: er.querySelector('.cmd-estate').value,
+        // The owner's name was the one field left out, so the 25s background cmdSync threw
+        // away a half-typed "waiting on who?" while every other field survived it.
+        wait:  (er.querySelector('.cmd-ewait')  || {}).value,
         bucket: (er.querySelector('.cmd-ebucket') || {}).value,
         fup:   (er.querySelector('.cmd-efup')  || {}).value,
         next:  (er.querySelector('.cmd-enext') || {}).value,
@@ -2489,11 +2828,12 @@
       b.textContent='…'; b.disabled=true;
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),
             body:JSON.stringify({id:id, reviewed:true})})
-        .then(function(r){ return r.json(); })
+        .then(boardJson)
         .then(function(d){ if(!d||!d.ok) throw ((d&&d.error)||0);
           return cmdFetch().then(function(){ cmdRender(); }); })
         .catch(function(why){ b.textContent=was; b.disabled=false;
-          if(typeof why==='string'&&why) boardNotice(why); });
+          var msg=boardWhy(why, (typeof why==='string'&&why) ? why : '');
+          if(msg) boardNotice(msg); });
     }; });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-fup'), function(b){ b.onclick=function(e){
       e.stopPropagation();
@@ -2501,50 +2841,43 @@
       var was=b.textContent; b.textContent='…'; b.disabled=true;
       fetch(API+'/board/followup',{method:'POST',headers:headers(),
             body:JSON.stringify({id:id,action:act,days:7})})
-        .then(function(r){ return r.json(); })
+        .then(boardJson)
         .then(function(d){
           if(!d||!d.ok){ throw ((d&&d.error)||0); }
           if(d.task_still_open===false){ boardNotice('That closed the task — reload and check it.'); }
           return cmdFetch().then(function(){ cmdRender(); });
         })
         .catch(function(why){ b.textContent=was; b.disabled=false;
-          if(typeof why==='string'&&why) boardNotice(why); });
+          var msg=boardWhy(why, (typeof why==='string'&&why) ? why : '');
+          if(msg) boardNotice(msg); });
     }; });
-    Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=function(){
+    Array.prototype.forEach.call(v.querySelectorAll('.cmd-box'), function(b){ b.onclick=async function(){
       var id=b.parentNode.getAttribute('data-id');
       var it=cmd.items.filter(function(x){return x.id===id;})[0]; if(!it) return;
-      // VERIFIED tick (2026-07-31): optimistic flip, but if the server doesn't confirm, the
-      // row reverts — a completion can no longer be silently lost to a 401/network blip.
-      var prev=it.status, prevTs=it.done_ts;
+      // Confirm the save before changing the displayed status.
       var ns=it.status==='done'?'open':'done';
-      // CLOSING A PARKED ROW IS ALLOWED, BUT IT HAS TO BE MEANT (2026-09-11, Brady: "am I
-      // not about to mark those off?"). His Due Today was nine rows, every one waiting and
-      // none of them tickable, so the one surface named for action had nothing to act on.
-      // Something can finish without the other person ever coming back, and he had no way
-      // to say so. force_close already exists end to end — only the UI never sent it.
-      //
-      // It asks first, deliberately: on 5 Sept four records vanished to one stray tap, which
-      // is why the plain checkbox refuses these in the first place.
       var forced=false;
       if(ns==='done' && it.completable===false){
-        var why = it.waiting_on ? ('This is waiting on ' + it.waiting_on + '.')
-                                : 'This is a record, not a task.';
-        if(!window.confirm(why + '\n\nClose it anyway?')) return;
+        if(!await confirmBoardCompletion(it)) return;
         forced=true;
       }
-      it.status=ns; if(ns==='done'){ it.done_ts=new Date().toISOString(); } cmdRender();
+      // Wait for the receipt and replace BOTH item copies and Today groups together.
+      // Optimistically changing cmd.items alone left Today visibly unchecked after a save.
+      b.disabled=true; b.setAttribute('aria-busy','true');
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),
             body:JSON.stringify(forced?{id:id,status:ns,force_close:true}:{id:id,status:ns})})
-        .then(function(r){ if(r.status===401){ toLogin(); throw 0; } return r.json(); })
+        .then(function(r){ if(r.status===401){ toLogin(); throw new Error('Sign in to save.'); } return r.json(); })
         .then(function(d){
-          // A REFUSAL IS NOT A NETWORK BLIP. The revert was already correct, but silent —
-          // the tick flicked back with no reason given. The server now says WHY (waiting on
-          // someone, or a record with a lifecycle), so show that instead of nothing.
-          if(!d||!d.ok){ var why = d && d.error; throw (why || 0); }
+          if(!d||!d.ok) throw new Error((d&&d.error)||'Could not confirm the save.');
+          cmd.items=d.items; cmd.dueToday=d.due_today; cmd.today=d.today;
+          cmdRender();
+          var card=document.querySelector('.card[data-panel="DUE TODAY"]');
+          if(card) materializeCard('daybank',d);
+          boardNotice(ns==='done'?'Marked complete.':'Reopened.');
         })
         .catch(function(why){
-          it.status=prev; it.done_ts=prevTs; cmdRender();
-          if (typeof why === 'string' && why) boardNotice(why);
+          b.disabled=false; b.removeAttribute('aria-busy');
+          boardNotice((why&&why.message)||'Could not confirm the save. Refresh before retrying.');
         });
     }; });
     // FULL EDITING (Brady): ✎ opens the inline editor — rewrite text, move category, set due.
@@ -2558,9 +2891,10 @@
         var row = b.closest('.cmd-row'); var id = row && row.getAttribute('data-id'); if(!id) return;
         b.textContent='REMOVING…'; b.disabled=true;
         fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify({id:id,status:'dropped'})})
-          .then(function(r){ return r.json(); })
+          .then(boardJson)
           .then(function(d){ if(!d||!d.ok) throw 0; cmd.editing=null; cmd.draft=null; return cmdFetch().then(cmdRender); })
-          .catch(function(){ b.textContent='RETRY REMOVE'; b.disabled=false; });
+          .catch(function(why){ b.textContent='RETRY REMOVE'; b.disabled=false;
+            var msg=boardWhy(why,''); if(msg) boardNotice(msg); });
         return;
       }
       cmd.editing = null; cmd.draft = null; cmdRender();
@@ -2603,10 +2937,11 @@
         tBtn.disabled = true;
         fetch(API+'/daybank/update',{method:'POST',headers:headers(),
               body:JSON.stringify({id:id, chosen_on: on ? '' : cmd.today})})
-          .then(function(r){ return r.json(); })
+          .then(boardJson)
           .then(function(d){ if(!d||!d.ok) throw 0;
             cmd.draft=null; return cmdFetch().then(function(){ cmdRender(); }); })
-          .catch(function(){ tBtn.disabled=false; boardNotice('Could not change the day.'); });
+          .catch(function(e){ tBtn.disabled=false;
+            boardNotice(boardWhy(e,'Could not change the day.')); });
       };
     });
     Array.prototype.forEach.call(v.querySelectorAll('.cmd-esave'), function(b){ b.onclick=function(){
@@ -2621,9 +2956,12 @@
         category: row.querySelector('.cmd-ecat').value,
         entry: row.querySelector('.cmd-eentry').value,
         bucket: (isAction ? row.querySelector('.cmd-ebucket').value : ''),
-        // An ACTION can carry 'decide' — that is Brady marking an open question — but the
-        // record lifecycle (active/waiting/settled) still belongs to records only.
-        state: (isAction && stateVal !== 'decide' && stateVal !== 'waiting') ? '' : stateVal,
+        // SEND WHAT HE PICKED (2026-09-21). This rewrote every other action state to '' to
+        // dodge the old server rule, which meant the one value that matters — READY, i.e. ''
+        // — could never CLEAR a stored waiting/decide: the field read the same either way and
+        // the server left the state alone. The route now takes '' as "clear it" and refuses
+        // only 'settled' on an action, so the control says what it means.
+        state: stateVal,
         waiting_on: (stateVal === 'waiting'
                      ? (row.querySelector('.cmd-ewait').value || '').trim() : ''),
         due: (row.querySelector('.cmd-edue').value || '').trim(),
@@ -2643,15 +2981,15 @@
       // em dash and would overflow it.
       var serverWhy = '';
       fetch(API+'/daybank/update',{method:'POST',headers:headers(),body:JSON.stringify(body)})
-        .then(function(r){ return r.json(); })
+        .then(boardJson)
         .then(function(d){
           if (!d || !d.ok) { serverWhy = (d && d.error) || ''; throw 0; }
           cmd.editing = null; cmd.draft = null;
-          return cmdFetch().then(cmdRender);
+          return cmdFetch().then(cmdPaintBoard);
         })
-        .catch(function(){
+        .catch(function(e){
           // keep the editor open with the typed values — never eat an edit silently
-          var why = serverWhy.split(' — ')[0];
+          var why = boardWhy(e, serverWhy.split(' — ')[0]);
           b.textContent = why ? ('RETRY — ' + why) : 'RETRY SAVE';
           b.disabled = false;
         });
@@ -2670,12 +3008,12 @@
       function addFailed(msg){ inp.value = t; inp.placeholder = msg; inp.focus();
         setTimeout(function(){ inp.placeholder = addPH; }, 4000); }
       fetch(API+'/daybank/add',{method:'POST',headers:headers(),body:JSON.stringify({text:t,category:addCat,bucket:addArea})})
-        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(boardJson)
         .then(function(d){
           if (d && d.dup) { addFailed('Already on your board — nothing added'); return; }
           if (!d || !d.ok) { addFailed((d && d.error) || 'Could not save that — try again'); return; }
           return cmdFetch().then(cmdRender);
-        }).catch(function(){ addFailed('Could not save that — try again'); }); };
+        }).catch(function(e){ addFailed(boardWhy(e, 'Could not save that — try again')); }); };
   }
 
   /* ============================================================ KNOWLEDGE GRAPH
@@ -2686,8 +3024,16 @@
      zero-build and CSP-tight, so the physics lives here.
      Tap a node to focus it (it and its neighbours light, everything else dims) and
      read its connections; drag to pan, drag a node to move it, wheel/pinch to zoom. */
-  var GR_COL = { deal: '#45FFA6', person: '#53E7FF', category: '#8F7BFF' };
-  var gr = { open: false, nodes: [], edges: [], adj: {}, sel: null, hov: null,
+  /* THREE LIGHTS, TWO VOCABULARIES (2026-09-21). The map is drawn from the stored entity
+     layer now — person / org / project — but the old model-built cache spoke of people,
+     deals and categories, and it is still servable. Both vocabularies map onto the same
+     three colours so the picture reads identically whichever one is on screen. */
+  var GR_COL = { deal: '#45FFA6', person: '#53E7FF', category: '#8F7BFF',
+                 org: '#45FFA6', project: '#8F7BFF' };
+  var GR_ORIGIN = { user_statement: 'Brady said', assistant_inference: 'Ace inferred',
+                    manual: 'You corrected it', graph_seed: 'From the old map',
+                    legacy_extracted: 'Legacy memory', secondary_summary: 'From a summary' };
+  var gr = { open: false, nodes: [], edges: [], adj: {}, sel: null, hov: null, shown: null,
              tx: 0, ty: 0, k: 1, k0: 1, alpha: 1, raf: 0, cv: null, ctx: null,
              W: 0, H: 0, dpr: 1, drag: null, pan: null, down: null, moved: 0,
              ptr: {}, pinch: 0, sprites: {}, autofit: true };
@@ -2857,33 +3203,267 @@
     gr.tx = gr.W / 2 - nd.x * gr.k; gr.ty = gr.H * .42 - nd.y * gr.k;
   }
 
-  function grSelect(nd, center) {
-    gr.sel = nd;
-    if (nd && center) grCenter(nd);
+  /* NOTHING SENSITIVE REACHES THIS PANEL (2026-09-21). The server keeps settings rows and
+     operational telemetry out of a dossier by construction; this is the second pair of eyes
+     on the way to the screen, because a credential rendered once is a credential leaked.
+     Anything shaped like a key, a token or a labelled secret is replaced, not displayed. */
+  var GR_SECRET = /(sk-[A-Za-z0-9_\-]{12,}|xox[abprs]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{20,}|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,}|[A-Za-z0-9+/]{40,}={0,2})/g;
+  function grSafe(s) {
+    s = String(s == null ? '' : s);
+    s = s.replace(/\b(api[ _-]?key|secret|password|passwd|token|bearer|authorization)\b\s*[:=]\s*\S+/gi,
+                  '$1: [redacted]');
+    return s.replace(GR_SECRET, '[redacted]');
+  }
+  function grTxt(s) { return cmdEsc(grSafe(s)); }
+  window.__redact = grSafe;      // see window.__toLogin — review.js scrubs with this one too
+  function grDate(s) { return (s ? String(s).slice(0, 10) : ''); }
+  function grOriginLabel(o) { return GR_ORIGIN[o] || (o ? String(o).replace(/_/g, ' ') : 'unlabelled'); }
+
+  // One provenance line per statement: which record it came from and when that record is
+  // dated. A fact with no source is never shown as if it had one.
+  function grProv(src) {
+    if (!src || !src.source_id) return '<span class="gr-fp">no source on file</span>';
+    return '<span class="gr-fp">' + grTxt(src.corpus || String(src.source_id).split(':')[0])
+         + (src.occurred_at ? ' · ' + grTxt(grDate(src.occurred_at)) : '')
+         + ' · ' + grTxt(src.source_id) + '</span>';
+  }
+  function grFactRow(f, histo) {
+    var conflict = f.conflicts_with && f.conflicts_with.length;
+    return '<div class="gr-fact' + (histo ? ' old' : '') + (conflict ? ' clash' : '') + '">'
+      + '<div class="gr-fv"><b>' + grTxt((f.attribute || '').replace(/_/g, ' ')) + '</b> '
+      + grTxt(f.value) + '</div>'
+      + '<div class="gr-fm">' + grTxt(grOriginLabel(f.origin))
+      + (f.stated_at ? ' · ' + grTxt(grDate(f.stated_at)) : '')
+      + (f.stated_at_is_extraction ? ' (when it was extracted, not when it happened)' : '')
+      + (histo && f.valid_to ? ' · superseded ' + grTxt(grDate(f.valid_to)) : '')
+      + (f.review_status && f.review_status !== 'confirmed'
+          ? ' · <span class="gr-prop">' + grTxt(f.review_status) + '</span>' : '')
+      + ' ' + grProv(f.source) + '</div>'
+      + (conflict ? '<div class="gr-clash">disagrees with another current record — both are '
+                  + 'kept, neither is chosen here</div>' : '')
+      + '</div>';
+  }
+
+  /* THE DETAIL PANEL. The same shell it always was — header, close button, a list of
+     connections — extended downward with what the entity store actually holds: current
+     facts with their provenance, dated history behind a disclosure, related entities, the
+     live board items, and the review queue's suggestions kept visually separate because a
+     proposal is not an accepted link. */
+  function grPaintDetail(nd, dos) {
     var d = document.getElementById('gr-detail'); if (!d) return;
-    if (!nd) { d.className = 'gr-detail'; d.innerHTML = ''; return; }
-    var links = (gr.adj[nd.id] || []).slice().sort(function (a, b) { return (b.n.size || 0) - (a.n.size || 0); });
+    var links = (gr.adj[nd.id] || []).slice()
+      .sort(function (a, b) { return (b.n.size || 0) - (a.n.size || 0); });
     var col = GR_COL[nd.type] || GR_COL.person;
+    var ent = (dos && dos.entity) || null;
+    var counts = (dos && dos.counts) || {};
+    var html = '<div class="gr-dh"><span class="gr-dot" style="background:' + col +
+      ';box-shadow:0 0 12px ' + col + '"></span><div class="gr-dt">'
+      + grTxt((ent && ent.display_name) || nd.label)
+      + '<span>' + grTxt(nd.type) + ' · ' + links.length + ' connection'
+      + (links.length === 1 ? '' : 's')
+      + (nd.offCanvas ? ' · not drawn on the map' : '')
+      + (ent && ent.review_status && ent.review_status !== 'confirmed'
+          ? ' · ' + grTxt(ent.review_status) : '')
+      + '</span></div><button class="gr-dx" id="gr-dx" title="Close">✕</button></div>'
+      + '<div class="gr-dbody" id="gr-dbody">';
+
+    if (nd.entity_id && !dos) html += '<div class="gr-none">reading the record…</div>';
+
+    if (dos) {
+      var cur = dos.current || [];
+      html += '<div class="gr-dnote">Partial record. Newer conversations may not be linked yet. Dates belong to the source; an old “today” is not today. Check live tasks for what remains open.</div>';
+      html += '<div class="gr-sh">Dated saved claims</div>';
+      html += cur.length ? cur.map(function (f) { return grFactRow(f, false); }).join('')
+                         : '<div class="gr-none">no active saved claims linked yet</div>';
+
+      var hist = dos.history || [];
+      if (hist.length) {
+        html += '<details class="gr-hist"><summary>History (' + hist.length + ')</summary>'
+              + hist.map(function (f) { return grFactRow(f, true); }).join('')
+              + (counts.history_total > counts.history_shown
+                  ? '<div class="gr-none">' + (counts.history_total - counts.history_shown)
+                    + ' older entries not shown</div>' : '')
+              + '</details>';
+      }
+
+      var rels = dos.relations || [];
+      if (rels.length) {
+        html += '<div class="gr-sh">Related</div><div class="gr-dl">'
+          + rels.map(function (r) {
+              var o = r.other || {}, oc = GR_COL[o.type] || GR_COL.person;
+              var proposed = r.review_status && r.review_status !== 'confirmed';
+              return '<button class="gr-li' + (proposed ? ' gr-proposed' : '') + '" data-ent="'
+                + cmdEsc(o.entity_id || '') + '" data-label="' + grTxt(o.display_name || '')
+                + '" data-type="' + cmdEsc(o.type || '') + '">'
+                + '<span class="gr-dot sm" style="background:' + oc + '"></span>'
+                + '<span class="gr-ln">' + grTxt(o.display_name || o.entity_id || '?') + '</span>'
+                + '<span class="gr-lk">' + grTxt((r.kind || '').replace(/_/g, ' '))
+                + (proposed ? ' · proposed' : '') + '</span></button>';
+            }).join('')
+          + '</div>';
+      }
+
+      var items = dos.items || [];
+      if (items.length) {
+        html += '<div class="gr-sh">On the board</div>'
+          + items.map(function (it) {
+              return '<div class="gr-item"><span class="gr-st gr-st-' + cmdEsc(it.status || 'open')
+                + '">' + grTxt(it.status || 'open') + '</span> ' + grTxt(it.text || it.item_id)
+                + '</div>';
+            }).join('')
+          + '<div class="gr-dnote">Board status is read live from the board, never stored '
+          + 'here.</div>';
+      }
+
+      var sug = dos.suggestions || [];
+      if (sug.length) {
+        html += '<div class="gr-sh gr-sh-prop">Suggestions (' + sug.length + ')</div>'
+          + '<div class="gr-dnote">Proposals from the review queue. Nothing below has been '
+          + 'accepted.</div>'
+          + sug.map(function (s) {
+              return '<div class="gr-sug" data-review="' + cmdEsc(String(s.review_id || '')) + '">'
+                + '<div class="gr-sugt"><span class="gr-prop">' + grTxt(s.kind || 'suggestion')
+                + '</span> ' + grTxt(grSugText(s)) + '</div>'
+                + '<div class="gr-sugb"><button type="button" class="gr-ok">Confirm</button>'
+                + '<button type="button" class="gr-nope">Not the same</button>'
+                + '<span class="gr-sugm" role="status"></span></div></div>';
+            }).join('');
+      }
+
+      if (counts.sources_linked != null) {
+        html += '<div class="gr-dnote">' + (counts.sources_shown || 0) + ' of '
+              + counts.sources_linked + ' linked source'
+              + (counts.sources_linked === 1 ? '' : 's') + ' shown'
+              + (counts.unresolved ? ' · ' + counts.unresolved + ' unresolved' : '')
+              + '</div>';
+      }
+      (dos.notes || []).forEach(function (n) {
+        html += '<div class="gr-dnote">' + grTxt(n) + '</div>';
+      });
+    }
+
+    html += (links.length
+      ? '<div class="gr-sh">On the map</div><div class="gr-dl">' + links.map(function (l) {
+          return '<button class="gr-li" data-id="' + cmdEsc(l.n.id) + '"><span class="gr-dot sm" style="background:' +
+            (GR_COL[l.n.type] || GR_COL.person) + '"></span><span class="gr-ln">' + grTxt(l.n.label) +
+            '</span><span class="gr-lk">' + grTxt((l.kind || '').replace(/_/g, ' ')) + '</span></button>';
+        }).join('') + '</div>'
+      : (dos ? '' : '<div class="gr-none">nothing linked to this yet</div>'));
+
+    html += '</div>';
     d.className = 'gr-detail on';
-    d.innerHTML = '<div class="gr-dh"><span class="gr-dot" style="background:' + col +
-      ';box-shadow:0 0 12px ' + col + '"></span><div class="gr-dt">' + cmdEsc(nd.label) +
-      '<span>' + nd.type + ' · ' + links.length + ' connection' + (links.length === 1 ? '' : 's') +
-      '</span></div><button class="gr-dx" id="gr-dx" title="Close">✕</button></div>' +
-      (links.length
-        ? '<div class="gr-dl">' + links.map(function (l) {
-            return '<button class="gr-li" data-id="' + l.n.id + '"><span class="gr-dot sm" style="background:' +
-              (GR_COL[l.n.type] || GR_COL.person) + '"></span><span class="gr-ln">' + cmdEsc(l.n.label) +
-              '</span><span class="gr-lk">' + cmdEsc((l.kind || '').replace(/_/g, ' ')) + '</span></button>';
-          }).join('') + '</div>'
-        : '<div class="gr-none">nothing linked to this yet</div>');
+    d.innerHTML = html;
     d.querySelector('#gr-dx').onclick = function () { grSelect(null); };
     Array.prototype.forEach.call(d.querySelectorAll('.gr-li'), function (b) {
       b.onclick = function () {
+        var eid = b.getAttribute('data-ent');
+        if (eid) { grOpenEntity(eid, b.getAttribute('data-label'), b.getAttribute('data-type')); return; }
         var id = b.getAttribute('data-id');
         var t = gr.nodes.filter(function (x) { return x.id === id; })[0];
         if (t) { gr.alpha = Math.max(gr.alpha, .35); grSelect(t, true); }
       };
     });
+    if (dos && ent) {
+      Array.prototype.forEach.call(d.querySelectorAll('.gr-sug'), function (box) {
+        var rid = box.getAttribute('data-review');
+        var ok = box.querySelector('.gr-ok'), no = box.querySelector('.gr-nope');
+        function send(op, word) {
+          ok.disabled = no.disabled = true;
+          var say = box.querySelector('.gr-sugm'); say.textContent = '…';
+          fetch(API + '/entities/' + encodeURIComponent(ent.entity_id) + '/correct',
+                { method: 'POST', headers: headers(),
+                  body: JSON.stringify({ op: op, args: { review_id: Number(rid) || rid },
+                                         reason: word + ' from the graph detail panel' }) })
+            .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
+            .then(function (res) {
+              if (res && res.ok) { say.textContent = word + '.'; grFetchDossier(ent.entity_id, nd); }
+              else { say.textContent = (res && res.error) || 'That did not go through.';
+                     ok.disabled = no.disabled = false; }
+            })
+            .catch(function () { say.textContent = 'That did not go through.';
+                                 ok.disabled = no.disabled = false; });
+        }
+        ok.onclick = function () { send('confirm', 'Confirmed'); };
+        no.onclick = function () { send('reject', 'Rejected'); };
+      });
+    }
+  }
+  function grSugText(s) {
+    var p = s.payload || {};
+    var bits = [];
+    ['display_name', 'name', 'alias', 'label', 'other_display_name', 'claimed_type', 'reason']
+      .forEach(function (k) { if (p[k]) bits.push(String(p[k])); });
+    return bits.length ? bits.join(' · ') : 'awaiting your call';
+  }
+
+  function grFetchDossier(eid, nd) {
+    fetch(API + '/entities/' + encodeURIComponent(eid), { headers: headers() })
+      .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.ok ? r.json() : null; })
+      .then(function (dos) {
+        if (!dos || gr.shown !== eid) return;   // he has moved on; never repaint over his new pick
+        grPaintDetail(nd, dos);
+      })
+      .catch(function () {});
+  }
+
+  function grSelect(nd, center) {
+    gr.sel = nd;
+    gr.shown = nd ? (nd.entity_id || nd.id) : null;
+    if (nd && center) grCenter(nd);
+    var d = document.getElementById('gr-detail'); if (!d) return;
+    if (!nd) { d.className = 'gr-detail'; d.innerHTML = ''; return; }
+    grPaintDetail(nd, null);                       // what the map already knows, immediately
+    if (nd.entity_id) grFetchDossier(nd.entity_id, nd);
+  }
+
+  /* REACHING WHAT IS NOT DRAWN. The 55-node cap is a drawing budget, never a limit on what
+     can be found: a search hit or a related entity that did not make the picture still opens
+     its full record here. */
+  function grOpenEntity(eid, label, type) {
+    if (!eid) return;
+    var hit = gr.nodes.filter(function (x) { return (x.entity_id || x.id) === eid; })[0];
+    if (hit) { gr.alpha = Math.max(gr.alpha, .35); grSelect(hit, true); return; }
+    var ghost = { id: eid, entity_id: eid, label: label || eid, type: type || 'person',
+                  size: 8, offCanvas: true };
+    gr.sel = null; gr.shown = eid;
+    grPaintDetail(ghost, null);
+    grFetchDossier(eid, ghost);
+  }
+
+  /* SEARCH IS WHAT MAKES THE CAP HONEST. It asks the server, not the drawn nodes, so an
+     entity the picture left out is one keystroke away. */
+  var grQT = 0;
+  function grSearch(q) {
+    var box = document.getElementById('gr-res'); if (!box) return;
+    q = (q || '').trim();
+    if (!q) { box.className = 'gr-res'; box.innerHTML = ''; return; }
+    box.className = 'gr-res on';
+    box.innerHTML = '<div class="gr-none">searching…</div>';
+    fetch(API + '/entities?q=' + encodeURIComponent(q) + '&limit=12', { headers: headers() })
+      .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var rows = (d && d.entities) || [];
+        if (!rows.length) { box.innerHTML = '<div class="gr-none">nothing on file by that name</div>'; return; }
+        var total = (d && d.total != null) ? d.total : rows.length;
+        box.innerHTML = rows.map(function (e) {
+          return '<button class="gr-li" data-ent="' + cmdEsc(e.entity_id || '')
+            + '" data-label="' + grTxt(e.display_name || '') + '" data-type="' + cmdEsc(e.type || '') + '">'
+            + '<span class="gr-dot sm" style="background:' + (GR_COL[e.type] || GR_COL.person) + '"></span>'
+            + '<span class="gr-ln">' + grTxt(e.display_name || e.entity_id) + '</span>'
+            + '<span class="gr-lk">' + grTxt(e.type || '') + ' · ' + (e.source_count || 0) + ' src'
+            + (e.review_status && e.review_status !== 'confirmed' ? ' · ' + grTxt(e.review_status) : '')
+            + '</span></button>';
+        }).join('')
+        + (total > rows.length
+            ? '<div class="gr-none">' + (total - rows.length) + ' more match — narrow it</div>' : '');
+        Array.prototype.forEach.call(box.querySelectorAll('.gr-li'), function (b) {
+          b.onclick = function () {
+            grOpenEntity(b.getAttribute('data-ent'), b.getAttribute('data-label'),
+                         b.getAttribute('data-type'));
+          };
+        });
+      })
+      .catch(function () { box.innerHTML = '<div class="gr-none">the search did not answer</div>'; });
   }
 
   function grBind(cv) {
@@ -2944,34 +3524,85 @@
     gr.open = false;
     if (gr.raf) { cancelAnimationFrame(gr.raf); gr.raf = 0; }
     var v = document.getElementById('graph-view'); if (v) v.style.display = 'none';
+    syncPanelOpen();
+  }
+
+  /* THE HEADER TELLS THE TRUTH (2026-09-21). It used to say "N nodes · N links", which is a
+     statement about the drawing, not about what Ace holds — and the drawing is capped. It
+     now says how many of the total are shown, how many links are still unreviewed, how many
+     sources are unresolved, and, whenever the cap hides anything, that the rest are reachable
+     by search. "Nothing to map yet" was also a lie waiting to happen: with graph seeds
+     imported as review suggestions rather than entities, a sparse map is the correct answer
+     and the counts must say WHY it is sparse rather than looking broken. */
+  function grMetaLine(d) {
+    var c = (d && d.counts) || null, om = (d && d.omitted) || {};
+    if (!c) {   // the old model-built cache, served verbatim — describe it as it is
+      return gr.nodes.length + ' nodes · ' + gr.edges.length + ' links'
+           + (d && d.cached ? ' · cached' : ' · fresh');
+    }
+    var shown = (c.nodes_shown != null) ? c.nodes_shown : gr.nodes.length;
+    var total = (c.entities_total != null) ? c.entities_total : shown;
+    var parts = [shown + ' of ' + total + ' entities shown',
+                 ((c.edges_shown != null) ? c.edges_shown : gr.edges.length) + ' links',
+                 (c.unreviewed_edges || 0) + ' unreviewed',
+                 (c.unresolved_sources || 0) + ' unresolved'];
+    if (c.seeds_pending) parts.push(c.seeds_pending + ' seeds awaiting review');
+    if (c.review_open) parts.push(c.review_open + ' in the review queue');
+    if (om.nodes > 0) parts.push(om.nodes + ' not drawn — search to reach them');
+    return parts.join(' · ');
+  }
+  function grEmptyLine(d) {
+    if (d && d.error) return 'couldn’t read the map — try ⟳';
+    var c = (d && d.counts) || {};
+    var bits = [];
+    if (c.seeds_pending) bits.push(c.seeds_pending + ' seed(s) waiting to be reviewed');
+    if (c.review_open) bits.push(c.review_open + ' item(s) in the review queue');
+    if (c.unresolved_sources) bits.push(c.unresolved_sources + ' unresolved source(s)');
+    if (!bits.length) return (d && d.hint) ? grSafe(d.hint) : 'nothing on the map yet';
+    return 'nothing confirmed to draw yet — ' + bits.join(' · ') + ' · search still reaches them';
+  }
+  // The queue button wears the number, so the count and the way to open it are one thing.
+  function grPaintReview(d) {
+    var b = document.getElementById('gr-review'); if (!b) return;
+    var c = (d && d.counts) || {};
+    var open = c.review_open || 0;
+    b.textContent = open ? '⚑ ' + open : '⚑';
+    b.title = open
+      ? open + ' proposal(s) waiting on you' + (c.seeds_pending ? ', ' + c.seeds_pending
+          + ' of them suggestions from the old map' : '')
+        + '. Nothing in the queue has been accepted.'
+      : 'Memory review — nothing is waiting.';
   }
   function grLoad(refresh) {
     var meta = document.getElementById('gr-meta'), load = document.getElementById('gr-load');
     var rf = document.getElementById('gr-refresh');
-    // A cold build is a full Opus read of every fact + the whole board — tens of seconds.
-    // Say so, and lock ⟳ so an impatient second tap can't start a second extraction.
+    // ⟳ RE-READS, IT DOES NOT REBUILD. The map is drawn from stored entities now, so this
+    // costs nothing and cannot start a model run; the old paid rebuild is still on the
+    // server behind source=legacy&refresh=1 and is deliberately not on a button.
     if (rf) { rf.disabled = true; rf.style.opacity = '.45'; }
-    if (load) {
-      load.style.display = 'block';
-      load.textContent = refresh ? '◉ re-reading the whole book — this takes a moment…' : '◉ mapping…';
-    }
-    if (meta) meta.textContent = 'reading facts + board…';
+    if (load) { load.style.display = 'block'; load.textContent = '◉ mapping…'; }
+    if (meta) meta.textContent = 'reading the record…';
     function unlock() { if (rf) { rf.disabled = false; rf.style.opacity = ''; } }
-    fetch(API + '/graph' + (refresh ? '?refresh=1' : ''), { headers: headers() })
+    fetch(API + '/graph', { headers: headers() })
       .then(function (r) { if (r.status === 401) { toLogin(); throw 0; } return r.json(); })
       .then(function (d) {
         unlock();
-        gr.nodes = (d.nodes || []).map(function (n) { return { id: n.id, label: n.label, type: n.type, size: n.size || 8 }; });
+        grPaintReview(d);
+        gr.nodes = (d.nodes || []).map(function (n) {
+          return { id: n.id, entity_id: n.entity_id || '', label: n.label, type: n.type,
+                   size: n.size || 8, review_status: n.review_status || '',
+                   source_count: n.source_count || 0 };
+        });
         gr.edges = (d.edges || []).slice();
         if (load) load.style.display = gr.nodes.length ? 'none' : 'block';
         if (!gr.nodes.length) {
-          if (load) load.textContent = d.error ? 'couldn’t read the map — try ⟳' : 'nothing to map yet';
-          if (meta) meta.textContent = '';
+          if (load) load.textContent = grEmptyLine(d);
+          // Even with nothing drawn the counts stay on screen: sparse is an answer, not a fault.
+          if (meta) meta.textContent = grMetaLine(d);
           return;
         }
         grFit(); grSeed(); grSelect(null);
-        if (meta) meta.textContent = gr.nodes.length + ' nodes · ' + gr.edges.length + ' links' +
-          (d.cached ? ' · cached' : ' · fresh');
+        if (meta) meta.textContent = grMetaLine(d);
         if (!gr.raf) gr.raf = requestAnimationFrame(grLoop);
       })
       .catch(function () {
@@ -2986,19 +3617,40 @@
     v.style.display = 'block';
     v.innerHTML = '<canvas id="graph-canvas"></canvas>' +
       '<div class="gr-hd"><span class="gr-orb"></span><div class="gr-ttl">KNOWLEDGE GRAPH</div>' +
+      '<input class="gr-q" id="gr-q" type="search" autocomplete="off" ' +
+      'placeholder="Search people, orgs, projects" aria-label="Search everything Ace has on file">' +
       '<div class="gr-meta" id="gr-meta"></div>' +
-      '<button class="gr-ic" id="gr-refresh" title="Rebuild from the latest facts">⟳</button>' +
+      // THE COUNT IS THE DOOR (2026-09-21). The header can honestly say "1030 in the
+      // review queue"; saying it without a way in is a number shaped like an answer.
+      '<button class="gr-ic gr-ic-w" id="gr-review" ' +
+      'title="Memory review — proposals waiting on you. Nothing in it has been accepted.">⚑</button>' +
+      '<button class="gr-ic" id="gr-refresh" title="Re-read the stored map (no model call)">⟳</button>' +
       '<button class="gr-ic" id="gr-x" title="Close">✕</button></div>' +
+      '<div class="gr-res" id="gr-res"></div>' +
       '<div class="gr-legend"><span><i style="background:' + GR_COL.person + '"></i>People</span>' +
-      '<span><i style="background:' + GR_COL.deal + '"></i>Deals</span>' +
-      '<span><i style="background:' + GR_COL.category + '"></i>Categories</span></div>' +
+      '<span><i style="background:' + GR_COL.org + '"></i>Orgs / deals</span>' +
+      '<span><i style="background:' + GR_COL.project + '"></i>Projects / categories</span></div>' +
       '<div class="gr-detail" id="gr-detail"></div>' +
       '<div class="gr-load" id="gr-load">◉ mapping…</div>';
     gr.cv = v.querySelector('#graph-canvas');
     grFit(); grBind(gr.cv);
     v.querySelector('#gr-x').onclick = graphClose;
-    v.querySelector('#gr-refresh').onclick = function () { grLoad(true); };
-    grLoad(false);
+    v.querySelector('#gr-refresh').onclick = function () { grLoad(); };
+    v.querySelector('#gr-review').onclick = function () {
+      if (window.aceReview) window.aceReview.queue('');
+    };
+    var q = v.querySelector('#gr-q');
+    q.addEventListener('input', function () {
+      // Debounced: one request per pause, not one per keystroke.
+      if (grQT) clearTimeout(grQT);
+      grQT = setTimeout(function () { grQT = 0; grSearch(q.value); }, 220);
+    });
+    q.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { if (grQT) clearTimeout(grQT); grQT = 0; grSearch(q.value); }
+      if (e.key === 'Escape') { q.value = ''; grSearch(''); }
+    });
+    syncPanelOpen();
+    grLoad();
   }
   window.addEventListener('resize', function () {
     if (!gr.open || !gr.cv) return;
@@ -3448,7 +4100,29 @@
     hold: function () { state.busy = true; armBusyWatch(); },
     busy: function () { return state.busy; },
     pending: function () { return pendingSays.map(function (q) { return q.text; }); },
-    quiet: function (ms) { BUSY_QUIET_MS = ms; } };
+    quiet: function (ms) { BUSY_QUIET_MS = ms; },
+    // NOTIFICATION HOOKS (2026-09-21). The browser checks drive the REAL policy rather than a
+    // copy of it: `sync` is the same read a reconnect does, `notify` reads/sets the saved
+    // preference, and `listening` stands in for an open mic — headless has no microphone, and
+    // a fake audio device would put tones through the voice pipeline, which is not what the
+    // test is about. Nothing here is reachable from the UI.
+    sync: syncTaskCards,
+    notify: function (m) { if (m) setNotifyMode(m); return notifyMode(); },
+    // Where the graph has drawn each node, in SCREEN coordinates. Read-only: the browser
+    // check uses it to aim a real tap at a real node, so the hit-testing, the selection and
+    // the dossier fetch are all the shipped code rather than a function called directly.
+    nodes: function () {
+      return gr.nodes.map(function (n) {
+        return { id: n.id, entity_id: n.entity_id || '', label: n.label, type: n.type,
+                 x: gr.tx + n.x * gr.k, y: gr.ty + n.y * gr.k };
+      });
+    },
+    listening: function (on) {
+      state.micActive = !!on;
+      var b = $('mic-btn'); if (b) b.classList.toggle('active', !!on);
+      setOrbState(on ? 'listening' : 'idle');
+      return state.micActive;
+    } };
 
   boot();
 })();

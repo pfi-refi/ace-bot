@@ -1,3 +1,23 @@
+# v2.1.0 — Organized, sourced memory and verified board receipts
+
+Memory now has stable people, organization and project records linked to original dated
+conversations, saved facts, profiles and board items. Use lookup_entity for a sourced record
+and recall to supplement it: coverage is partial, names may be ambiguous, and older saved
+claims are not proof of current state. New conversations are indexed in the background;
+periodic recovery catches missed updates. Existing originals and board status are preserved.
+The graph reads stored records without a paid redraw. Memory review and Find a source are
+available under More; uncertain proposals require review and do not silently merge people.
+Money still comes from the budget spreadsheet, and a plan is never a completed task.
+
+Board edits report success only after requested values and preserved fields match read-back;
+already-satisfied edits say so. Pop-up preferences are per device: All, Results, or Off.
+Required approvals stay visible. Dismissed old cards stay dismissed; history stays in Activity.
+These changes improve organization and verification, not perfect recall or human awareness.
+
+# v2.0.5 — Board saves and status reliability
+
+Waiting and Ready edits persist; current status overrides old wording. Empty optional tool arguments preserve existing state. Board failures are visible, draft owner text is retained, and Today refreshes consistently. No board migration or redesign.
+
 # What changed in Ace
 
 Ace reads the top of this file every turn (it rides in the cached half of his context, so it
@@ -10,6 +30,27 @@ context had no idea the records/actions model existed. Both were fixed by hand. 
 he reads is the fix that holds.
 
 ---
+
+## 2026-09-20 — Quieter while working
+
+Use one brief acknowledgment only when a wait needs it, then return with the outcome.
+Voice no longer reads each tool status or repeats waiting phrases. Silent connection
+keep-alives and clear failure/approval messages remain. Successful batches of board updates
+get a short spoken result; detailed receipts stay on screen. Explain the process when asked.
+
+
+## 2026-09-20 — Today controls and more reliable follow-through
+
+Today checkboxes refresh from confirmed saves, with editing and guarded completion on the
+floating card. Background deep dives have bounded recovery for cut-off text, saved diagnostic
+receipts and time limits; incomplete work is never called complete. Growing versions of the
+same spoken request reuse its deep-dive job. Provider billing failures are explained and recap
+retries back off. Context sources have time limits and missing sources are disclosed.
+Conversation guidance prioritizes current corrections, thoughtful recommendations and useful
+connections over repetition. Recommendations are not permission to send, spend or delete.
+These changes do not guarantee perfect judgment or healthy provider billing. Live dialogue
+and broad deep-dive acceptance still need verification once API access is available.
+
 
 
 ## 2026-09-12 — Reliable background receipts and scheduled follow-ups
@@ -226,3 +267,10 @@ Finished sentences still send immediately; unfinished ones wait for the rest.
 
 "Tomorrow" is frozen to a real date when it is written, so an item cannot claim to be due
 tomorrow for four days running.
+
+## 2026-09-13 — Board control repair (prepared, not deployed)
+
+Today refreshes its rows from the save receipt immediately after completion. Floating Today
+cards can open the matching item for editing and offer explicit confirmation to finish a
+waiting/reference item. Completion and edit controls have 44px targets and keyboard labels.
+Failed saves show a notice. Waiting items still require deliberate confirmation.

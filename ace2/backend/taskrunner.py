@@ -203,7 +203,7 @@ def start_recovery() -> None:
 
 
 async def dispatch(capability: str, args: dict, origin: str = "voice",
-                   title: str = "", call=None) -> dict:
+                   title: str = "", call=None, origin_key: str = "") -> dict:
     """Accept a request and start it. Returns the card to show immediately.
 
     A DISPATCHED REQUEST IS NOT COMPLETED WORK, so the card returned here is `queued` or
@@ -234,7 +234,7 @@ async def dispatch(capability: str, args: dict, origin: str = "voice",
         daily_cap = int(conn.get("daily_task_cap") or spec.get("daily_cap") or 0)
         day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
     verdict, t = await asyncio.to_thread(tasks.accept, capability, args, origin, title,
-                                         daily_cap, day)
+                                         daily_cap, day, **({"origin_key": origin_key} if origin_key and capability == "deep_dive" else {}))
     if verdict == "over_cap":
         # Refused BEFORE a row exists, so a declined request never looks like work.
         return {"state": tasks.FAILED, "sticky": True, "auto_dismiss_ms": 0,

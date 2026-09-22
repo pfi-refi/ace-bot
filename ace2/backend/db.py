@@ -358,6 +358,24 @@ def _backfill():
             logger.warning("db backfill daybank failed: %s", e)
 
 
+# ── Telling the entity index that a source row appeared ─────────────────────────
+def _note_source(corpus: str, native_id) -> None:
+    """Hand a newly written row's identity to the entity index, when one is installed.
+
+    SILENT BY CONSTRUCTION (2026-09-21). The index is an ADDITIVE layer that points at these
+    rows by id — it is not part of the write, and it owns nothing here. So the import is lazy
+    and the entire call is swallowed: a checkout with no entity_index.py, a database where its
+    tables were never created, or any failure inside it must leave this fact/turn/item write
+    exactly as successful as it was a moment ago. The originals are the record. An index that
+    can fail a write has been given authority it was never meant to have.
+    """
+    try:
+        from . import entity_index
+        entity_index.note(corpus, str(native_id))
+    except Exception:
+        pass
+
+
 # ── Conversation turns (replaces history.py's Drive store) ───────────────────────
 def append_turn(role: str, content: str, source: str = "ace2") -> bool:
     if not content or not content.strip():
@@ -374,8 +392,16 @@ def append_turn(role: str, content: str, source: str = "ace2") -> bool:
                 "INSERT INTO turns (source, role, content) "
                 "SELECT %s, %s, %s WHERE NOT EXISTS ("
                 "  SELECT 1 FROM turns WHERE role = %s AND content = %s "
-                "  AND ts > now() - interval '3 minutes')",
+                "  AND ts > now() - interval '3 minutes') RETURNING id",
                 (source, role, content, role, content))
+            # RETURNING, not a second SELECT: the idempotency guard above means this INSERT
+            # writes either one row or none, and only the row it actually wrote should be
+            # announced to the index. An empty result here is the duplicate case — the turn
+            # is already indexed, so there is nothing new to say. The public return stays
+            # bool; the id exists for the hook and for nothing else.
+            new = cur.fetchone()
+        if new:
+            _note_source("turn", new[0])
         return True
     except Exception as e:
         logger.warning("db append_turn failed: %s", e)
@@ -1371,6 +1397,7 @@ def add_item(kind: str, text: str, due: str = None, tags: list = None, dedup: bo
                 "NULL, %s, %s)",
                 (item["id"], item["ts"], kind, text, json.dumps(item["tags"]), item["due"],
                  (parent_id or None), _bkt))
+        _note_source("item", item["id"])
         if similar:
             item["similar"] = similar   # heads-up, not a block: caller can merge/update
         return True, item
@@ -1468,8 +1495,12 @@ def add_fact(text: str, tier: str = "active", subject: str = None, kind: str = N
             cur.execute("SELECT 1 FROM facts WHERE lower(text)=lower(%s) AND invalid_at IS NULL LIMIT 1", (text,))
             if cur.fetchone():
                 return True
-            cur.execute("INSERT INTO facts (subject, kind, text, tier, source) VALUES (%s,%s,%s,%s,%s)",
+            cur.execute("INSERT INTO facts (subject, kind, text, tier, source) "
+                        "VALUES (%s,%s,%s,%s,%s) RETURNING id",
                         (subject, kind, text, tier, source))
+            new = cur.fetchone()
+        if new:
+            _note_source("fact", new[0])
         return True
     except Exception as e:
         logger.warning("db add_fact failed: %s", e)
@@ -1482,8 +1513,18 @@ def archive_fact(fact_id: int, superseded_by: int = None) -> bool:
     ensure_ready()
     try:
         with _conn() as c, c.cursor() as cur:
-            cur.execute("UPDATE facts SET tier='archived', invalid_at=now(), superseded_by=%s WHERE id=%s",
+            cur.execute("UPDATE facts SET tier='archived', invalid_at=now(), superseded_by=%s "
+                        "WHERE id=%s RETURNING id",
                         (superseded_by, fact_id))
+            hit = cur.fetchone()
+        # A RETIREMENT IS A CHANGE THE INDEX HAS TO HEAR ABOUT (2026-09-21). The hooks first
+        # went on the three INSERT paths only, which meant the index learned every new fact
+        # and never learned that an old one had been retired — so an entity's "current" facts
+        # would keep quoting a fact the store had already moved into history. Retiring is
+        # exactly the moment current becomes history, so it is exactly when the index must be
+        # told. Nothing here can fail the archival: _note_source swallows everything.
+        if hit:
+            _note_source("fact", fact_id)
         return True
     except Exception as e:
         logger.warning("db archive_fact failed: %s", e)
@@ -1497,7 +1538,15 @@ def set_fact_tier(fact_id: int, tier: str) -> bool:
     try:
         with _conn() as c, c.cursor() as cur:
             inv = "invalid_at = now()" if tier == "archived" else "invalid_at = NULL"
-            cur.execute(f"UPDATE facts SET tier=%s, {inv} WHERE id=%s", (tier, fact_id))
+            cur.execute(f"UPDATE facts SET tier=%s, {inv} WHERE id=%s RETURNING id",
+                        (tier, fact_id))
+            hit = cur.fetchone()
+        # Same reason as archive_fact: this is the other door a fact walks through to become
+        # history, and it swings both ways — 'archived' back to 'active' restores a fact to
+        # current, which the index equally has to hear about. `inv` is a literal chosen from
+        # two constants above, never caller input; the id and tier are bound parameters.
+        if hit:
+            _note_source("fact", fact_id)
         return True
     except Exception as e:
         logger.warning("db set_fact_tier failed: %s", e)
@@ -1607,10 +1656,19 @@ def _completion_blocked(item_id: str) -> tuple:
             return False, ""
         if lane == classify.LANE_WAITING:
             who = (it.get("waiting_on") or "").strip() or "someone else"
+            # THE ADVICE FOLLOWS THE KIND (2026-09-21). An ACTION can be parked on someone
+            # else now, and 'settled' is still refused on one — so the record's way out sent
+            # Ace straight into a second refusal with nowhere to go. A record keeps its
+            # lifecycle; an action has only the deliberate override.
+            if (it.get("entry") or "") == "record":
+                return True, ("NOT COMPLETED — this is waiting on %s, who owns the next move. "
+                              "Nothing on Brady's side finishes it. If it really is finished, "
+                              "set state='settled'; only pass force_close if Brady says to close "
+                              "it anyway. Do NOT tell him it is done." % who)
             return True, ("NOT COMPLETED — this is waiting on %s, who owns the next move. "
-                          "Nothing on Brady's side finishes it. If it really is finished, "
-                          "set state='settled'; only pass force_close if Brady says to close "
-                          "it anyway. Do NOT tell him it is done." % who)
+                          "Nothing on Brady's side finishes it; it finishes when they act. "
+                          "Only pass force_close if Brady says to close it anyway. Do NOT "
+                          "tell him it is done." % who)
         if lane == classify.LANE_REFERENCE:
             return True, ("NOT COMPLETED — this is a RECORD Brady tracks, which has a state "
                           "rather than an ending. Update it, or set state='settled' when it "
@@ -1621,16 +1679,17 @@ def _completion_blocked(item_id: str) -> tuple:
         return False, ""
 
 
-def update_item(item_id: str, status: str = None, text: str = None,
-                tags: list = None, due: str = None, match: str = None,
-                superseded_by: str = None, closed_by: str = None,
-                entry: str = None, state: str = None, waiting_on: str = None,
-                bucket: str = None, next_step: str = None, followup: str = None,
-                chosen_on: str = None, force_close: bool = False, reviewed: bool = None) -> tuple:
-    """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
-    due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
-    doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
-    so the model can ask instead of guessing (the 'said it's done → new twin' fix)."""
+def _resolve_item_id(item_id: str, match: str = None) -> tuple:
+    """(ok, id) for a write's target, or (False, reason) when it cannot be named.
+
+    ONE RESOLVER, NOT TWO (2026-09-21). This is `update_item`'s own resolution block, lifted
+    out unchanged so the verified wrapper below can learn WHICH row a `match` landed on
+    without re-implementing the rules. A second copy would drift, and the drift would show up
+    as a receipt that names a different row than the one the write touched — the exact class
+    of lie this release exists to remove. The rules themselves are untouched: an id wins
+    outright, a `match` applies only on a single candidate whose text matches exactly, and
+    anything else comes back as a reason the caller can hand to Brady.
+    """
     item_id = (item_id or "").strip()
     if not item_id and (match or "").strip():
         cands = find_items(match, status="open")
@@ -1643,6 +1702,72 @@ def update_item(item_id: str, status: str = None, text: str = None,
                            + " | ".join(f"[{c['id']}] {(c.get('text') or '')[:60]}" for c in cands))
     if not item_id:
         return False, "no id"
+    return True, item_id
+
+
+# The columns a receipt may speak about, in the order a receipt would name them. Deliberately
+# NOT every column: done_ts, closed_by and updated_at are bookkeeping the store stamps on its
+# own, so listing them as "changed" would put words in Brady's mouth about fields he never
+# asked for. `status` is compared but is spoken as the VERB rather than as a field name.
+_ITEM_FIELDS = ("text", "status", "due", "state", "waiting_on", "next_step", "followup",
+                "entry", "area", "category", "tags", "chosen_on", "reviewed", "superseded_by")
+
+
+def get_item(item_id: str) -> dict:
+    """One board row exactly as it is STORED, or None.
+
+    Stored, not derived (2026-09-21). `read_items` fills an empty `state`, `entry` or `bucket`
+    in from the row's wording so the screens always have something to show — useful there, and
+    useless here, because a derivation can change while nothing was written and a verification
+    read that cannot tell those apart is not a verification. This is the same distinction
+    tests/board_repair_check.py's `raw_state` helper draws, made available to the app.
+
+    `id` is passed as a parameter, never formatted into the SQL; a caller-supplied identifier
+    is data.
+    """
+    item_id = (item_id or "").strip()
+    if not item_id:
+        return None
+    ensure_ready()
+    try:
+        with _conn() as c, c.cursor() as cur:
+            cur.execute("SELECT id, ts, kind, text, status, tags, due, done_ts, parent_id, "
+                        "superseded_by, entry, state, waiting_on, closed_by, bucket, "
+                        "next_step, followup, chosen_on, updated_at, reviewed_at "
+                        "FROM daybank_items WHERE id = %s", (item_id,))
+            r = cur.fetchone()
+        if not r:
+            return None
+        it = {"id": r[0], "ts": r[1].isoformat() if r[1] else None, "kind": r[2], "text": r[3],
+              "status": r[4], "tags": list(r[5] or []), "due": r[6],
+              "done_ts": r[7].isoformat() if r[7] else None, "parent_id": r[8],
+              "superseded_by": r[9], "entry": r[10], "state": r[11], "waiting_on": r[12],
+              "closed_by": r[13], "bucket": r[14], "next_step": r[15], "followup": r[16],
+              "chosen_on": r[17], "updated_at": r[18].isoformat() if r[18] else None,
+              "reviewed_at": r[19].isoformat() if r[19] else None}
+        # The two names a receipt uses for these, so the diff and the sentence agree.
+        it["area"] = r[14]
+        it["category"] = _item_cat(it)
+        it["reviewed"] = bool(r[19])
+        return it
+    except Exception as e:
+        logger.warning("db get_item failed for %s: %s", item_id, type(e).__name__)
+        return None
+
+
+def update_item(item_id: str, status: str = None, text: str = None,
+                tags: list = None, due: str = None, match: str = None,
+                superseded_by: str = None, closed_by: str = None,
+                entry: str = None, state: str = None, waiting_on: str = None,
+                bucket: str = None, next_step: str = None, followup: str = None,
+                chosen_on: str = None, force_close: bool = False, reviewed: bool = None) -> tuple:
+    """Edit a board item: status ('open'|'done'|'dropped'), text, tags (full replace),
+    due (''=clear), superseded_by (merge link). Resolve by `match` text when the caller
+    doesn't have the id — one confident hit applies, several return AMBIGUOUS candidates
+    so the model can ask instead of guessing (the 'said it's done → new twin' fix)."""
+    ok, item_id = _resolve_item_id(item_id, match)
+    if not ok:
+        return False, item_id
     ensure_ready()
     # ── THE COMPLETION RULE LIVES HERE ─────────────────────────────────────────────
     # It was in the HTTP route, which protected the panel and nothing else: Ace's own
@@ -1656,6 +1781,29 @@ def update_item(item_id: str, status: str = None, text: str = None,
         blocked, why = _completion_blocked(item_id)
         if blocked:
             return False, why
+    # STATE, WITH A WAY BACK (2026-09-21). None leaves it alone, "" puts the row back to
+    # READY/ACTIVE (stored, see below), and a known value sets it. Validated HERE and not
+    # only on the HTTP route, for the same reason the completion rule moved down: Ace's own
+    # update_item tool calls this function directly.
+    if state is not None:
+        state = str(state).strip()
+        if state and state not in ("active", "waiting", "settled", "decide"):
+            return False, f"unknown state '{state}' — use active, waiting, settled or decide"
+    # ONE RULE, ONE PLACE (2026-09-21). The refusal lived only on the HTTP route, so Ace's own
+    # update_item tool — which calls this function directly — could still settle an ACTION:
+    # the same two-tier split the completion rule was moved down here to end. The kind is what
+    # this call says, else what the row already is. The lookup is paid for ONLY here, on a
+    # settled write, never on the ordinary edit path.
+    # Missing lookup evidence is not permission to change a row's lifecycle.
+    # Return an honest retry reason instead of guessing the kind or suggesting conversion.
+    if state == "settled":
+        kind = entry if entry in ("action", "record") else next(
+            (x.get("entry") for x in read_items(active_only=False)
+             if x.get("id") == item_id), None)
+        if kind is None:
+            return False, "Unable to verify item kind; refresh the board and retry. Nothing changed."
+        if kind == "action":
+            return False, "Only a reference record can be settled. This action remains unchanged."
     try:
         import json
         with _conn() as c, c.cursor() as cur:
@@ -1683,8 +1831,20 @@ def update_item(item_id: str, status: str = None, text: str = None,
             # 'decide' joins the stored states (release one). It is set by Brady, never
             # derived — see classify.lane_of, where the old "undated and no next step"
             # inference was removed.
-            if state in ("active", "waiting", "settled", "decide"):
-                sets.append("state = %s"); args.append(state)
+            if state is not None:
+                # "" IS STORED AS 'active', NOT NULLED (2026-09-21). A NULL state is DERIVED
+                # on every read (read_items → _derive_state), so on a record worded like a
+                # parked row — "Thiami — everything submitted, waiting on approval" — clearing
+                # the column brought WAITING straight back with an owner re-read out of the
+                # prose, and Brady's "this is Ready" never stuck. A stored value always wins
+                # over the derivation, and his correction is exactly what this column is for.
+                sets.append("state = %s"); args.append(state or "active")
+                # LEAVING WAITING DROPS THE OWNER. waiting_on outlived the state otherwise,
+                # and classify.has_next_step() counts it as a recorded next move — so a row
+                # back in Ready would still claim its next step was "Tony". An explicit
+                # waiting_on in the same call wins; this only fills the silence.
+                if state != "waiting" and waiting_on is None:
+                    sets.append("waiting_on = NULL")
             if waiting_on is not None:
                 sets.append("waiting_on = %s"); args.append((waiting_on.strip() or None))
             # next_step / followup follow the SAME contract as waiting_on and due:
@@ -1721,10 +1881,121 @@ def update_item(item_id: str, status: str = None, text: str = None,
             args.append(item_id)
             cur.execute(f"UPDATE daybank_items SET {', '.join(sets)} WHERE id = %s RETURNING text", args)
             row = cur.fetchone()
+        if row:
+            _note_source("item", item_id)
         return (True, row[0]) if row else (False, f"no item {item_id}")
     except Exception as e:
         logger.error("db update_item failed: %s", e)
         return False, str(e)
+
+
+def _expected_item_values(before: dict, requested: dict) -> dict:
+    """Persisted values required by this edit, including preservation of omitted fields."""
+    fields = ("text", "status", "tags", "due", "entry", "state", "waiting_on",
+              "next_step", "followup", "chosen_on", "superseded_by", "bucket", "reviewed")
+    expected = {key: before.get(key) for key in fields}
+    for key in ("status", "entry"):
+        if requested.get(key) is not None:
+            expected[key] = requested[key]
+    if requested.get("text") is not None:
+        expected["text"] = requested["text"].strip()
+    if requested.get("tags") is not None:
+        expected["tags"] = canon_tags(requested["tags"])
+    for key in ("due", "followup", "chosen_on"):
+        if requested.get(key) is not None:
+            expected[key] = pin_due(requested[key]) or None
+    if requested.get("state") is not None:
+        expected["state"] = str(requested["state"]).strip() or "active"
+        if expected["state"] != "waiting" and requested.get("waiting_on") is None:
+            expected["waiting_on"] = None
+    for key in ("waiting_on", "next_step"):
+        if requested.get(key) is not None:
+            value = requested[key].strip()
+            expected[key] = (value[:300] if key == "next_step" else value) or None
+    for key in ("superseded_by", "bucket"):
+        if requested.get(key) is not None and str(requested[key]).strip():
+            expected[key] = str(requested[key]).strip()
+    if requested.get("reviewed") is not None:
+        expected["reviewed"] = bool(requested["reviewed"])
+    elif requested.get("chosen_on") is not None and expected["chosen_on"]:
+        expected["reviewed"] = True
+    return expected
+
+
+def update_item_verified(item_id: str = "", **kwargs) -> tuple:
+    """`update_item`, plus the evidence that it landed. (ok, detail).
+
+    WHY THIS EXISTS (2026-09-21, from the live test). Three typed turns changed exactly the
+    row Brady meant, and all three replies told him the outcome was unconfirmed — one said
+    confirmed and unconfirmed in the same breath. The chain was honest at every link and wrong
+    at the end: the tool returned prose, `ops.classify` can only call prose REPORTED, and
+    REPORTED means "claimed, nothing verified". The repair is not to trust the prose. It is to
+    produce something a verifier can actually check, which means reading the saved row back.
+
+    So: resolve the target, snapshot it, hand the write to `update_item` (whose rules —
+    the completion guard, the state vocabulary, the settled/action split, area membership —
+    are NOT duplicated here and must never be), then read the row again in a FRESH read and
+    diff the two. `detail` carries the resolved id, whether a `match` resolved it, both
+    snapshots, the fields that moved and the fields that did not.
+
+    `ok` means the store accepted the write AND the saved row came back. It deliberately does
+    NOT mean something changed: a request that restates what the row already says is accepted
+    by Postgres and changes nothing, and the caller — not this function — decides what to say
+    about that. The one thing that cannot happen is `ok` on an unread row, because then there
+    is no evidence, and no evidence is how the false receipts got written.
+    """
+    detail = {"id": "", "match_used": False, "before": None, "after": None,
+              "changed": {}, "unchanged": [], "accepted": False, "read_back": False,
+              "reason": ""}
+    ok, resolved = _resolve_item_id(item_id, kwargs.get("match"))
+    if not ok:
+        detail["reason"] = resolved
+        return False, detail
+    detail["id"] = resolved
+    detail["match_used"] = not (item_id or "").strip() and bool((kwargs.get("match") or "").strip())
+    before = get_item(resolved)
+    if before is None:
+        # Same words update_item uses for a row that is not there, so a caller preserving the
+        # store's refusal verbatim keeps saying the same thing it always said.
+        detail["reason"] = f"no item {resolved}"
+        return False, detail
+    detail["before"] = before
+    kwargs.pop("match", None)          # already resolved; resolving twice is how ids drift
+    ok, res = update_item(resolved, **kwargs)
+    detail["accepted"] = bool(ok)     # the store's own verdict, kept apart from the evidence
+    after = get_item(resolved)
+    detail["after"] = after
+    detail["read_back"] = after is not None
+    if after is not None:
+        for f in _ITEM_FIELDS:
+            b, a = before.get(f), after.get(f)
+            if b != a:
+                detail["changed"][f] = {"from": b, "to": a}
+            else:
+                detail["unchanged"].append(f)
+        # A category move rewrites the tag list, so both keys fire for one edit. The category
+        # is the part anyone names out loud; the raw list is only worth reporting when it
+        # moved on its own.
+        if "category" in detail["changed"]:
+            detail["changed"].pop("tags", None)
+    if not ok:
+        detail["reason"] = res
+        return False, detail
+    if after is None:
+        detail["reason"] = ("the store accepted the write but the saved row could not be read "
+                            "back, so nothing about it is verified")
+        return False, detail
+    expected = _expected_item_values(before, kwargs)
+    mismatches = {key: {"expected": value, "actual": after.get(key)}
+                  for key, value in expected.items() if after.get(key) != value}
+    if after.get("id") != resolved:
+        mismatches["id"] = {"expected": resolved, "actual": after.get("id")}
+    detail["mismatches"] = mismatches
+    detail["verified"] = not mismatches
+    if mismatches:
+        detail["reason"] = "saved values did not match the requested edit: " + ", ".join(mismatches)
+        return False, detail
+    return True, detail
 
 
 # ── Hybrid search — recall by MEANING, not by literal keyword ────────────────────

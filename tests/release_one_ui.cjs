@@ -188,16 +188,19 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   await p.screenshot({ path: `${OUT}/04-editor.png` });
 
   const dId = await ed.getAttribute('data-id');
-  await ed.locator('input.cmd-edue').fill('2026-09-18');
-  await ed.locator('input.cmd-efup').fill('2026-09-15');
+  // Anchor to the disposable server's Today fixture, not a date that will become overdue.
+  const fixtureToday = (await api('/daybank?all=true')).items.find(i => i.text === 'County permit fee due').due_on;
+  const futureDeadline = new Date(Date.parse(fixtureToday + 'T12:00:00Z') + 3 * 86400000).toISOString().slice(0,10);
+  await ed.locator('input.cmd-edue').fill(futureDeadline);
+  await ed.locator('input.cmd-efup').fill(fixtureToday);
   await ed.locator('.cmd-enext').fill('call the office when they open');
   await ed.locator('.cmd-estate').selectOption('decide');
   await ed.locator('.cmd-etag[data-tag="Admin"]').click();
   await ed.locator('.cmd-esave').click();
   await p.waitForTimeout(1100);
   const saved = (await api('/daybank?all=true')).items.find(i => i.id === dId);
-  ok('the deadline saved', saved.due_on === '2026-09-18', String(saved.due_on));
-  ok('the follow-up saved as its own field', saved.followup === '2026-09-15', String(saved.followup));
+  ok('the deadline saved', saved.due_on === futureDeadline, String(saved.due_on));
+  ok('the follow-up saved as its own field', saved.followup === fixtureToday, String(saved.followup));
   ok('the next step saved', saved.next_step === 'call the office when they open');
   // A DEADLINE AND AN OPEN QUESTION ARE BOTH TRUE. The lane belongs to the deadline — a row
   // he flagged must not drop out of Overdue and be missed — but the mark stays readable.
@@ -271,21 +274,22 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   await wr.scrollIntoViewIfNeeded();
   const before9 = (await api('/daybank?all=true')).items.find(i => /Permit sign-off/.test(i.text));
 
-  let asked = '';
-  // once(), not on(): a lingering listener double-handles the next dialog and Playwright
-  // throws "Cannot dismiss dialog which is already handled".
-  p.once('dialog', d => { asked = d.message(); d.dismiss(); });
-  await wr.locator('.cmd-box').click(); await p.waitForTimeout(1100);
+  await wr.locator('.cmd-box').click();
+  const asked = await p.locator('.board-confirm').innerText();
+  await p.getByRole('button', {name:'Keep open', exact:true}).click();
   const after9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
-  ok('closing a parked row asks first', /close it anyway/i.test(asked), asked.replace(/\n+/g, ' '));
+  ok('closing a parked row asks first', /complete this item/i.test(asked), asked.replace(/\n+/g, ' '));
   ok('...and names what it is parked on', /waiting on the county/i.test(asked));
   ok('a stray tap still cannot close a waiting record', after9.status === 'open', after9.status);
 
-  p.once('dialog', d => d.accept());
-  await wr.locator('.cmd-box').click(); await p.waitForTimeout(1100);
+  await wr.locator('.cmd-box').click();
+  await p.getByRole('button', {name:'Yes, complete this item', exact:true}).click();
+  await p.waitForTimeout(1100);
   const forced9 = (await api('/daybank?all=true')).items.find(i => i.id === before9.id);
   ok('...but confirming does close it', forced9.status === 'done', forced9.status);
   // Put it back through the UI — reopening is not a close, so it asks nothing.
+  // A completed row no longer belongs to Waiting; find it under Everything's Completed group.
+  await lens('all');
   await showDoneRows();
   await p.locator('.cmd-row', { hasText: 'Permit sign-off' }).first().locator('.cmd-box').click();
   await p.waitForTimeout(1100);
@@ -377,6 +381,26 @@ const ok = (n, c, d) => results.push((c ? 'PASS' : 'FAIL') + ' — ' + n + (d ? 
   await p.screenshot({ path: `${OUT}/05-phone-editor.png`, fullPage: false });
   await p.click('.cmd-ecancel'); await lens('today');
   await p.screenshot({ path: `${OUT}/06-phone-today.png`, fullPage: false });
+
+  // Receipt-driven completion must disappear from Today and remain done after reload.
+  await lens('today');
+  const dueRow = rowFor('County permit fee due');
+  await dueRow.locator('.cmd-box').click();
+  await p.waitForTimeout(800);
+  ok('Today: completed deadline disappears after receipt', await rowFor('County permit fee due').count() === 0);
+  const doneDeadline = (await api('/daybank?all=true')).items.find(i => i.text === 'County permit fee due');
+  ok('Today: the completion is persisted', doneDeadline.status === 'done');
+  await p.reload({waitUntil:'networkidle'}); await openCmd(); await lens('today');
+  ok('Today: completion survives page reload', await rowFor('County permit fee due').count() === 0);
+  await lens('waiting');
+  await rowFor('Permit sign-off').locator('.cmd-box').click();
+  const dialogBox = await p.locator('.board-confirm').boundingBox();
+  const yesBox = await p.getByRole('button',{name:'Yes, complete this item',exact:true}).boundingBox();
+  ok('phone: guarded confirmation fits viewport', dialogBox && dialogBox.x >= 0 && dialogBox.x + dialogBox.width <= 390 && dialogBox.y >= 0 && dialogBox.y + dialogBox.height <= 844);
+  ok('phone: confirmation control is reachable', yesBox && yesBox.y >= 0 && yesBox.y + yesBox.height <= 844);
+  await p.keyboard.press('Escape');
+  ok('Escape cancels the completion dialog', await p.locator('.board-confirm').count() === 0);
+  ok('Escape keeps the underlying row open', (await api('/daybank?all=true')).items.find(i => /Permit sign-off/.test(i.text)).status === 'open');
 
   ok('no page errors', errs.length === 0, errs.join(' / '));
   await b.close();

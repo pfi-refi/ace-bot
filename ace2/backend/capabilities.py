@@ -1444,6 +1444,11 @@ _DEEP_DIVE_RULES = (
     "He asked for this on a live call and is waiting, so it must be worth the wait.\n\n"
     "Rules you must follow exactly:\n"
     "• Lead with the answer. If he asked a question, the first line answers it.\n"
+    "• For a full status sweep, explicitly cover bills due, incoming money, stuck deals, "
+    "and unfinished follow-ups; mark unavailable evidence in each requested section. "
+    "Keep the briefing concise enough to finish. Prioritize the next useful action and why.\n"
+    "• The newest direct user correction outranks old board wording or assistant recaps. "
+    "A waiting reply is not confirmation and a planned action is not completed.\n"
     "• Answer only the requested scope. Use personal context only when relevant and requested. "
     "For a conceptual explanation, use generic examples; do not introduce personal names, "
     "tasks, finances, or suggested actions. Respect requested length.\n"
@@ -1487,6 +1492,30 @@ def _deep_dive_schemas() -> list:
     return [dict(t) for t in _tools.TOOLS if t.get("name") in DEEP_DIVE_READS]
 
 
+def _recent_direct_updates(turns, max_chars=6000):
+    """Keep newest direct corrections, including the END of an oversized voice update."""
+    selected = []
+    remaining = max_chars
+    for turn in reversed(turns or []):
+        if turn.get("role") != "user":
+            continue
+        text = str(turn.get("content") or "").strip()
+        if not text:
+            continue
+        prefix = f"[{turn.get('ts') or 'undated'}] user: "
+        if len(prefix) + len(text) > remaining:
+            if selected:
+                break
+            marker = "[earlier part omitted; use recall for full context] "
+            text = marker + text[-max(1, remaining - len(prefix) - len(marker)):]
+        line = prefix + text
+        selected.append(line)
+        remaining -= len(line) + 1
+        if remaining <= 0:
+            break
+    return "\n".join(reversed(selected)) or "(no recent direct user updates available)"
+
+
 async def deep_dive(args: dict, call, progress=None, known=None,
                     checkpoint=None, should_stop=None) -> dict:
     """Answer a wide question about Brady's own world, in the background, read-only.
@@ -1495,6 +1524,8 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     signature is the shared one so the runner treats every capability identically.
     """
     import asyncio as _asyncio
+    import time as _time
+    deadline = _time.monotonic() + 180
     question = (args.get("question") or "").strip()
     if not question:
         raise Failed("no question was given, so there was nothing to look into")
@@ -1507,7 +1538,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     client = args.get("_client")          # injected by tests; real client resolved below
     if client is None:
         from . import chat as _chat
-        client = _chat._anthropic()
+        client = _chat._anthropic().with_options(max_retries=0)
 
     async def say(msg):
         if progress:
@@ -1515,15 +1546,78 @@ async def deep_dive(args: dict, call, progress=None, known=None,
 
     reads_run = 0
     used: dict = {}
+    model_rounds = []
+    partial_answer = ""
+    recovery_used = False
 
     def receipt():
         return {"question": question, "reads_run": reads_run, "tools_used": dict(used),
-                "context_scope": scope, "budget_checked": budget_checked}
+                "context_scope": scope, "budget_checked": budget_checked,
+                "model_rounds": list(model_rounds),
+                **({"partial_answer": partial_answer, "partial_is_incomplete": True} if partial_answer else {})}
 
     async def check_stop():
+        if _time.monotonic() >= deadline:
+            raise Failed("The deep dive reached its three-minute time limit; no complete answer is confirmed.", receipt())
         if should_stop and await should_stop():
             raise Cancelled("Stopped partway. Nothing was changed — this only ever reads.",
                             receipt())
+
+    async def request_answer(messages, system, schemas=None):
+        # One bounded recovery for truncation, across the whole job. Never execute
+        # partial tool arguments or count partial prose as a completed briefing.
+        nonlocal partial_answer, recovery_used
+        import time as _time
+        async def invoke(msgs, offered, ceiling):
+            await check_stop()
+            if len(model_rounds) >= 8:
+                raise Failed("The deep dive reached its model-call limit; the partial result is incomplete.", receipt())
+            started = _time.monotonic()
+            try:
+                response = await _asyncio.wait_for(client.messages.create(
+                    model=_DEEP_DIVE_MODEL, max_tokens=ceiling, system=system,
+                    messages=msgs, **({"tools": offered} if offered else {})),
+                    timeout=max(.01, min(60, deadline - _time.monotonic())))
+            except Exception as error:
+                from .provider_status import classify
+                kind, _ = classify(error)
+                model_rounds.append({"stop_reason": "error", "error_kind": kind,
+                                     "elapsed_ms": round((_time.monotonic() - started) * 1000)})
+                raise
+            usage = getattr(response, "usage", None)
+            model_rounds.append({
+                "stop_reason": getattr(response, "stop_reason", None),
+                "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+                "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+                "elapsed_ms": round((_time.monotonic() - started) * 1000),
+            })
+            logger.info("deep_dive round=%d stop=%s output_tokens=%d elapsed_ms=%d",
+                        len(model_rounds), model_rounds[-1]["stop_reason"],
+                        model_rounds[-1]["output_tokens"], model_rounds[-1]["elapsed_ms"])
+            await check_stop()
+            return response
+
+        response = await invoke(messages, schemas, 3000)
+        blocks = list(getattr(response, "content", []) or [])
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            partial_answer = "".join(getattr(block, "text", "") or "" for block in blocks
+                                     if getattr(block, "type", "") == "text").strip()
+            if checkpoint:
+                await checkpoint(receipt())
+            if not recovery_used and partial_answer and not any(
+                    getattr(block, "type", "") == "tool_use" for block in blocks):
+                recovery_used = True
+                await say("Finishing the briefing from the sources already checked")
+                # Keep the full earlier tool history, but discard a truncated assistant
+                # turn. Ask for a complete concise rewrite, not a duplicate second half.
+                retry_messages = list(messages) + [{"role": "assistant", "content": partial_answer},
+                    {"role": "user", "content":
+                     "Your answer was cut off. Rewrite the complete answer concisely from the "
+                     "sources already checked. Cover every part of my original question; explicitly "
+                     "mark anything you could not verify. No new reads or actions. Do not quote "
+                     "unverified money figures. Aim for at most 1200 words."}]
+                response = await invoke(retry_messages, None, 5000)
+        return response
 
     def final_answer(resp):
         # Tool preambles, truncated text and provider refusals are not completed analyses.
@@ -1553,6 +1647,12 @@ async def deep_dive(args: dict, call, progress=None, known=None,
         try:
             ctx_slow, ctx_fast = await _chat._live_context()
             context = (ctx_slow or "") + "\n" + (ctx_fast or "")
+            try:
+                recent = await _asyncio.wait_for(_asyncio.to_thread(_chat._unified_thread, 40), timeout=6)
+                recent_text = _recent_direct_updates(recent)
+                context += "\nRECENT DIRECT USER UPDATES (dated reports, not proof of tool writes):\n" + recent_text
+            except Exception:
+                context += "\nRecent direct conversation updates unavailable; do not claim to have checked them."
         except Exception as e:
             await check_stop()
             raise Failed(f"I could not reach your data to build this ({type(e).__name__}), so I "
@@ -1561,7 +1661,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
         await check_stop()
         from .integrations import bills_sheet
         try:
-            bills, budget_error = await bills_sheet.fetch_bills()
+            bills, budget_error = await _asyncio.wait_for(bills_sheet.fetch_bills(), timeout=10)
         except Exception:
             bills, budget_error = [], "Budget spreadsheet unavailable; amounts are unverified."
         await check_stop()
@@ -1585,12 +1685,12 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     refused: list = []
     budget_hit = False
 
-    for _round in range(max(1, DEEP_DIVE_MAX_ROUNDS)):
+    for _round in range(min(6, max(1, DEEP_DIVE_MAX_ROUNDS))):
         await check_stop()
         try:
-            resp = await client.messages.create(
-                model=_DEEP_DIVE_MODEL, max_tokens=2000, system=system,
-                messages=messages, **({"tools": schemas} if schemas else {}))
+            resp = await request_answer(messages, system, schemas)
+        except (Failed, Cancelled):
+            raise
         except Exception as e:
             await check_stop()
             raise Failed(f"the deep dive did not come back ({type(e).__name__}), so I have "
@@ -1626,8 +1726,9 @@ async def deep_dive(args: dict, call, progress=None, known=None,
             else:
                 reads_run += 1
                 try:
-                    out = await _asyncio.to_thread(
-                        _tools.execute, name, getattr(b, "input", {}) or {})
+                    out = await _asyncio.wait_for(_asyncio.to_thread(
+                        _tools.execute, name, getattr(b, "input", {}) or {}),
+                        timeout=max(.01, min(12, deadline - _time.monotonic())))
                 except Exception as e:
                     out = f"⚠️ {name} failed with {type(e).__name__}."
                 if not _looks_like_error(out):
@@ -1647,8 +1748,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
                          "have. Say plainly what you did not get to check."})
         await check_stop()
         try:
-            resp = await client.messages.create(
-                model=_DEEP_DIVE_MODEL, max_tokens=2000, system=system, messages=messages)
+            resp = await request_answer(messages, system)
         except Exception as e:
             await check_stop()
             raise Failed(f"The final deep-dive answer failed ({type(e).__name__}). "
@@ -1682,6 +1782,8 @@ async def deep_dive(args: dict, call, progress=None, known=None,
 
     return {
         "question": question,
+        "model_rounds": model_rounds,
+        "truncation_recovered": recovery_used,
         "context_scope": scope,
         "budget_checked": budget_checked,
         "answer": answer,

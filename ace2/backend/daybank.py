@@ -165,6 +165,13 @@ def update_item(item_id: str, status: str = None, text: str = None,
     if (tags is not None or due is not None or match or superseded_by
             or next_step is not None or followup is not None):
         return False, "category/due/match/next-step edits require the Postgres store"
+    # THE FIELDS THAT LINE FORGOT (2026-09-21). These fell straight through to a writer that
+    # only applies status and text — and still answered ok, which is the silent-write class
+    # the refusal above exists to kill. Drive has no column for any of them.
+    if (entry is not None or state is not None or waiting_on is not None
+            or bucket is not None or chosen_on is not None or reviewed is not None):
+        return False, ("entry/state/waiting-on/area/chosen-on/reviewed edits require the "
+                       "Postgres store")
     return _drive_update_item(item_id, status, text)
 
 

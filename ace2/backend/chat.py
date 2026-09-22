@@ -642,16 +642,68 @@ def _mem_slim(mem_list: list, head: int = 40, tail: int = 70,
         + keep[head:] if len(keep) > head else [])
 
 
+async def _context_read(name, awaitable, timeout=6.0):
+    started = time.monotonic()
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    finally:
+        logger.info("context_source name=%s elapsed_ms=%d", name,
+                    (time.monotonic() - started) * 1000)
+
+
+# ── The entity registry: an INDEX of who exists, not their facts (2026-09-21) ──
+# Ace could recall SENTENCES about people but had no register OF people, so "what do I
+# know about Sienna" returned whichever prose shared words with the question. This line
+# tells him who exists and what each one's id is; `lookup_entity` fetches the actual
+# record, sourced and dated, only when a turn needs it. Deliberately no private facts
+# here: this string rides in every typed and every spoken turn, so anything in it is in
+# the prompt for every subject, including the ones the conversation has nothing to do
+# with.
+_REGISTRY_HEADER = (
+    "PEOPLE / ORGS / PROJECTS Ace has on file (ids for lookup_entity — this is an INDEX, "
+    "not the facts; call lookup_entity for dated records and provenance. Supplement "
+    "partial records with recent conversation and recall):")
+
+
+def _registry_lines(block: str) -> list:
+    """[] when there is nothing, so the block is OMITTED rather than rendered empty."""
+    block = (block or "").strip()
+    return ["", _REGISTRY_HEADER, block] if block else []
+
+
+async def _entity_registry_block(timeout: float = 1.5) -> str:
+    """The registry — bounded in characters by entity_context, in WALL CLOCK here.
+
+    Guarded end to end: a missing module, a cold pool, a slow query — every one of them
+    yields "" and the block is simply left out. THE EXISTING RECALL PATH REMAINS THE
+    FALLBACK and is not weakened by this: `memory_db._build_corpus` still reads the old
+    Drive monthly history, the shared Telegram window and the recovered pre-wipe archive,
+    and none of those are in the Postgres index this block summarises. An absent registry
+    costs a shortcut, never a memory.
+    """
+    try:
+        from . import entity_context
+        return await _context_read("entity_registry",
+                                   asyncio.to_thread(entity_context.registry_block),
+                                   timeout=timeout) or ""
+    except Exception:
+        return ""
+
+
 async def _live_context() -> tuple:
     """Fetch memory + calendar (recent past → next 3 weeks) + tasks + inbox + weather
     + data bank concurrently."""
-    memory, cal_all, bank, inbox, personal, wx = await asyncio.gather(
-        asyncio.to_thread(brain.read_memory),
-        asyncio.to_thread(get_events_structured, 21, 7),  # last week → next 3 weeks
-        asyncio.to_thread(daybank.read_items, True),
-        asyncio.to_thread(get_gmail_summary),
-        asyncio.to_thread(get_personal_inbox_structured, 5),   # dormant until GOOGLE_TOKEN_JSON_PERSONAL set
-        get_weather(),
+    # Started here and awaited after the gather, so its 1.5s budget OVERLAPS the heavy
+    # fetches rather than being added to the turn.
+    _reg_task = asyncio.ensure_future(_entity_registry_block())
+    memory, cal_all, bank, inbox, personal, wx, meta = await asyncio.gather(
+        _context_read("memory", asyncio.to_thread(brain.read_memory)),
+        _context_read("calendar", asyncio.to_thread(get_events_structured, 21, 7)),  # last week → next 3 weeks
+        _context_read("board", asyncio.to_thread(daybank.read_items, True)),
+        _context_read("business_inbox", asyncio.to_thread(get_gmail_summary)),
+        _context_read("personal_inbox", asyncio.to_thread(get_personal_inbox_structured, 5)),   # dormant until GOOGLE_TOKEN_JSON_PERSONAL set
+        _context_read("weather", get_weather()),
+        _context_read("memory_metadata", asyncio.to_thread(brain.read_memory_meta)),
         return_exceptions=True,
     )
 
@@ -663,7 +715,7 @@ async def _live_context() -> tuple:
     today_str = now.strftime("%Y-%m-%d")
     today_events = [e for e in events if e.get("date") == today_str]
     mem_list = _mem_slim(ok(memory, []), live_entities=_live_entities(ok(bank, [])))
-    mem = _group_facts(mem_list, meta=_CTX.get("memory_meta") or brain.read_memory_meta())
+    mem = _group_facts(mem_list, meta=ok(meta, {}))
     today_sched = _format_today_schedule(today_events, now)
     bank_str = _format_daybank(ok(bank, []))
     p_list = ok(personal, [])   # [] until Brady links br80mcgraw — nothing shows before then
@@ -685,6 +737,7 @@ async def _live_context() -> tuple:
         "",
         "ACE MEMORY (what you know about Brady and PFI):",
         mem,
+        *_registry_lines(await _reg_task),
         "",
         "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
         _recap_block(),
@@ -720,6 +773,13 @@ async def _live_context() -> tuple:
         "Tasks is retired — never route tasks there unless Brady explicitly says 'Google'):",
         bank_str,
     ]
+    failures = [name for name, value in zip(
+        ("memory", "calendar", "board", "business inbox", "personal inbox", "weather", "memory metadata"),
+        (memory, cal_all, bank, inbox, personal, wx, meta)) if isinstance(value, Exception)]
+    if failures:
+        parts.insert(0, "SOURCE AVAILABILITY: " + ", ".join(failures) +
+                     " could not be verified this turn. Empty sections for these sources do NOT "
+                     "mean there are no records. Say what is unavailable; do not invent status.")
     return "\n".join(slow), "\n".join(parts)
 
 
@@ -1197,6 +1257,7 @@ def ctx_diag() -> dict:
     }
 _RECAP_TTL = 3 * 3600.0   # regenerate the "where we left off" recap at most every ~3h
 _recap_running = [False]
+_recap_retry = {"after": 0.0, "failures": 0}
 _ctx_lock: asyncio.Lock = asyncio.Lock()
 _ctx_keepwarm_started = [False]
 
@@ -1244,6 +1305,17 @@ async def _refresh_ctx_inner() -> None:
         )
     except Exception as e:
         logger.warning("voice ctx refresh failed: %s", e)
+    # THE REGISTRY IS WARMED HERE, NOT ON THE CALL (2026-09-21). Voice reads _CTX, and the
+    # whole reason it does is that a per-turn fan-out is what makes ElevenLabs cut a live
+    # call. So the index of who exists is fetched on this background pass, bounded, and a
+    # failure keeps the last good value — never an exception, and never a wait on the
+    # turn's critical path.
+    try:
+        from . import entity_context
+        _CTX["registry"] = await asyncio.wait_for(
+            asyncio.to_thread(entity_context.registry_block), timeout=1.5) or ""
+    except Exception:
+        pass
     # Keep the "where we left off" recap warm + regenerate if stale — background, never blocking.
     try:
         asyncio.create_task(_refresh_recap())
@@ -2764,7 +2836,7 @@ async def _refresh_recap() -> None:
     stale and there are newer turns. So context COMPOUNDS: he opens every conversation knowing
     the decisions, open loops, and what's pending — never a cold reload. Background only; never
     on a turn's hot path. One at a time (_recap_running)."""
-    if _recap_running[0]:
+    if _recap_running[0] or time.monotonic() < _recap_retry["after"]:
         return
     _recap_running[0] = True
     try:
@@ -2791,6 +2863,10 @@ async def _refresh_recap() -> None:
         resp = await client.messages.create(
             model=VOICE_MODEL, max_tokens=420,
             messages=[{"role": "user", "content": (
+                "Use only direct user statements and explicit tool receipts as evidence. Assistant prose "
+                "is not proof of completion, confirmation or payment. Preserve pending versus confirmed, "
+                "expected versus received, and plans versus finished actions. Newest user corrections win. "
+                "Do not treat an interrupted draft as a completed action. Keep names/cases separate. "
                 "From this recent conversation, write Brady's assistant a tight 'where we left off' "
                 "brief so he can pick up seamlessly. Cover: decisions made, what's IN PROGRESS or "
                 "waiting on someone, open loops / promised follow-ups, and anything Brady said he "
@@ -2800,9 +2876,14 @@ async def _refresh_recap() -> None:
         if recap:
             await asyncio.to_thread(db.add_summary, recap, "recap")
             _CTX["recap"] = recap
+            _recap_retry.update(after=0.0, failures=0)
             logger.info("recap regenerated (%d chars)", len(recap))
     except Exception as e:
-        logger.warning("recap refresh failed: %s", e)
+        from .provider_status import classify, retry_delay
+        _recap_retry["failures"] += 1
+        delay = retry_delay(e, _recap_retry["failures"])
+        _recap_retry["after"] = time.monotonic() + delay
+        logger.warning("recap refresh failed kind=%s; retry in %ss", classify(e)[0], delay)
     finally:
         _recap_running[0] = False
 
@@ -3019,6 +3100,9 @@ async def _fast_context() -> str:
         "",
         "ACE MEMORY (durable facts about Brady and PFI):",
         mem,
+        # Pre-warmed in _refresh_ctx_inner — read from cache here, never fetched on the
+        # turn. Absent or empty ⇒ the block is omitted entirely.
+        *_registry_lines(_CTX.get("registry") or ""),
         "",
         "WHERE YOU LEFT OFF (recap of your recent conversations — pick up from here, don't re-ask):",
         _recap_block(),
@@ -3607,7 +3691,7 @@ def user_safe_reason(text: str, limit: int = 180) -> str:
     return (out[:limit].rstrip() + "…") if len(out) > limit else out
 
 
-def guarded_reply(turn_text: str, operations: list) -> str:
+def guarded_reply(turn_text: str, operations: list, spoken_mode=False) -> str:
     """Ace's answer with unproven success claims suppressed, then the receipt beneath it.
 
     A RECEIPT IS AN ADDITION, NOT A REPLACEMENT. This was `receipt or cleaned_text`, so any
@@ -3622,11 +3706,11 @@ def guarded_reply(turn_text: str, operations: list) -> str:
     mutations = [o for o in ops if o.get("state") not in (OP_READ, OP_UI, None)]
     all_verified = bool(mutations) and all(o.get("state") == OP_DONE for o in mutations)
     spoken = unsupported_action_reply(turn_text or "", warn=not all_verified)
-    receipt = action_receipt_reply(ops)
+    receipt = action_receipt_reply(ops, spoken_mode=spoken_mode)
     return "\n\n".join(x for x in (spoken.strip(), receipt) if x)
 
 
-def action_receipt_reply(operations: list) -> str:
+def action_receipt_reply(operations: list, spoken_mode=False) -> str:
     """Render ONLY recorded operation states; queued/read results never prove mutation.
 
     The record's own verifier/classifier is the trust boundary. This layer prevents the
@@ -3637,7 +3721,14 @@ def action_receipt_reply(operations: list) -> str:
               OP_REVIEW: "Waiting for your approval; not done",
               OP_UNKNOWN: "Outcome unconfirmed; check before retrying",
               OP_FAILED: "Failed or refused; no successful action confirmed"}
+    board_done = [o for o in operations if o.get("state") == OP_DONE
+                  and o.get("tool") in ("capture_item", "update_item", "capture")]
+    summarize_board = spoken_mode and len(board_done) >= 3
+    if summarize_board:
+        lines.append(f"Completed {len(board_done)} board updates; the detailed receipts are on screen.")
     for operation in operations:
+        if summarize_board and operation.get("state") == OP_DONE and operation.get("tool") in ("capture_item", "update_item", "capture"):
+            continue
         state = operation.get("state")
         if state not in labels:
             continue
@@ -3649,8 +3740,11 @@ def action_receipt_reply(operations: list) -> str:
         # result lands) and already passed through user_safe_reason there.
         detail = (str(operation.get("text") or "").strip() if state == OP_DONE
                   else str(operation.get("reason") or "").strip())
-        lines.append(f"{labels[state]} — {detail or name}.")
-    if lines:
+        if spoken_mode and state == OP_DONE:
+            lines.append((detail or name).rstrip(".") + ".")
+        else:
+            lines.append(f"{labels[state]} — {detail or name}.")
+    if lines and not spoken_mode:
         lines.append("These results cover only the actions listed here.")
     return "\n".join(lines)
 
@@ -3669,6 +3763,7 @@ def unsupported_action_reply(text: str, warn: bool = True) -> str:
         rf"your (?:event|appointment|task|file|email|document))\s+"
         rf"(?:is|was|has been|['’]s)\s+(?:(?:now|successfully)\s+)*(?:{verbs}|all set)\b",
     )
+    affirmative += (r"\b(?:are|have been)\s+(?:all\s+)?(?:marked|completed|closed|updated|saved)\b",)
     # SENTENCE BY SENTENCE, NOT ALL OR NOTHING (Codex, 2026-09-11). This used to replace the
     # WHOLE reply the moment any success phrase matched, so "I updated the board. Chris is
     # next." lost the Chris sentence too — and it ignored the operations entirely, so a
@@ -3697,7 +3792,7 @@ def unsupported_action_reply(text: str, warn: bool = True) -> str:
     return " ".join(kept + [warning]).strip()
 
 
-async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None):
+async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=None, origin_key=""):
     """Run one Ace turn, emitting WS events via `emit(type, payload)` (async).
 
     prior: the conversation so far. The WS handler passes its per-connection
@@ -3719,6 +3814,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
     if not user_text:
         await emit("error", {"text": "Empty message"})
         return ""
+    _started_at = time.monotonic()
+    _first_delta_at = None
     maybe_toggle_privacy(user_text)   # flip Discreet Mode deterministically before context is built
     _turn_user_text[0] = user_text    # the confirm gate reads this to detect a spoken approval
 
@@ -3754,6 +3851,9 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
         ctx += await asyncio.to_thread(planning.context)
     except Exception as e:
         logger.warning("planning notebook unavailable: %s", type(e).__name__)
+
+    logger.info("turn_context route=%s elapsed_ms=%d", "voice" if fast else "typed",
+                (time.monotonic() - _started_at) * 1000)
 
     # Background work that settled since his last turn rides into THIS turn's context, so a
     # dispatched deep dive is answered in the conversation he is already having rather than
@@ -3861,6 +3961,10 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             async with _stream_cm as stream:
                 async for event in stream:
                     if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
+                        if _first_delta_at is None:
+                            _first_delta_at = time.monotonic()
+                            logger.info("turn_first_text route=%s elapsed_ms=%d", "voice" if fast else "typed",
+                                        (_first_delta_at - _started_at) * 1000)
                         turn_text.append(event.delta.text)
                         if not guard_actions:
                             await emit("delta", {"text": event.delta.text})
@@ -3903,7 +4007,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                         # text unchanged unless it asserts a success, and swaps it for a
                         # warning when it does. So suppress the claim, keep the conversation,
                         # and append the receipt underneath it.
-                        guarded = guarded_reply("".join(turn_text), turn_ops)
+                        guarded = guarded_reply("".join(turn_text), turn_ops, spoken_mode=fast)
                         full_reply.append(guarded)
                         await emit("delta", {"text": guarded})
                 else:
@@ -3945,6 +4049,9 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             for block in final.content:
                 if getattr(block, "type", "") != "tool_use":
                     continue
+                if block.name in tools.NATIVE_MUTATIONS or block.name in ops.JOURNALLED or block.name == "start_task":
+                    # Spontaneous capture after a conversational update also needs a receipt.
+                    guard_actions = True
                 if block.name in passthrough:
                     # An ElevenLabs system tool (end_call, skip_turn, …). We don't execute it —
                     # we relay the call back through the SSE stream and ElevenLabs performs the
@@ -4021,7 +4128,7 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
                         card = await taskrunner.dispatch(
                             cap, task_args,
                             origin=("voice" if fast else "typed"),
-                            title=task_title)
+                            title=task_title, **({"origin_key": origin_key} if origin_key and cap == "deep_dive" else {}))
                         card = card if isinstance(card, dict) else {}
                         await emit("task", card)
                         st = card.get("state")
@@ -4301,6 +4408,8 @@ async def stream_turn(user_text: str, emit, prior=None, fast=False, extra_tools=
             logger.warning("interrupted-turn receipts could not be saved")
         raise
     except Exception as e:
-        logger.error("stream_turn error: %s", e)
-        await emit("error", {"text": f"⚠️ {e}"})
+        from .provider_status import classify
+        kind, message = classify(e)
+        logger.error("stream_turn error kind=%s type=%s", kind, type(e).__name__)
+        await emit("error", {"text": message, "code": kind})
         return ""

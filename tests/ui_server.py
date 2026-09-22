@@ -178,6 +178,20 @@ try:
     # it — so a route added here lands behind the catch-all and 404s. Move it in front.
     _app.router.routes.insert(0, _app.router.routes.pop())
 
+    # Local-only UI entry for the card that voice can push. Never mounted by production.
+    from fastapi.responses import HTMLResponse
+    @_app.get('/board-fixture')
+    async def board_fixture():
+        html = (ROOT / 'ace2/index.html').read_text()
+        hook = """<button id="fixture-today" style="position:fixed;top:80px;left:20px;z-index:99999">Show fixture Today card</button><script>
+        document.getElementById('fixture-today').onclick=async function(){
+          const d=await fetch('/daybank?all=true',{headers:{Authorization:'Bearer dev'}}).then(r=>r.json());
+          window.aceDebug.card('daybank',d);
+        };
+        </script>"""
+        return HTMLResponse(html.replace('</body>',hook+'</body>'))
+    _app.router.routes.insert(0, _app.router.routes.pop())
+
     import uvicorn                                     # noqa: E402
     from ace2.backend.main import app                  # noqa: E402
     print('READY http://127.0.0.1:%d/' % PORT, flush=True)

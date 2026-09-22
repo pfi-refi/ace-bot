@@ -93,8 +93,26 @@
         <section class="more-group" aria-labelledby="more-group-2"><h2 id="more-group-2">Knowledge</h2>
           <button class="qa" data-panel="memory" title="What Ace knows"><span class="qg">◆</span>Memory</button>
           <button class="qa qa-graph" id="graph-btn" title="The knowledge graph — your whole book as a live map"><span class="qg">◉</span>Graph</button>
+          <!-- THE QUEUE HAS TO BE OPENABLE (2026-09-21). The identity bar leaves most of
+               the corpus as proposals and unmatched records on purpose; a count with no
+               way in is a number shaped like an answer. -->
+          <button class="qa" id="memory-review-open" title="Proposals waiting on you — nothing here has been accepted"><span class="qg">⚑</span>Memory review</button>
+          <button class="qa" id="source-search-open" title="Search every indexed record, including the ones that matched nothing"><span class="qg">⌕</span>Find a source</button>
         </section>
         <section class="more-group" aria-labelledby="more-group-3"><h2 id="more-group-3">Settings & tools</h2>
+          <!-- NOTIFICATIONS (2026-09-21). Which task cards are allowed to pop. Saved per
+               device on purpose: a popup belongs to the screen you are holding, not to the
+               account. Approvals ignore this setting — they are a gate, not a notification. -->
+          <div class="notify-ctl" role="group" aria-label="Notifications">
+            <div class="notify-lbl">Notifications</div>
+            <div class="notify-segs">
+              <button type="button" class="cmd-tog" data-notify="all">Everything</button>
+              <button type="button" class="cmd-tog" data-notify="results">Results only</button>
+              <button type="button" class="cmd-tog" data-notify="off">Off</button>
+            </div>
+            <div class="notify-hint">Saved on this device. Approvals always show, and Recent
+              activity always keeps the full history.</div>
+          </div>
           <button class="qa" id="connections-open">Connections</button>
           <button class="qa" data-panel="weather" title="Weather"><span class="qg">◍</span>Weather</button>
           <button class="qa" id="cool-btn" title="Cool mode — stops the ambient animation and live blur so the laptop stops cooking"><span class="qg">❄</span>Cool</button>
