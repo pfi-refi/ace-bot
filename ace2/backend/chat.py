@@ -2858,7 +2858,16 @@ async def _refresh_recap() -> None:
         turns = await asyncio.to_thread(db.recent_turns, 60)
         if not turns or len(turns) < 4:
             return
-        convo = "\n".join(f"{t.get('role')}: {(t.get('content') or '')[:300]}" for t in turns[-50:])
+        # Preserve dated direct updates, including corrections at the end of a brain
+        # dump. The old 300-character prefixes routinely lost the actual decision.
+        from .capabilities import _recent_direct_updates
+        from . import entity_context
+        convo = _recent_direct_updates(turns, max_chars=10000)
+        try:
+            related = await asyncio.wait_for(
+                asyncio.to_thread(entity_context.recap_context, turns), timeout=8)
+        except Exception:
+            related = "Organized memory unavailable; source coverage is partial."
         client = _anthropic()
         resp = await client.messages.create(
             model=VOICE_MODEL, max_tokens=420,
@@ -2867,11 +2876,16 @@ async def _refresh_recap() -> None:
                 "is not proof of completion, confirmation or payment. Preserve pending versus confirmed, "
                 "expected versus received, and plans versus finished actions. Newest user corrections win. "
                 "Do not treat an interrupted draft as a completed action. Keep names/cases separate. "
-                "From this recent conversation, write Brady's assistant a tight 'where we left off' "
+                "Use the related organized records for relevant historical context and live task state, "
+                "not as evidence of new progress. Surface a material disagreement between the user "
+                "and stored task state instead of silently resolving it. Ideas are not commitments; "
+                "partial progress does not complete a parent task. Do not quote monetary figures "
+                "from these sources; current amounts require the budget spreadsheet. "
+                "From these dated direct updates and related records, write Brady's assistant a tight 'where we left off' "
                 "brief so he can pick up seamlessly. Cover: decisions made, what's IN PROGRESS or "
                 "waiting on someone, open loops / promised follow-ups, and anything Brady said he "
                 "finished. 4-8 short concrete bullet lines (names, deals). No preamble.\n\n"
-                f"CONVERSATION:\n{convo}")}])
+                f"DIRECT USER UPDATES:\n{convo}\n\n{related}")}])
         recap = "".join(getattr(b, "text", "") for b in resp.content).strip()
         if recap:
             await asyncio.to_thread(db.add_summary, recap, "recap")

@@ -23,6 +23,7 @@ logger = logging.getLogger("ace2.taskrunner")
 # Watchers, not workers. A socket subscribes to be told; it never drives execution.
 _listeners: set = set()
 _running: dict = {}
+LISTENER_TIMEOUT = 2.0
 
 
 def subscribe(fn) -> None:
@@ -39,12 +40,13 @@ async def _broadcast(task: dict) -> None:
     payload = tasks.card(task)
     if not payload:
         return
-    for fn in list(_listeners):
+    async def deliver(fn):
         try:
-            await fn(payload)
+            await asyncio.wait_for(fn(payload), timeout=LISTENER_TIMEOUT)
         except Exception as e:
             logger.debug("task listener dropped: %s", e)
             _listeners.discard(fn)
+    await asyncio.gather(*(deliver(fn) for fn in list(_listeners)))
 
 
 async def _provider(name: str, arguments: dict) -> str:

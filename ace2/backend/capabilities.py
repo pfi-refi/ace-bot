@@ -1435,7 +1435,7 @@ _DEEP_DIVE_MODEL = os.environ.get("ACE2_DEEP_DIVE_MODEL", "claude-sonnet-5")
 # read_own_code is about this repository rather than about Brady's world, and read_attachment
 # needs a capture_id that only exists inside a conversation.
 DEEP_DIVE_READS = frozenset({
-    "get_calendar_range", "recall", "search_drive",
+    "get_calendar_range", "recall", "lookup_entity", "search_drive",
     "search_gmail", "read_gmail", "search_personal_gmail", "read_personal_gmail",
 })
 

@@ -503,6 +503,45 @@ def lookup(name_or_id: str, *, max_chars: int = DOSSIER_CHARS) -> str:
     return _bounded(lines, max_chars)
 
 
+def recap_context(turns: list, max_entities: int = 3) -> str:
+    """Relevant dossiers for the background recap, never the whole private graph.
+
+    Only names in direct user turns select records. Reuse the index's conservative
+    identity rules; a first name or collision cannot quietly select someone else's file.
+    Newest mentions win the bounded retrieval budget. This function writes nothing.
+    """
+    if layer_state() != STATE_READY:
+        return "Organized memory unavailable; this recap has partial source coverage."
+    with db._conn() as c, c.cursor() as cur:
+        _bound(cur, c)
+        index = entities.alias_index(cur)
+    selected, unresolved = [], []
+    for turn in reversed((turns or [])[-50:]):
+        if turn.get("role") != "user":
+            continue
+        for verdict, alias, ids, _ in entities.scan_aliases(
+                str(turn.get("content") or "")[-12000:], index):
+            if verdict == "resolved" and ids[0] not in selected:
+                selected.append(ids[0])
+            elif verdict == "ambiguous" and alias not in unresolved:
+                unresolved.append(alias)
+    limit = max(1, min(int(max_entities), 3))
+    lines = ["RELATED ORGANIZED MEMORY (selected from direct user mentions; partial coverage).",
+             "Do not turn older context into new progress. New user corrections outrank old records.",
+             entities.DATA_NOTE, entities.MONEY_NOTE]
+    if unresolved:
+        lines.append("Unresolved names — do not choose or merge identities: " +
+                     ", ".join(unresolved[:8]))
+    for entity_id in selected[:limit]:
+        record = dossier_text(entity_id)
+        lines.append(record or f"Record {entity_id} unavailable; do not infer its contents.")
+    if not selected:
+        lines.append("No unambiguous matching records selected; this does not mean nothing is stored.")
+    if len(selected) > limit:
+        lines.append("Additional related records omitted by the retrieval budget.")
+    return "\n\n".join(lines)
+
+
 # ── Global source search — the entrypoint for everything unresolved ─────────────
 # THE BLOCKER THIS CLOSES (Codex, REVIEW-BLOCKERS). `/entities?q=` searches ENTITIES, and
 # graph seeds deliberately create none — so a header reading "118 unresolved" pointed at

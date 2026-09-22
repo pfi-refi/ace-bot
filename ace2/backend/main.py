@@ -70,7 +70,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ace2.main")
 
-VERSION = "v2.1.1"
+VERSION = "v2.1.2"
 START_TIME = time.time()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -391,20 +391,21 @@ def _voice_origin_key(prior):
 _TURN_FINISH_GRACE = float(os.environ.get("ACE2_TURN_FINISH_GRACE", "25"))
 
 
+STAGE_SEND_TIMEOUT = 1.0
+
+
 async def publish_stage_event(event_type: str, payload: dict) -> int:
     """Broadcast a stage event to every connected HUD. Returns how many clients actually
     received it, so a voice handoff can tell whether any screen was there to build on."""
-    dead = []
-    sent = 0
-    for ws in list(_stage_clients):
+    async def deliver(ws):
         try:
-            await ws.send_json({"type": event_type, **payload})
-            sent += 1
+            await asyncio.wait_for(ws.send_json({"type": event_type, **payload}),
+                                   timeout=STAGE_SEND_TIMEOUT)
+            return 1
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _stage_clients.discard(ws)
-    return sent
+            _stage_clients.discard(ws)
+            return 0
+    return sum(await asyncio.gather(*(deliver(ws) for ws in list(_stage_clients))))
 
 
 # Missed queue notifications need an actual scheduled recovery path.

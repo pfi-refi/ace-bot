@@ -1,3 +1,12 @@
+# v2.1.2 — Memory-backed recaps and resilient background delivery
+
+Recaps now connect dated direct updates to relevant organized records, keep late corrections
+in long updates, distinguish ideas from commitments and flag disagreement with stored state.
+Only unambiguous user-mentioned identities select records; older context is not new progress.
+Personal deep dives can use lookup_entity. General questions still receive no personal tools.
+A stalled dashboard or task listener times out without holding other clients or task execution
+indefinitely. Background tasks remain server-owned while a voice turn starts and ends.
+
 # v2.1.1 — Ongoing memory without rerunning an import
 
 A direct introduction can create a sourced, unreviewed person record during normal use.
