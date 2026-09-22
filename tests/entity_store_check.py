@@ -683,8 +683,7 @@ try:
                     ('turn:%d' % new_turn,))
         got = cur.fetchone()
         assert got, 'the hook did not index the new turn at all'
-    later = entity_migrate.run(apply=True)
-    assert later["ok"] is True, later["errors"]
+    # No manual migration here: this must work through the live hook alone.
     quill = eid_of('Quill Farrow')
     assert quill, 'a brand-new introduction produced no entity and no candidate'
     rows, total = entities.find_entities('Quill', limit=10)
@@ -692,6 +691,22 @@ try:
         'the new person is not findable by search'
     qd = entities.dossier(quill)
     assert qd["counts"]["sources_linked"] >= 1, 'the new person has no sourced evidence'
+
+    # A later statement must grow the same record without a manual backfill.
+    with db._conn() as c, c.cursor() as cur:
+        cur.execute("INSERT INTO turns(source,role,content) VALUES('ace2','user',%s) RETURNING id,ts", ('Quill Farrow lives in Northfield.',))
+        follow_id, follow_ts = cur.fetchone()
+    entity_index.note('turn', follow_id)
+    assert entity_index.drain(timeout=15)
+    grown = entities.dossier(quill)
+    assert any(f.get('source_id') == 'turn:%d' % follow_id and f.get('attribute') == 'location' for f in grown['current'])
+    assert entities.get_entity(quill)['last_seen'] >= follow_ts.isoformat()
+    before_repeat = entities.counts()
+    entity_index.note('turn', follow_id)
+    assert entity_index.drain(timeout=15)
+    after_repeat = entities.counts()
+    for metric in ('entities','links_active','entity_facts'):
+        assert before_repeat[metric] == after_repeat[metric], metric + ' duplicated on hook replay'
 
     # ── 18. THE HOOK IS AN ENQUEUE, NOT A DATABASE CALL ────────────────────────
     import time as _t
@@ -757,9 +772,9 @@ try:
     final = entity_migrate.manifest()
     assert final == before_rollback, 'the rollback touched an original table'
     assert final["summaries"] == base["summaries"], 'summaries moved at any point'
-    # Three turns were appended on purpose by sections 16b, 16c and 17 to exercise the
+    # Four turns were appended on purpose by sections 16b, 16c and 17 to exercise the
     # live hook. Nothing else may have moved.
-    assert final["turns"]["rows"] == base["turns"]["rows"] + 3, \
+    assert final["turns"]["rows"] == base["turns"]["rows"] + 4, \
         'turns changed by something other than the rows this test appended'
 
     print('PASS: dry run wrote nothing and matched the apply exactly; the originals are '

@@ -651,6 +651,47 @@ def sentences(text: str, limit: int = 40) -> list:
     return [s.strip() for s in _SENTENCE_RE.findall(str(text or ""))[:limit] if s.strip()]
 
 
+def _learn_introductions_cur(cur, rec, sid, index):
+    """A direct introduction can create an unreviewed record, scoped to this source.
+
+    No first-name alias is globally confirmed. Existing ambiguous/rejected identities
+    are not merged or resurrected, and assistant narration cannot introduce a person.
+    """
+    if rec.get("role") not in ("user", "profile"):
+        return
+    for intro in introductions(rec.get("text") or "")[:8]:
+        name = _strip_possessive(intro["name"])
+        if not name:
+            continue
+        verdict, candidates = entities.resolve_in_index(name, index)
+        if verdict == "ambiguous":
+            continue
+        kind = intro.get("type") or "person"
+        if verdict == "resolved":
+            eid = candidates
+        else:
+            eid, _ = entities.upsert_entity_cur(
+                cur, kind, name, origin="direct_introduction", confidence=.6,
+                review_status="unreviewed", source_id=sid,
+                occurred_at=rec.get("occurred_at"),
+                key=entities.import_key(kind, entities.norm_alias(name)),
+                first_name_aliases=[name.split()[0]] if kind == "person" and len(name.split()) > 1 else ())
+            cur.execute("SELECT status, review_status FROM ace_entities WHERE entity_id=%s", (eid,))
+            state = cur.fetchone()
+            if not state or state[0] != "active" or state[1] == "rejected":
+                continue
+            index.clear()
+            index.update(entities.alias_index(cur))
+        entities.link_cur(cur, eid, sid, relation="introduced", method="introduction",
+                          origin="user_statement", confidence=.7, evidence=name,
+                          review_status="unreviewed")
+        if intro.get("relation"):
+            entities.add_entity_fact_cur(
+                cur, eid, "relationship", name + " — " + intro["relation"],
+                stated_at=rec.get("occurred_at"), source_id=sid, origin="user_statement",
+                source_class="user_statement", confidence=.7, supersede=False)
+
+
 # ── Indexing one source ─────────────────────────────────────────────────────────
 def index_source_cur(cur, rec: dict, index: dict, *, queue: bool = True,
                      origin: str = "migration", stats: dict = None) -> dict:
@@ -696,6 +737,9 @@ def index_source_cur(cur, rec: dict, index: dict, *, queue: bool = True,
     if not sid:
         return {"source_id": "", "status": "", "links_new": 0, "ambiguous": 0,
                 "tombstoned": 0, "excluded": False, "source_class": cls, "resolved": []}
+
+    if origin != "migration" and cls == "user_statement":
+        _learn_introductions_cur(cur, rec, sid, index)
 
     cur.execute("SELECT entity_id, relation, retracted_at FROM ace_entity_links "
                 "WHERE source_id = %s", (sid,))
@@ -766,6 +810,14 @@ def index_source_cur(cur, rec: dict, index: dict, *, queue: bool = True,
     if queue:
         _queue_unresolved(cur, sid, rec, text, ambiguous, refs, status,
                           bool(tombstoned), bump)
+    if origin != "migration":
+        # The migration and ongoing writes share the same bounded, source-only parser.
+        from . import entity_migrate
+        entity_migrate._entity_facts_for(cur, rec, sid, cls, index, st)
+    cur.execute("UPDATE ace_entities e SET last_seen=GREATEST(e.last_seen,%s::timestamptz) "
+                "WHERE e.review_status<>'rejected' AND EXISTS (SELECT 1 FROM ace_entity_links l "
+                "WHERE l.entity_id=e.entity_id AND l.source_id=%s AND l.retracted_at IS NULL)",
+                (rec.get("occurred_at"), sid))
     return {"source_id": sid, "status": status, "links_new": links_new,
             "ambiguous": len(ambiguous), "tombstoned": tombstoned, "excluded": False,
             "source_class": cls, "resolved": [e for e, _ in resolved]}
@@ -905,12 +957,12 @@ def drain(timeout: float = 10.0) -> bool:
     _ensure_worker()
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _QUEUE.empty():
-            time.sleep(0.02)                   # let the in-flight item finish
-            if _QUEUE.empty():
+        with _QUEUE.mutex:
+            if _QUEUE.unfinished_tasks == 0:
                 return True
         time.sleep(0.02)
-    return _QUEUE.empty()
+    with _QUEUE.mutex:
+        return _QUEUE.unfinished_tasks == 0
 
 
 def index_batch(corpus: str, limit: int = 500, since_native_id=None) -> dict:

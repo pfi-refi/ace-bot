@@ -1,3 +1,10 @@
+# v2.1.1 — Ongoing memory without rerunning an import
+
+A direct introduction can create a sourced, unreviewed person record during normal use.
+Later linked statements update that record and its last-seen date in the background.
+Repeating an indexing job adds no duplicates. Ambiguous names and rejected mappings stay
+unresolved; this does not confirm every first-name mention or merge people automatically.
+
 # v2.1.0 — Organized, sourced memory and verified board receipts
 
 Memory now has stable people, organization and project records linked to original dated

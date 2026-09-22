@@ -1,3 +1,11 @@
+# Live-learning acceptance correction — v2.1.1
+
+The original new-person test invoked a manual migration before checking discovery. Codex
+removed that shortcut and reproduced the missing live promotion. Normal indexing now handles
+direct introductions and dated attributes, updates recency, and waits for in-flight queue
+work in the test drain helper. The real-Postgres test introduces a person, adds a later
+location statement, and checks replay without invoking the migration again.
+
 # Final integration addendum — September 22, 2026
 
 Target release: v2.1.0. This addendum supersedes preliminary measurements below.
