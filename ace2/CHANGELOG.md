@@ -1,3 +1,9 @@
+# v2.1.3 — Accurate background read receipts
+
+A successful memory read stays successful when its source text mentions errors, permissions
+or failed past work. Actual native-tool failures remain failures. An unsuccessful attempted
+read is reported as an attempt, not as if no read ran. Write verification is unchanged.
+
 # v2.1.2 — Memory-backed recaps and resilient background delivery
 
 Recaps now connect dated direct updates to relevant organized records, keep late corrections

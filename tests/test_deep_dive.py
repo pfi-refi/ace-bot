@@ -88,6 +88,23 @@ class DeepDiveRuns(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(offered & tools.NATIVE_MUTATIONS, set())
         self.assertEqual(offered & set(ops.JOURNALLED), set())
 
+    async def test_source_error_vocabulary_is_not_a_failed_memory_read(self):
+        model = Model([tool_block("lookup_entity", {"name_or_id": "Nigel"})],
+                      [text_block("The sourced record was checked.")])
+        with patch.object(tools, "execute", return_value=(
+                "Nigel — project. [Brady said] We fixed the error and reviewed permissions.")):
+            out = await self.run_dive(model)
+        self.assertIn("lookup_entity", out["tools_used"])
+        self.assertFalse(any("no additional tool reads" in x for x in out["limits"]))
+
+    async def test_failed_read_is_an_attempt_not_no_read(self):
+        model = Model([tool_block("lookup_entity", {"name_or_id": "Nigel"})],
+                      [text_block("The record could not be checked.")])
+        with patch.object(tools, "execute", return_value="⚠️ Could not read record."):
+            out = await self.run_dive(model)
+        self.assertEqual(out["tools_used"], {})
+        self.assertTrue(any("attempted 1" in x for x in out["limits"]))
+
     async def test_a_write_it_asks_for_anyway_is_refused_not_executed(self):
         """Two layers on purpose. Reaching here means something changed upstream; the loop
         must still refuse rather than run it."""

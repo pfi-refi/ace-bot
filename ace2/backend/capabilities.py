@@ -1492,6 +1492,23 @@ def _deep_dive_schemas() -> list:
     return [dict(t) for t in _tools.TOOLS if t.get("name") in DEEP_DIVE_READS]
 
 
+def _native_read_failed(text: str) -> bool:
+    """Native reads wrap failures; quoted source vocabulary is not transport status.
+
+    A dossier may discuss an error, a denied request, or permissions. The broad MCP
+    prose detector must not turn that successfully retrieved evidence into a failed read.
+    This classifier is only used for read-only native tools, never write verification.
+    """
+    value = str(text or "").strip()
+    if not value or value == "(no content returned)" or value.startswith("⚠"):
+        return True
+    try:
+        data = json.loads(value)
+    except (TypeError, ValueError):
+        return value.lower().startswith(("error:", "traceback (most recent call last):"))
+    return isinstance(data, dict) and any(data.get(k) for k in ("error", "errors", "isError", "err"))
+
+
 def _recent_direct_updates(turns, max_chars=6000):
     """Keep newest direct corrections, including the END of an oversized voice update."""
     selected = []
@@ -1731,7 +1748,7 @@ async def deep_dive(args: dict, call, progress=None, known=None,
                         timeout=max(.01, min(12, deadline - _time.monotonic())))
                 except Exception as e:
                     out = f"⚠️ {name} failed with {type(e).__name__}."
-                if not _looks_like_error(out):
+                if not _native_read_failed(out):
                     used[name] = _today_iso()
             results.append({"type": "tool_result", "tool_use_id": getattr(b, "id", ""),
                             "content": out})
@@ -1766,7 +1783,9 @@ async def deep_dive(args: dict, call, progress=None, known=None,
     if budget_hit:
         limits.append("I ran out of the reads this deep dive gets, so it is built on what I "
                       "had by then — check anything time-critical before acting on it.")
-    if scope == "personal" and not used:
+    if scope == "personal" and not used and reads_run:
+        limits.append(f"I attempted {reads_run} additional read(s), but none returned verified evidence.")
+    elif scope == "personal" and not used:
         limits.append("I used the board, calendar and memory context" +
                       (" plus the budget source" if budget_checked else "") +
                       "; no additional tool reads ran.")
